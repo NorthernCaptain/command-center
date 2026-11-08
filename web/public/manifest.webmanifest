@@ -1,0 +1,25 @@
+{
+    "name": "Command Center",
+    "short_name": "Command",
+    "description": "Local command center for tasks, artifacts and agents.",
+    "start_url": "/",
+    "scope": "/",
+    "display": "standalone",
+    "orientation": "any",
+    "background_color": "#0c0e12",
+    "theme_color": "#0c0e12",
+    "icons": [
+        {
+            "src": "/icon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any"
+        },
+        {
+            "src": "/icon-maskable.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "maskable"
+        }
+    ]
+}

@@ -1,0 +1,36 @@
+{
+    "publicBaseUrl": "https://my-mac.tail0000.ts.net:8443",
+    "owner": { "tailscaleLogin": "you@example.com" },
+    "tasksDir": "/Users/you/work/command-center-data",
+    "treeDir": "/Users/you/work/tree",
+    "git": {
+        "branch": "main",
+        "authorName": "Your Name",
+        "authorEmail": "you@example.com"
+    },
+    "github": {
+        "org": "your-github-org",
+        "actionableBots": ["your-review-bot"]
+    },
+    "asana": {
+        "projectGid": "1111111111111111",
+        "assigneeGid": "2222222222222222",
+        "workspaceGid": "3333333333",
+        "statusField": {
+            "gid": "4444444444444400",
+            "options": {
+                "initial": "4444444444444401",
+                "in_progress": "4444444444444402",
+                "code_review": "4444444444444403",
+                "released": "4444444444444404",
+                "cancelled": "4444444444444405"
+            }
+        }
+    },
+    "brain": { "serverName": "your-brain-mcp" },
+    "center": {
+        "areaRepos": { "batch": "your-batch-repo", "web": "your-web-repo" }
+    },
+    "review": { "archiveDir": "/Users/you/work/review/reviews" },
+    "push": { "subject": "mailto:you@example.com" }
+}
