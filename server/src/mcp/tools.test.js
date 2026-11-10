@@ -476,6 +476,183 @@ describe("cc_add_link: branch", () => {
     })
 })
 
+describe("cc_add_link: branch of a claimed PR", () => {
+    const owning = () =>
+        makeDeps({
+            prWatcher: {
+                claim: jest.fn(),
+                roundResolved: jest.fn(),
+                ownsBranch: jest.fn(
+                    (taskId, repo, branch) =>
+                        taskId === id &&
+                        repo === "aws-lambda" &&
+                        branch === "fix/existing"
+                ),
+            },
+        })
+
+    test("the head of a claimed PR skips the remote check and clears the conflict flag", async () => {
+        const d = owning()
+        const t = createAgentTools(d)
+        await store.updateTask(
+            id,
+            {
+                flags: {
+                    now: true,
+                    now_reason: "Branch conflict: fix/existing in aws-lambda",
+                },
+            },
+            { actor: "me" }
+        )
+        const r = await t.cc_add_link({
+            task_id: id,
+            type: "branch",
+            url: "fix/existing",
+            repo: "aws-lambda",
+        })
+        expect(r).toMatchObject({ ok: true, branch: "fix/existing" })
+        expect(d.identity.checkBranch).not.toHaveBeenCalled()
+        const task = await getTask()
+        expect(task.branch).toBe("fix/existing")
+        expect(task.deliverables[0].branch).toBe("fix/existing")
+        expect(task.flags).toMatchObject({ now: false, now_reason: null })
+    })
+
+    test("other branches still go through the checks; other flags stay", async () => {
+        const d = owning()
+        const t = createAgentTools(d)
+        await store.updateTask(
+            id,
+            { flags: { now: true, now_reason: "Ready for PR" } },
+            { actor: "me" }
+        )
+        await t.cc_add_link({
+            task_id: id,
+            type: "branch",
+            url: "fix/other",
+            repo: "aws-lambda",
+        })
+        expect(d.identity.checkBranch).toHaveBeenCalledWith(
+            "aws-lambda",
+            "fix/other",
+            id
+        )
+        expect((await getTask()).flags.now_reason).toBe("Ready for PR")
+    })
+
+    test("a conflict flag for another repo stays", async () => {
+        await store.updateTask(
+            id,
+            {
+                flags: {
+                    now: true,
+                    now_reason: "Branch conflict: x in infrastructure",
+                },
+            },
+            { actor: "me" }
+        )
+        await tools.cc_add_link({
+            task_id: id,
+            type: "branch",
+            url: "fix/ok",
+            repo: "aws-lambda",
+        })
+        expect((await getTask()).flags.now_reason).toBe(
+            "Branch conflict: x in infrastructure"
+        )
+    })
+
+    test("folder with a different branch moves the existing deliverable", async () => {
+        const d = owning()
+        const t = createAgentTools(d)
+        await store.updateTask(
+            id,
+            {
+                flags: {
+                    now: true,
+                    now_reason: "Branch conflict: fix/existing in aws-lambda",
+                },
+            },
+            { actor: "me" }
+        )
+        const r = await t.cc_add_link({
+            task_id: id,
+            type: "folder",
+            url: `/Users/me/work/tree/aws-lambda--${BRANCH}--k7q2`,
+            role: "work",
+            branch: "fix/existing",
+        })
+        expect(r.ok).toBe(true)
+        expect(r.deliverable.branch).toBe("fix/existing")
+        const task = await getTask()
+        expect(task.deliverables).toHaveLength(1)
+        expect(task.deliverables[0].branch).toBe("fix/existing")
+        expect(task.branch).toBe("fix/existing")
+        expect(task.flags.now).toBe(false)
+    })
+
+    test("folder with the deliverable's branch clears that repo's conflict", async () => {
+        await store.updateTask(
+            id,
+            {
+                flags: {
+                    now: true,
+                    now_reason: `Branch conflict: ${BRANCH} in aws-lambda`,
+                },
+            },
+            { actor: "me" }
+        )
+        const r = await tools.cc_add_link({
+            task_id: id,
+            type: "folder",
+            url: `/Users/me/work/tree/aws-lambda--${BRANCH}--k7q2`,
+            role: "work",
+            branch: BRANCH,
+        })
+        expect(r.ok).toBe(true)
+        expect(deps.identity.checkBranch).not.toHaveBeenCalled()
+        expect((await getTask()).flags.now).toBe(false)
+    })
+
+    test("folder with a rejected branch flags and leaves the deliverable", async () => {
+        deps.identity.checkBranch.mockResolvedValueOnce({
+            ok: false,
+            reason: "exists on remote",
+            suggestion: "t1-x",
+        })
+        const r = await tools.cc_add_link({
+            task_id: id,
+            type: "folder",
+            url: `/Users/me/work/tree/aws-lambda--${BRANCH}--k7q2`,
+            role: "work",
+            branch: "fix/taken",
+        })
+        expect(r).toEqual({
+            ok: false,
+            conflict: "exists on remote",
+            suggestion: "t1-x",
+        })
+        const task = await getTask()
+        expect(task.deliverables[0].branch).toBe(BRANCH)
+        expect(task.flags.now_reason).toBe(
+            "Branch conflict: fix/taken in aws-lambda"
+        )
+        expect(task.links).toEqual([])
+    })
+
+    test("folder with the same branch runs no checks", async () => {
+        const r = await tools.cc_add_link({
+            task_id: id,
+            type: "folder",
+            url: `/Users/me/work/tree/aws-lambda--${BRANCH}--k7q2`,
+            role: "work",
+            branch: BRANCH,
+        })
+        expect(r.ok).toBe(true)
+        expect(deps.identity.checkBranch).not.toHaveBeenCalled()
+    })
+})
+
 describe("cc_add_link: folder", () => {
     test("work folder adds a deliverable and promotes the repo", async () => {
         const folder = `/Users/me/work/tree/infrastructure--${BRANCH}--k7q2/`

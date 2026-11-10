@@ -967,6 +967,75 @@ describe("discovery and claims", () => {
         })
         expect(watcher.candidates(1)).toEqual([])
         expect((await eventsOf("pr_claimed"))[0].actor).toBe("agent:t1-fix")
+        // the deliverable moves to the PR's head branch; with no main repo
+        // recorded, task.branch stays
+        const t = await getTask()
+        expect(t.deliverables[0].branch).toBe("feat/someone-else")
+        expect(t.branch).toBe("t1-fix")
+        expect(watcher.ownsBranch(1, REPO, "feat/someone-else")).toBe(true)
+        expect(
+            watcher.ownsBranch("1", REPO.toUpperCase(), "feat/someone-else")
+        ).toBe(true)
+        expect(watcher.ownsBranch(1, REPO, "t1-fix")).toBe(false)
+        expect(watcher.ownsBranch(2, REPO, "feat/someone-else")).toBe(false)
+    })
+
+    test("claim on another branch in the main repo moves task.branch", async () => {
+        const { gh, watcher } = await setup()
+        await store.updateTask(
+            1,
+            { repos: [{ name: REPO, role: "main" }] },
+            { actor: "me" }
+        )
+        gh.prs[`${REPO}#812`] = fullPr({ headRefName: "feat/x" })
+        expect((await watcher.claim(1, PR_URL, { manual: true })).ok).toBe(true)
+        const t = await getTask()
+        expect(t.branch).toBe("feat/x")
+        expect(t.deliverables[0].branch).toBe("feat/x")
+    })
+
+    test("claim of the conflicting branch's PR clears the conflict flag", async () => {
+        const { gh, watcher } = await setup({ status: "active" })
+        const flagged = (now_reason) =>
+            store.updateTask(
+                1,
+                { flags: { now: true, now_reason } },
+                { actor: "me" }
+            )
+        await flagged(`Branch conflict: feat/x in ${REPO}`)
+        gh.prs[`${REPO}#812`] = fullPr({ headRefName: "feat/x" })
+        expect((await watcher.claim(1, PR_URL, { reported: true })).ok).toBe(
+            true
+        )
+        expect((await getTask()).flags).toMatchObject({ now: false })
+    })
+
+    test("a conflict on another branch stays after a claim", async () => {
+        const { gh, watcher } = await setup({ status: "active" })
+        await store.updateTask(
+            1,
+            {
+                flags: {
+                    now: true,
+                    now_reason: `Branch conflict: other in ${REPO}`,
+                },
+            },
+            { actor: "me" }
+        )
+        gh.prs[`${REPO}#812`] = fullPr({ headRefName: "feat/x" })
+        expect((await watcher.claim(1, PR_URL, { reported: true })).ok).toBe(
+            true
+        )
+        expect((await getTask()).flags.now_reason).toBe(
+            `Branch conflict: other in ${REPO}`
+        )
+    })
+
+    test("claim on the task branch keeps the branch", async () => {
+        const { gh, watcher } = await setup()
+        gh.prs[`${REPO}#812`] = fullPr({ headRefName: undefined })
+        expect((await watcher.claim(1, PR_URL, { manual: true })).ok).toBe(true)
+        expect((await getTask()).deliverables[0].branch).toBe("t1-fix")
     })
 
     test("agent-reported PR from a fork is refused", async () => {

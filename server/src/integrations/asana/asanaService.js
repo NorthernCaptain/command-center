@@ -211,6 +211,80 @@ export function createAsanaService({
         return { have, failed }
     }
 
+    /** "https://github.com/<org>/<repo>/tree/<branch>" -> { repo, branch }. */
+    function parseBranchUrl(url) {
+        const m = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/(.+)$/.exec(
+            String(url)
+        )
+        if (!m || !githubOrg || m[1].toLowerCase() !== githubOrg.toLowerCase())
+            return null
+        try {
+            return {
+                repo: decodeURIComponent(m[2]),
+                branch: m[3].split("/").map(decodeURIComponent).join("/"),
+            }
+        } catch {
+            return null
+        }
+    }
+
+    /**
+     * Remove branch links this service attached that the task no longer
+     * shows (a deliverable moved to its PR's branch, so the old one was
+     * never pushed). Only "<repo> @ <branch>" GitHub tree links for the
+     * task's own repos are touched; other attachments, including links Leo
+     * or a teammate added, stay. A link no longer on the Asana task is just
+     * forgotten.
+     * @returns {Promise<{ have: string[], failed: string[] }>}
+     */
+    async function removeStaleBranches(gid, task, have) {
+        const want = new Set(desiredAttachments(task).map((x) => x.url))
+        const repos = new Set([
+            ...(task.repos || []).map((r) => r && r.name),
+            ...(task.deliverables || []).map((d) => d && d.repo),
+        ])
+        const stale = new Map()
+        for (const url of have) {
+            if (want.has(url)) continue
+            const ref = parseBranchUrl(url)
+            if (ref && repos.has(ref.repo))
+                stale.set(url, `${ref.repo} @ ${ref.branch}`)
+        }
+        if (!stale.size) return { have, failed: [] }
+        let items
+        try {
+            items = await client.list("/attachments", {
+                query: { parent: gid, opt_fields: "name,view_url" },
+            })
+        } catch (err) {
+            log?.warn?.({ gid, err: err?.message }, "asana attachments list")
+            // retry the cleanup on the next sync
+            return { have, failed: [...stale.keys()] }
+        }
+        const gone = new Set()
+        const failed = []
+        for (const [url, name] of stale) {
+            const ours = (items || []).filter(
+                (i) => i && i.view_url === url && i.name === name
+            )
+            let ok = true
+            for (const item of ours) {
+                try {
+                    await client.request("DELETE", `/attachments/${item.gid}`)
+                } catch (err) {
+                    ok = false
+                    log?.warn?.(
+                        { gid, url, err: err?.message },
+                        "asana attachment delete failed"
+                    )
+                }
+            }
+            if (ok) gone.add(url)
+            else failed.push(url)
+        }
+        return { have: have.filter((u) => !gone.has(u)), failed }
+    }
+
     function trackingBlock(task, marker = null) {
         return buildTrackingBlockHtml({
             task,
@@ -409,8 +483,12 @@ export function createAsanaService({
         }
         if (Object.keys(body).length)
             await client.request("PUT", `/tasks/${gid}`, { body })
-        const { have, failed } = await addAttachments(gid, task)
-        return { attachments: have, failed }
+        const added = await addAttachments(gid, task)
+        const removed = await removeStaleBranches(gid, task, added.have)
+        return {
+            attachments: removed.have,
+            failed: [...added.failed, ...removed.failed],
+        }
     }
 
     async function comment(gid, text) {

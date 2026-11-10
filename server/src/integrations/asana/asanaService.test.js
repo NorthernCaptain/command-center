@@ -417,6 +417,110 @@ describe("syncTracking", () => {
         ])
     })
 
+    describe("stale branch links", () => {
+        const OLD = "https://github.com/acme/aws-lambda/tree/t123-old"
+        const NEW = "https://github.com/acme/aws-lambda/tree/t123-fix"
+        const PRU = "https://github.com/acme/aws-lambda/pull/812"
+        const make = (handlers) => {
+            const client = fakeClient({
+                "GET /tasks/555": { html_notes: "<body>X</body>" },
+                "PUT /tasks/555": {},
+                "POST /attachments": {},
+                ...handlers,
+            })
+            const svc = createAsanaService({
+                githubOrg: "acme",
+                client,
+                config: CONFIG,
+                timeZone: "UTC",
+            })
+            return { client, svc }
+        }
+        const t = (attachments) => task({ asana: { gid: "555", attachments } })
+        const deletes = (client) =>
+            client.calls.filter((c) => c.method === "DELETE")
+
+        test("deletes our link for a branch the task moved off", async () => {
+            const { client, svc } = make({
+                "LIST /attachments": [
+                    { gid: "a1", name: "aws-lambda @ t123-old", view_url: OLD },
+                    { gid: "a2", name: "aws-lambda @ t123-fix", view_url: NEW },
+                ],
+                "DELETE /attachments/a1": {},
+            })
+            const out = await svc.syncTracking(t([OLD, NEW, PRU]))
+            expect(deletes(client).map((c) => c.path)).toEqual([
+                "/attachments/a1",
+            ])
+            expect(out).toEqual({ attachments: [NEW, PRU], failed: [] })
+        })
+
+        test("keeps attachments it did not make", async () => {
+            const OTHER_ORG = "https://github.com/else/aws-lambda/tree/x"
+            const OTHER_REPO = "https://github.com/acme/web/tree/x"
+            const { client, svc } = make({
+                "LIST /attachments": [
+                    { gid: "a1", name: "Leo's link", view_url: OLD },
+                ],
+            })
+            const out = await svc.syncTracking(
+                t([OLD, NEW, PRU, OTHER_ORG, OTHER_REPO, "https://h/t/1"])
+            )
+            expect(deletes(client)).toEqual([])
+            // the name does not match ours: forgotten, not deleted
+            expect(out.attachments).toEqual([
+                NEW,
+                PRU,
+                OTHER_ORG,
+                OTHER_REPO,
+                "https://h/t/1",
+            ])
+        })
+
+        test("no listing when nothing is stale", async () => {
+            const { client, svc } = make({})
+            await svc.syncTracking(t([NEW, PRU]))
+            expect(client.lists).toEqual([])
+        })
+
+        test("a failed delete is retried; a failed listing keeps the list", async () => {
+            const { svc } = make({
+                "LIST /attachments": [
+                    { gid: "a1", name: "aws-lambda @ t123-old", view_url: OLD },
+                ],
+                "DELETE /attachments/a1": () => {
+                    throw new Error("boom")
+                },
+            })
+            expect(await svc.syncTracking(t([OLD, NEW, PRU]))).toEqual({
+                attachments: [OLD, NEW, PRU],
+                failed: [OLD],
+            })
+            const { client, svc: svc2 } = make({})
+            client.list.mockRejectedValueOnce(new Error("down"))
+            expect(await svc2.syncTracking(t([OLD, NEW, PRU]))).toEqual({
+                attachments: [OLD, NEW, PRU],
+                failed: [OLD],
+            })
+        })
+
+        test("decodes branch names and ignores malformed URLs", async () => {
+            const SLASH = "https://github.com/acme/aws-lambda/tree/fix/a%20b"
+            const BAD = "https://github.com/acme/aws-lambda/tree/%E0%A4%A"
+            const { client, svc } = make({
+                "LIST /attachments": [
+                    { gid: "s", name: "aws-lambda @ fix/a b", view_url: SLASH },
+                ],
+                "DELETE /attachments/s": {},
+            })
+            const out = await svc.syncTracking(t([SLASH, BAD, NEW, PRU]))
+            expect(deletes(client).map((c) => c.path)).toEqual([
+                "/attachments/s",
+            ])
+            expect(out.attachments).toEqual([BAD, NEW, PRU])
+        })
+    })
+
     test("no PUT when the block is unchanged", async () => {
         const svc0 = createAsanaService({
             githubOrg: "acme",

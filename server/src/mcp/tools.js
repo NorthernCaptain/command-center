@@ -399,29 +399,67 @@ export function createAgentTools({
         return { revision: res.revision, line }
     }
 
+    const conflictPrefix = "Branch conflict: "
+
+    /**
+     * Check a branch for repo: the head of a PR this task has claimed is
+     * accepted as is (it exists on the remote by definition); anything else
+     * goes through identity.checkBranch. -> { ok:true } | { ok:false,
+     * conflict, suggestion }.
+     */
+    async function acceptBranch(taskId, repo, branch) {
+        if (
+            prWatcher &&
+            typeof prWatcher.ownsBranch === "function" &&
+            prWatcher.ownsBranch(taskId, repo, branch)
+        )
+            return { ok: true }
+        if (!identity) throw unavailable("branch checks")
+        const check = await identity.checkBranch(repo, branch, taskId)
+        if (check && check.ok) return { ok: true }
+        return {
+            ok: false,
+            conflict: (check && check.reason) || "branch rejected",
+            suggestion: (check && check.suggestion) || null,
+        }
+    }
+
+    /** Raise Now for a rejected branch. */
+    function flagConflict(taskId, repo, branch, conflict, actor) {
+        return store.updateTask(
+            taskId,
+            { flags: nowFlags(`${conflictPrefix}${branch} in ${repo}`) },
+            { actor, reason: `branch conflict: ${conflict}` }
+        )
+    }
+
+    /**
+     * Flags patch clearing a "Branch conflict: … in <repo>" Now flag once a
+     * branch for that repo is accepted; null when the flag is something else.
+     */
+    function clearConflict(task, repo) {
+        const reason = (task.flags && task.flags.now_reason) || ""
+        return reason.startsWith(conflictPrefix) &&
+            reason.endsWith(` in ${repo}`)
+            ? { now: false, now_reason: null }
+            : null
+    }
+
     async function addBranch(a, taskId, actor) {
         if (!a.repo)
             throw new ValidationError("repo is required for type=branch")
         if (!BRANCH_RE.test(a.url))
             throw new ValidationError("invalid branch name", { branch: a.url })
-        if (!identity) throw unavailable("branch checks")
-        const check = await identity.checkBranch(a.repo, a.url, taskId)
-        if (!check || !check.ok) {
-            const reason = (check && check.reason) || "branch rejected"
-            await store.updateTask(
-                taskId,
-                { flags: nowFlags(`Branch conflict: ${a.url} in ${a.repo}`) },
-                { actor, reason: `branch conflict: ${reason}` }
-            )
-            return {
-                ok: false,
-                conflict: reason,
-                suggestion: (check && check.suggestion) || null,
-            }
+        const check = await acceptBranch(taskId, a.repo, a.url)
+        if (!check.ok) {
+            await flagConflict(taskId, a.repo, a.url, check.conflict, actor)
+            return check
         }
         return locked(taskId, async () => {
             const { task } = await store.getTask(taskId)
             const patch = {}
+            const cleared = clearConflict(task, a.repo)
+            if (cleared) patch.flags = cleared
             if (a.repo === mainRepoOf(task)) patch.branch = a.url
             const deliverables = task.deliverables || []
             if (deliverables.some((d) => d.repo === a.repo))
@@ -503,14 +541,8 @@ export function createAgentTools({
                 "no branch known for this work folder; pass branch=<the branch checked out there>"
             )
         if (branch !== registered) {
-            if (!identity) throw unavailable("branch checks")
-            const check = await identity.checkBranch(repo, branch, taskId)
-            if (!check || !check.ok)
-                return {
-                    branch,
-                    conflict: (check && check.reason) || "branch rejected",
-                    suggestion: (check && check.suggestion) || null,
-                }
+            const check = await acceptBranch(taskId, repo, branch)
+            if (!check.ok) return { branch, ...check }
         }
         return { branch }
     }
@@ -529,17 +561,45 @@ export function createAgentTools({
                     )
                 const deliverables = task.deliverables || []
                 deliverable = deliverables.find((d) => d.repo === repo) || null
+                if (
+                    deliverable &&
+                    a.branch &&
+                    a.branch !== deliverable.branch
+                ) {
+                    // The agent names the branch checked out there: move the
+                    // deliverable to it (same checks as type=branch).
+                    const check = await acceptBranch(taskId, repo, a.branch)
+                    if (!check.ok) {
+                        await flagConflict(
+                            taskId,
+                            repo,
+                            a.branch,
+                            check.conflict,
+                            actor
+                        )
+                        return check
+                    }
+                    deliverable = { ...deliverable, branch: a.branch }
+                    patch.deliverables = deliverables.map((d) =>
+                        d.repo === repo ? deliverable : d
+                    )
+                    if (repo === mainRepoOf(task)) patch.branch = a.branch
+                }
+                // The branch named is the deliverable's (moved just now, or
+                // already by a PR claim): a conflict for the repo is over.
+                if (deliverable && a.branch) {
+                    const cleared = clearConflict(task, repo)
+                    if (cleared) patch.flags = cleared
+                }
                 if (!deliverable) {
                     const wb = await workBranch(a, task, repo, parsed, taskId)
                     if (wb.conflict) {
-                        await store.updateTask(
+                        await flagConflict(
                             taskId,
-                            {
-                                flags: nowFlags(
-                                    `Branch conflict: ${wb.branch} in ${repo}`
-                                ),
-                            },
-                            { actor, reason: `branch conflict: ${wb.conflict}` }
+                            repo,
+                            wb.branch,
+                            wb.conflict,
+                            actor
                         )
                         return {
                             ok: false,
@@ -559,6 +619,8 @@ export function createAgentTools({
                         merged_at: null,
                     }
                     patch.deliverables = [...deliverables, deliverable]
+                    const cleared = clearConflict(task, repo)
+                    if (cleared) patch.flags = cleared
                 }
                 const repos = task.repos || []
                 const ref = repos.find((r) => r.name === repo)

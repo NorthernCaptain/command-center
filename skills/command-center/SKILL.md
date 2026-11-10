@@ -40,6 +40,11 @@ other task is rejected with `wrong_task`.
    `cc_add_link(type="branch", repo, url=<branch>)` **before** creating it.
    Use it only if the answer is `ok: true`. On `ok: false` take the
    `suggestion` (or ask Leo). Never create a conflicting branch.
+   Working on an **existing PR** (someone's branch, e.g. addressing its
+   review)? Register the PR with `cc_add_link(type="pr", url)` as soon as
+   you know it. That claims it and moves the deliverable to the PR's head
+   branch, so the branch needs no `type="branch"` registration (which would
+   refuse it: it already exists on GitHub).
 5. Another repo needs changes too (alongside the main one)? Clone it on the
    task branch, or re-register its `ref` folder, with `role="work"` (this
    adds a deliverable). No need to ask. Ask first only if the main repo

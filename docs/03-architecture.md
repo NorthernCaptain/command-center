@@ -395,6 +395,14 @@ branch (addressing review on someone's PR, say). It must still be in
 not be claimed by another task. Only claimed PRs count toward deliverables,
 Asana comments and closing.
 
+A claimed PR on another branch (agent-reported or manual) moves the
+deliverable, and `task.branch` when it is the main repo, onto the PR's head
+branch. Registering that branch afterwards (`type:"branch"`, or a work
+folder with `branch`) is accepted without the remote check, and clears a
+"Branch conflict: … in <repo>" Now flag. The Asana sync then removes the
+`<repo> @ <old branch>` link it had attached; links with any other name
+are left alone.
+
 ### Follow-up fires
 The scheduler picks `schedules` where `fire_at <= now`:
 - `surface`: back to the Now lane, with a notification.

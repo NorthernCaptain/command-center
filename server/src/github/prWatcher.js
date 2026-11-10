@@ -569,6 +569,20 @@ export function createPrWatcher({
         candidateMap.get(taskId).set(repo, list)
     }
 
+    /** The task's main repo (role main, else the first). */
+    function isMainRepo(task, repo) {
+        const repos = task.repos || []
+        const main = repos.find((r) => r.role === "main") || repos[0]
+        return Boolean(main && same(main.name, repo))
+    }
+
+    /** True when this task holds a PR claim in repo whose head is branch. */
+    function ownsBranch(taskId, repo, branch) {
+        return claims
+            .claimsForTask(Number(taskId))
+            .some((c) => same(c.repo, repo) && c.branch === branch)
+    }
+
     /** Record a claim: pr_claims, deliverable, link, status, pr_watch. */
     async function applyClaim(taskId, repo, pr, { manual, actor }) {
         const res = claims.claim({
@@ -593,10 +607,18 @@ export function createPrWatcher({
             taskId,
             (task) => {
                 gid = task.asana && task.asana.gid
+                // A claimed PR on another branch (an agent working on an
+                // existing PR, or Leo's manual claim) moves the deliverable
+                // onto the PR's head branch: that is the branch pushed.
+                const head = pr.headRefName || null
+                let movedFrom = null
                 const deliverables = task.deliverables.map((d) =>
                     same(d.repo, repo)
                         ? (deliverable = {
                               ...d,
+                              ...(head && head !== d.branch
+                                  ? ((movedFrom = d.branch), { branch: head })
+                                  : {}),
                               disposition: "pr",
                               pr: pr.url,
                               claimed_at: at,
@@ -618,6 +640,21 @@ export function createPrWatcher({
                         at,
                     })
                 const patch = { deliverables, links }
+                if (
+                    movedFrom &&
+                    task.branch === movedFrom &&
+                    isMainRepo(task, repo)
+                )
+                    patch.branch = head
+                // The branch that was refused as taken is this PR's head:
+                // the conflict is resolved by the claim.
+                if (
+                    head &&
+                    task.flags &&
+                    task.flags.now_reason ===
+                        `Branch conflict: ${head} in ${repo}`
+                )
+                    patch.flags = { now: false, now_reason: null }
                 if (task.status === "ready_for_pr") patch.status = "pr_open"
                 // Every deliverable has its PR (or needs none): the "Ready
                 // for PR" ask is done. Other Now reasons stay.
@@ -1809,6 +1846,7 @@ export function createPrWatcher({
         pollTask,
         pollAll,
         claim,
+        ownsBranch,
         setNoChange,
         reopenItem,
         roundResolved,
