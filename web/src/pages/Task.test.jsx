@@ -2096,6 +2096,23 @@ describe("Task page: Slack thread notice", () => {
         await click("server down")
     })
 
+    it("dismisses the warning", async () => {
+        let current = notice()
+        const f = mockFetch({
+            "GET /api/tasks/12": () => response(current),
+            "POST /api/tasks/12/slack-notice/dismiss": () => {
+                current = notice({ status: "dismissed" })
+                return { result: { dismissed: true }, slack_notice: current }
+            },
+        })
+        renderWithApp(<TaskPage id={12} />)
+        fireEvent.click(await screen.findByRole("button", { name: "Dismiss" }))
+        await waitFor(() => expect(screen.queryByRole("alert")).toBeNull())
+        expect(
+            f.find("POST", "/api/tasks/12/slack-notice/dismiss")
+        ).toHaveLength(1)
+    })
+
     it("no notice for viewers or tasks without one; the Now line stays", async () => {
         mockFetch({
             "GET /api/tasks/12": response(null, {

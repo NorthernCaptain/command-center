@@ -8,6 +8,7 @@ import {
     createBrainClient,
     extractJobId,
     normalizeJobResult,
+    brainOutput,
     normalizeStatus,
 } from "./brainClient.js"
 
@@ -381,6 +382,43 @@ describe("normalizeJobResult", () => {
             phase: null,
             error: "status: failed\nreason: crashed",
         })
+    })
+
+    test("Brain's own words out of the output markers, and the transcript", () => {
+        const raw = [
+            "Brain job j_1",
+            "status: done",
+            "tool calls: 9",
+            "transcript (Brain admins): https://brain.example.com/chat/1",
+            "",
+            "Everything between the two markers tagged ab12 below was written by Brain's model ...",
+            "<<<BRAIN OUTPUT ab12 (untrusted)>>>",
+            "title: cc T-16 Asana link to Slack",
+            "RESULT: NOT POSTED - Slack returned `not_in_channel`.",
+            "<<<END BRAIN OUTPUT ab12>>>",
+        ].join("\n")
+        expect(normalizeJobResult(text(raw))).toEqual({
+            status: "done",
+            answer: "RESULT: NOT POSTED - Slack returned `not_in_channel`.",
+            phase: null,
+            error: null,
+            transcript: "https://brain.example.com/chat/1",
+        })
+        const failed = raw.replace("status: done", "status: failed")
+        expect(normalizeJobResult(text(failed)).error).toBe(
+            "RESULT: NOT POSTED - Slack returned `not_in_channel`."
+        )
+        // only a title, a mismatched tag, nothing at all
+        expect(
+            brainOutput(
+                "<<<BRAIN OUTPUT x1>>>\ntitle: t\n<<<END BRAIN OUTPUT x1>>>"
+            )
+        ).toEqual({ output: null, transcript: null })
+        expect(
+            brainOutput("<<<BRAIN OUTPUT x1>>>\nhi\n<<<END BRAIN OUTPUT y2>>>")
+                .output
+        ).toBeNull()
+        expect(brainOutput(null)).toEqual({ output: null, transcript: null })
     })
 
     test("text without a status field", () => {

@@ -942,6 +942,44 @@ describe("discovery and claims", () => {
         expect(res.ok).toBe(true)
         expect((await eventsOf("pr_claimed"))[0].actor).toBe("agent:t1-fix")
     })
+
+    test("agent-reported PR on another branch is claimed", async () => {
+        const { gh, watcher, claims } = await setup()
+        gh.prs[`${REPO}#812`] = fullPr({
+            headRefName: "feat/someone-else",
+            createdAt: "2026-10-01T00:00:00Z",
+            body: "no marker",
+        })
+        // the discovery checks refuse it
+        expect(await watcher.claim(1, PR_URL)).toEqual({
+            ok: false,
+            reason: "branch_mismatch",
+        })
+        const res = await watcher.claim(1, PR_URL, {
+            reported: true,
+            actor: "agent:t1-fix",
+        })
+        expect(res.ok).toBe(true)
+        expect(res.deliverable).toMatchObject({ pr: PR_URL, disposition: "pr" })
+        expect(claims.claimOf(PR_URL)).toMatchObject({
+            branch: "feat/someone-else",
+            manual: false,
+        })
+        expect(watcher.candidates(1)).toEqual([])
+        expect((await eventsOf("pr_claimed"))[0].actor).toBe("agent:t1-fix")
+    })
+
+    test("agent-reported PR from a fork is refused", async () => {
+        const { gh, watcher } = await setup()
+        gh.prs[`${REPO}#812`] = fullPr({ isCrossRepository: true })
+        expect(await watcher.claim(1, PR_URL, { reported: true })).toEqual({
+            ok: false,
+            reason: "foreign_head_repo",
+        })
+        expect(watcher.candidates(1)).toEqual([
+            expect.objectContaining({ reason: "foreign_head_repo" }),
+        ])
+    })
 })
 
 // ---------------------------------------------------------------------------

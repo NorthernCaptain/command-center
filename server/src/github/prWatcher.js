@@ -25,7 +25,7 @@ import { currentRound, feedbackDedupeKey } from "../contracts/feedback.js"
 import { AppError, NotFoundError } from "../util/errors.js"
 import { systemClock } from "../util/clock.js"
 import { nullLogger } from "../util/logger.js"
-import { checkCandidate, parsePrUrl } from "./claims.js"
+import { checkCandidate, checkReported, parsePrUrl } from "./claims.js"
 
 export const POLLED_STATUSES = ["ready_for_pr", "pr_open", "pr_feedback"]
 /**
@@ -1592,8 +1592,16 @@ export function createPrWatcher({
 
     // ---- public operations ---------------------------------------------
 
-    /** Claim a PR URL for a task (agent cc_add_link or Leo's manual claim). */
-    function claim(taskId, url, { manual = false, actor } = {}) {
+    /**
+     * Claim a PR URL for a task. manual: Leo's claim, no PR checks.
+     * reported: the task's agent named the PR (cc_add_link), checkReported.
+     * Otherwise the full discovery checks (checkCandidate).
+     */
+    function claim(
+        taskId,
+        url,
+        { manual = false, reported = false, actor } = {}
+    ) {
         const id = Number(taskId)
         const who = actor || (manual ? "me" : ACTOR)
         return serial(id, async () => {
@@ -1628,7 +1636,7 @@ export function createPrWatcher({
                 }
             }
             if (!manual) {
-                const check = checkCandidate({
+                const check = (reported ? checkReported : checkCandidate)({
                     task,
                     deliverable: d,
                     pr,

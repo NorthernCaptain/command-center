@@ -35,27 +35,53 @@ export function hasTaskMarker(body, taskId) {
 const same = (a, b) =>
     String(a || "").toLowerCase() === String(b || "").toLowerCase()
 
+/** Head is a branch of acme/<repo>, not a fork. */
+function ownHead(pr, deliverable, org) {
+    const head = pr.headRepository || {}
+    return (
+        !pr.isCrossRepository &&
+        same(head.owner, org) &&
+        same(head.name, deliverable.repo)
+    )
+}
+
+/** Not already claimed by another task. */
+function claimedElsewhere(pr, task, claims) {
+    const claim = claims.claimOf(pr.url)
+    return Boolean(claim && claim.task_id !== task.id)
+}
+
 /**
  * The four claim checks, in order. Returns the first failure.
  * @returns {{ ok: true } | { ok: false, reason: string }}
  */
 export function checkCandidate({ task, deliverable, pr, claims, org }) {
-    const head = pr.headRepository || {}
     if (pr.headRefName !== deliverable.branch)
         return { ok: false, reason: "branch_mismatch" }
-    if (
-        pr.isCrossRepository ||
-        !same(head.owner, org) ||
-        !same(head.name, deliverable.repo)
-    )
+    if (!ownHead(pr, deliverable, org))
         return { ok: false, reason: "foreign_head_repo" }
     const created = new Date(pr.createdAt).getTime()
     const since = new Date(deliverable.created_at).getTime()
     if (!(created > since)) return { ok: false, reason: "created_before_start" }
     if (!hasTaskMarker(pr.body, task.id))
         return { ok: false, reason: "missing_task_marker" }
-    const claim = claims.claimOf(pr.url)
-    if (claim && claim.task_id !== task.id)
+    if (claimedElsewhere(pr, task, claims))
+        return { ok: false, reason: "claimed_by_other_task" }
+    return { ok: true }
+}
+
+/**
+ * Checks for a PR the task's agent reports itself (cc_add_link type=pr).
+ * The agent names the PR, so the discovery checks that guard against a
+ * look-alike branch (branch name, created after start, task marker) do not
+ * apply: a task may work on an existing PR on another branch. The head must
+ * still be in the org's repo and the PR not owned by another task.
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+export function checkReported({ task, deliverable, pr, claims, org }) {
+    if (!ownHead(pr, deliverable, org))
+        return { ok: false, reason: "foreign_head_repo" }
+    if (claimedElsewhere(pr, task, claims))
         return { ok: false, reason: "claimed_by_other_task" }
     return { ok: true }
 }

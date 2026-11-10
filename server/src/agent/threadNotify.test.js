@@ -7,6 +7,7 @@ import { jest } from "@jest/globals"
 import { createFakeStore, makeTask } from "./testing/fakes.js"
 import {
     EV_LINK,
+    EV_DISMISSED,
     EV_LINK_FAILED,
     EV_MISSING,
     EV_RESULT,
@@ -16,6 +17,7 @@ import {
     mountThreadNotice,
     noticeState,
     noticeTaskExtras,
+    reasonOf,
     slackReplyPrompt,
     verdictOf,
 } from "./threadNotify.js"
@@ -97,6 +99,18 @@ describe("prompt, key, verdict", () => {
         expect(p).toMatch(/RESULT: POSTED, or RESULT: NOT POSTED/)
         expect(brainKey(1, "999")).toBe("cc-T1-slack-asana-999")
         expect(brainKey(1, "999", 2)).toBe("cc-T1-slack-asana-999-2")
+    })
+
+    test("reasonOf: the reason of the last NOT POSTED line", () => {
+        expect(
+            reasonOf(
+                "tried.\nRESULT: NOT POSTED - Slack returned not_in_channel"
+            )
+        ).toBe("Slack returned not_in_channel")
+        expect(reasonOf("RESULT: NOT POSTED: no access")).toBe("no access")
+        expect(reasonOf("RESULT: NOT POSTED")).toBeNull()
+        expect(reasonOf("RESULT: POSTED")).toBeNull()
+        expect(reasonOf(null)).toBeNull()
     })
 
     test("verdictOf", () => {
@@ -582,6 +596,102 @@ describe("never tried (older tasks)", () => {
     })
 })
 
+describe("dismiss", () => {
+    test("hides a failed notice, clears its Now flag, keeps it dismissed", async () => {
+        const { notifier, store, brain } = setup({}, { results: [REFUSED] })
+        await notifier.asanaCreated(1)
+        await notifier.settled()
+        expect((await flags(store)).now_reason).toBe(NOTICE_REASON)
+        expect(await notifier.dismiss(1)).toEqual({ dismissed: true })
+        const [ev] = await events(store, EV_DISMISSED)
+        expect(ev).toMatchObject({ data: { gid: "999" }, actor: "me" })
+        const task = async () => (await store.getTask(1)).task
+        expect((await notifier.state(1, await task())).status).toBe("dismissed")
+        expect(await flags(store)).toMatchObject({
+            now: false,
+            now_reason: null,
+        })
+        // the sweep / page view never raises it again
+        await notifier.state(1, await task())
+        expect((await flags(store)).now).toBe(false)
+        // posting anyway is still possible: a new attempt is not dismissed
+        brain.start.mockResolvedValue(JOB2)
+        brain.result.mockResolvedValue({ status: "running" })
+        await notifier.post(1)
+        expect((await notifier.state(1, await task())).status).toBe("pending")
+        await notifier.settled()
+    })
+
+    test("a pending job: a later failure stays quiet, a later post shows", async () => {
+        const { notifier, store, brain } = setup(
+            {},
+            { results: [{ status: "running" }] }
+        )
+        await notifier.asanaCreated(1)
+        await notifier.settled()
+        await notifier.dismiss(1)
+        const task = async () => (await store.getTask(1)).task
+        // the watch finishes with a refusal: no flag
+        brain.result.mockResolvedValue(REFUSED)
+        await notifier.state(1, await task())
+        await notifier.settled()
+        expect((await flags(store)).now).toBe(false)
+        expect((await notifier.state(1, await task())).status).toBe("dismissed")
+        // dismissed while pending, then the watch gave up: still followed,
+        // no second post, and a later success shows
+        const p = setup({}, { results: [{ status: "running" }] })
+        await p.notifier.asanaCreated(1)
+        await p.notifier.settled()
+        await p.notifier.dismiss(1)
+        expect(await p.notifier.post(1)).toEqual({ skipped: "pending" })
+        p.brain.result.mockResolvedValue(POSTED)
+        expect((await p.notifier.check(1)).status).toBe("posted")
+        expect(p.brain.start).toHaveBeenCalledTimes(1)
+        const pt = (await p.store.getTask(1)).task
+        p.brain.result.mockClear()
+        expect((await p.notifier.state(1, pt)).status).toBe("posted")
+        // never tried, dismissed: no flag either
+        const other = setup()
+        await other.notifier.dismiss(1)
+        const t = (await other.store.getTask(1)).task
+        expect((await other.notifier.state(1, t)).status).toBe("dismissed")
+        expect((await other.store.getTask(1)).task.flags.now).toBe(false)
+    })
+
+    test("posted after a dismissal shows as posted; nothing to dismiss", async () => {
+        const ev = [
+            {
+                type: EV_RESULT,
+                at: "3",
+                data: { gid: "999", brain_job: JOB, status: "posted" },
+            },
+            { type: EV_DISMISSED, at: "2", data: { gid: "999" } },
+            { type: EV_LINK, at: "1", data: { gid: "999", brain_job: JOB } },
+        ]
+        const task = {
+            source: { type: "slack", url: THREAD },
+            asana: { gid: "999" },
+        }
+        expect(noticeState(task, ev)).toEqual(
+            expect.objectContaining({ status: "posted", brain_job: JOB })
+        )
+        expect(noticeState(task, ev)).not.toHaveProperty("last")
+        // a dismissal before the latest attempt does not count
+        expect(
+            noticeState(task, [
+                {
+                    type: EV_LINK,
+                    at: "5",
+                    data: { gid: "999", brain_job: JOB2 },
+                },
+                { type: EV_DISMISSED, at: "4", data: { gid: "999" } },
+            ]).status
+        ).toBe("pending")
+        const { notifier } = setup({ source: { type: "manual", url: null } })
+        expect(await notifier.dismiss(1)).toEqual({ skipped: "no_notice" })
+    })
+})
+
 describe("post again and check", () => {
     test("post: a new attempt after a refusal; posted clears the flag", async () => {
         const { notifier, store, brain } = setup({}, { results: [REFUSED] })
@@ -652,6 +762,73 @@ describe("post again and check", () => {
         await n.asanaCreated(1)
         expect(await n.settled()).toEqual([])
         expect((await n.check(1)).status).toBe("pending")
+    })
+})
+
+describe("noticeState: Brain's answer", () => {
+    const task = {
+        source: { type: "slack", url: THREAD },
+        asana: { gid: "999" },
+    }
+    test("an older record with Brain's whole tool text is cleaned up", () => {
+        const raw =
+            "Brain job j_1\nstatus: done\ntranscript (Brain admins): https://brain.example.com/chat/9\n" +
+            "banner\n<<<BRAIN OUTPUT t1 (untrusted)>>>\ntitle: x\nRESULT: NOT POSTED - not_in_channel\n<<<END BRAIN OUTPUT t1>>>"
+        const s = noticeState(task, [
+            {
+                type: EV_RESULT,
+                at: "2",
+                data: {
+                    gid: "999",
+                    brain_job: JOB,
+                    status: "not_posted",
+                    answer: raw,
+                },
+            },
+            { type: EV_LINK, at: "1", data: { gid: "999", brain_job: JOB } },
+        ])
+        expect(s).toMatchObject({
+            answer: "RESULT: NOT POSTED - not_in_channel",
+            reason: "not_in_channel",
+            transcript: "https://brain.example.com/chat/9",
+        })
+    })
+
+    test("a new record keeps the transcript it was given", async () => {
+        const { notifier, store, brain } = setup()
+        brain.result.mockResolvedValue({
+            status: "done",
+            answer: "RESULT: NOT POSTED - no access",
+            transcript: "https://brain.example.com/chat/3",
+        })
+        await notifier.asanaCreated(1)
+        await notifier.settled()
+        const [res] = await events(store, EV_RESULT)
+        expect(res.data.transcript).toBe("https://brain.example.com/chat/3")
+        const s = await notifier.state(1, (await store.getTask(1)).task)
+        expect(s).toMatchObject({
+            reason: "no access",
+            transcript: "https://brain.example.com/chat/3",
+        })
+        // a plain answer: no reason, no transcript
+        const plain = noticeState(task, [
+            {
+                type: EV_RESULT,
+                at: "2",
+                data: {
+                    gid: "999",
+                    brain_job: JOB,
+                    status: "unknown",
+                    answer: "hm",
+                },
+            },
+            { type: EV_LINK, at: "1", data: { gid: "999", brain_job: JOB } },
+        ])
+        expect(plain).toMatchObject({
+            answer: "hm",
+            reason: null,
+            transcript: null,
+        })
     })
 })
 
@@ -733,6 +910,15 @@ describe("routes and task extras", () => {
             r2
         )
         expect(r2.body.slack_notice.status).toBe("not_posted")
+        const r4 = res()
+        await api.routes["/tasks/:id/slack-notice/dismiss"](
+            { params: { id: "1" } },
+            r4
+        )
+        expect(r4.body).toMatchObject({
+            result: { dismissed: true },
+            slack_notice: { status: "dismissed" },
+        })
         await expect(
             api.routes["/tasks/:id/slack-notice"](
                 { params: { id: "1" }, viewer: true },
@@ -747,7 +933,7 @@ describe("routes and task extras", () => {
             { params: { id: "1" } },
             r3
         )
-        expect(r3.body.slack_notice.status).toBe("not_posted")
+        expect(r3.body.slack_notice.status).toBe("dismissed")
     })
 
     test("noticeTaskExtras", async () => {

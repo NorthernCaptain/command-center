@@ -188,6 +188,8 @@ export function createApi({ fetch: fetchImpl, base = "" } = {}) {
         // --- phase 2: PR watcher ----------------------------------------
         pollPrs: (id) => request("POST", `${t(id)}/prs/poll`),
         postSlackNotice: (id) => request("POST", `${t(id)}/slack-notice`),
+        dismissSlackNotice: (id) =>
+            request("POST", `${t(id)}/slack-notice/dismiss`),
         checkSlackNotice: (id) =>
             request("POST", `${t(id)}/slack-notice/check`),
         claimPr: (id, url) => request("POST", `${t(id)}/prs/claim`, { url }),

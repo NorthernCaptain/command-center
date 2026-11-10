@@ -7,6 +7,7 @@ import { openDb } from "../store/db.js"
 import { createFakeClock } from "../util/clock.js"
 import {
     checkCandidate,
+    checkReported,
     createClaims,
     hasTaskMarker,
     parsePrUrl,
@@ -91,6 +92,33 @@ describe("checkCandidate", () => {
         expect(run({ createdAt: null }).reason).toBe("created_before_start")
         expect(run({ body: "no marker" }).reason).toBe("missing_task_marker")
         expect(run({}, claims(8)).reason).toBe("claimed_by_other_task")
+    })
+
+    test("checkReported: an agent's PR may be on another branch", () => {
+        const rep = (pr, c = claims(null)) =>
+            checkReported({
+                task,
+                deliverable,
+                pr: { ...good, ...pr },
+                claims: c,
+                org: "acme",
+            })
+        // existing PR on someone else's branch, no marker, older than start
+        expect(
+            rep({
+                headRefName: "feat/other",
+                createdAt: "2026-10-01T00:00:00Z",
+                body: "",
+            })
+        ).toEqual({ ok: true })
+        expect(rep({ isCrossRepository: true }).reason).toBe(
+            "foreign_head_repo"
+        )
+        expect(
+            rep({ headRepository: { name: "other", owner: "acme" } }).reason
+        ).toBe("foreign_head_repo")
+        expect(rep({}, claims(8)).reason).toBe("claimed_by_other_task")
+        expect(rep({}, claims(7))).toEqual({ ok: true })
     })
 })
 

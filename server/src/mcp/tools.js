@@ -587,7 +587,11 @@ export function createAgentTools({
         if (a.type === "folder") return addFolder(a, taskId, actor)
         if (a.type === "pr") {
             if (!prWatcher) throw unavailable("PR watcher")
-            const res = await prWatcher.claim(taskId, a.url, { manual: false })
+            const res = await prWatcher.claim(taskId, a.url, {
+                manual: false,
+                reported: true,
+                actor,
+            })
             return { ...res }
         }
         return locked(taskId, async () => {

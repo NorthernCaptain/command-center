@@ -318,10 +318,12 @@ export default function TaskPage({ id }) {
     // the Asana link in the task's Slack thread: post (again) / ask Brain now
     async function slackNotice(action) {
         try {
-            const res =
-                action === "check"
-                    ? await api.checkSlackNotice(id)
-                    : await api.postSlackNotice(id)
+            const call = {
+                check: api.checkSlackNotice,
+                dismiss: api.dismissSlackNotice,
+                post: api.postSlackNotice,
+            }[action]
+            const res = await call(id)
             if (res && res.slack_notice !== undefined)
                 setData((prev) => ({ ...prev, slack_notice: res.slack_notice }))
             const r = (res && res.result) || {}
@@ -670,6 +672,7 @@ export default function TaskPage({ id }) {
                 slackNotice={data.slack_notice || null}
                 onSlackPost={() => slackNotice("post")}
                 onSlackCheck={() => slackNotice("check")}
+                onSlackDismiss={() => slackNotice("dismiss")}
             />
 
             <div className="task-body">

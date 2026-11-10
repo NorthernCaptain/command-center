@@ -205,7 +205,10 @@ center agent to Codex at any time, for example when Claude credits run out.
   Now ("Slack thread not told about the Asana task") until it is posted:
   when another reason held Now and was cleared, a sweep (every 10 minutes,
   and on each task page view) raises it again, unless I cleared the flags
-  myself after the notice went wrong.
+  myself after the notice went wrong. **Dismiss** on the warning (I handled
+  it, or do not want it) records `slack_asana_link_dismissed`, hides the
+  notice and takes the task out of Now for it; a later "posted" result
+  still shows and a later failure stays quiet.
 - **Status field:** the project's **Status** custom field follows the task
   status, set on creation and on every sync (only when it differs):
   inbox/ready → **Initial**, active (agent started) → **In progress**,

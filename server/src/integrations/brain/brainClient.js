@@ -118,9 +118,32 @@ function lineField(text, name) {
     return m ? m[1] : null
 }
 
+// brain_job_result text: status lines, a transcript link, a banner, then
+// Brain's own words between <<<BRAIN OUTPUT <tag> (untrusted)>>> markers
+const OUTPUT_RE =
+    /<<<BRAIN OUTPUT ([A-Za-z0-9]+)[^>\n]*>>>\r?\n?([\s\S]*?)\r?\n?<<<END BRAIN OUTPUT \1>>>/
+const TRANSCRIPT_RE = /^\s*transcript[^:\n]*:\s*(https?:\/\/\S+)/im
+
+/**
+ * Brain's own answer out of a brain_job_result text (without its "title:"
+ * line) and the transcript link: { output, transcript }, nulls when absent.
+ */
+export function brainOutput(text) {
+    const t = String(text || "")
+    const m = OUTPUT_RE.exec(t)
+    const tr = TRANSCRIPT_RE.exec(t)
+    const output = m
+        ? m[2].replace(/^\s*title:[^\n]*(\n|$)/i, "").trim() || null
+        : null
+    return { output, transcript: tr ? tr[1] : null }
+}
+
 /**
  * Normalize a brain_job_result tool result.
- * @returns {{ status: "running"|"done"|"failed", answer: string|null, phase: string|null }}
+ * @returns {{ status: "running"|"done"|"failed", answer: string|null,
+ *   phase: string|null, error: string|null, transcript?: string }}
+ * A text result with Brain's output markers answers with Brain's own words
+ * only (not the status lines and the banner around them).
  */
 export function normalizeJobResult(result) {
     const payload = payloadOf(result)
@@ -151,16 +174,18 @@ export function normalizeJobResult(result) {
     if (!status)
         status = result?.isError ? "failed" : text.trim() ? "done" : "running"
     const phase = lineField(text, "phase")
+    const { output, transcript } = brainOutput(text)
     let answer = null
     if (status === "done") {
         const m = /(^|\n)\s*[*_]*answer[*_]*\s*:\s*\n?([\s\S]*)$/i.exec(text)
-        answer = (m ? m[2] : text).trim() || null
+        answer = output || (m ? m[2] : text).trim() || null
     }
     return {
         status,
         answer,
         phase: phase ? phase.toLowerCase() : null,
-        error: status === "failed" ? text.trim() || null : null,
+        error: status === "failed" ? output || text.trim() || null : null,
+        ...(transcript ? { transcript } : {}),
     }
 }
 

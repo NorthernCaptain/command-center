@@ -27,6 +27,7 @@
 //   because of Slack.
 
 import { errMessage } from "./jobs/util.js"
+import { brainOutput } from "../integrations/brain/brainClient.js"
 import { ForbiddenError } from "../util/errors.js"
 import { nullLogger } from "../util/logger.js"
 
@@ -35,6 +36,8 @@ export const EV_LINK_FAILED = "slack_asana_link_failed"
 export const EV_RESULT = "slack_asana_link_result"
 // "never tried" seen for this Asana task: raised the Now flag once
 export const EV_MISSING = "slack_asana_link_missing"
+// Leo dismissed the notice (handled it himself, or does not want it)
+export const EV_DISMISSED = "slack_asana_link_dismissed"
 export const NOTICE_REASON = "Slack thread not told about the Asana task"
 const ACTOR = "center"
 // Brain answers within a minute or two; a parked job can take 30+ minutes
@@ -106,9 +109,28 @@ export function verdictOf(answer) {
  * (newest first): null when it does not apply (no Slack thread or no Asana
  * task), else { status, thread, gid, attempts, brain_job, answer, error,
  * at }. status: missing (never tried) | pending | posted | not_posted |
- * failed | unknown.
+ * failed | unknown | dismissed (Leo dismissed it after the last attempt;
+ * a later "posted" result still shows as posted).
  */
 export function noticeState(task, events) {
+    const s = attemptState(task, events)
+    if (!s) return null
+    const { last, ...state } = s
+    if (state.status === "posted") return state
+    // events are newest first: a dismissal listed before the latest
+    // attempt came after it
+    const list = events || []
+    const dismissed = list.findIndex(
+        (e) =>
+            e && e.type === EV_DISMISSED && e.data && e.data.gid === state.gid
+    )
+    const lastTry = last ? list.indexOf(last) : list.length
+    if (dismissed !== -1 && dismissed < lastTry)
+        return { ...state, status: "dismissed", at: list[dismissed].at }
+    return state
+}
+
+function attemptState(task, events) {
     const src = (task && task.source) || {}
     const gid = task && task.asana && task.asana.gid
     if (src.type !== "slack" || !src.url || !gid) return null
@@ -131,6 +153,7 @@ export function noticeState(task, events) {
     }
     const last = tries[0]
     if (!last) return { ...base, status: "missing" }
+    base.last = last
     if (last.type === EV_LINK_FAILED)
         return {
             ...base,
@@ -144,14 +167,32 @@ export function noticeState(task, events) {
     )
     if (!result)
         return { ...base, status: "pending", brain_job: job, at: last.at }
+    // older records kept Brain's whole tool text: its own words are inside
+    const raw = result.data.answer || null
+    const out = brainOutput(raw)
+    const answer = out.output || raw
     return {
         ...base,
         status: result.data.status,
         brain_job: job,
-        answer: result.data.answer || null,
+        answer,
+        reason: reasonOf(answer),
+        transcript: result.data.transcript || out.transcript || null,
         error: result.data.error || null,
         at: result.at,
     }
+}
+
+/** "RESULT: NOT POSTED - <reason>" (the last such line) -> the reason. */
+export function reasonOf(answer) {
+    const lines = String(answer || "")
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => /^RESULT:\s*NOT[\s_-]*POSTED/i.test(l))
+    const m = /^RESULT:\s*NOT[\s_-]*POSTED\s*[-–—:]+\s*(.+)$/i.exec(
+        lines.at(-1) || ""
+    )
+    return m ? m[1].trim() : null
 }
 
 /** Did Leo change the task's flags himself at or after `since`? */
@@ -221,12 +262,23 @@ export function createThreadNotifier({
         return locked(taskId, async () => {
             const { task } = await store.getTask(taskId)
             const flags = task.flags || {}
-            if (status === "posted") {
+            const raise = status !== "posted" && status !== "dismissed"
+            // dismissed by Leo: never raised again for this attempt
+            if (
+                raise &&
+                noticeState(task, await eventsOf(taskId))?.status ===
+                    "dismissed"
+            )
+                return
+            if (!raise) {
                 if (flags.now && flags.now_reason === NOTICE_REASON)
                     await store.updateTask(
                         taskId,
                         { flags: { now: false, now_reason: null } },
-                        { actor: ACTOR, reason: "slack notice posted" }
+                        {
+                            actor: ACTOR,
+                            reason: `slack notice ${status}`,
+                        }
                     )
             } else if (
                 !flags.now &&
@@ -261,12 +313,21 @@ export function createThreadNotifier({
             await setNowFlag(taskId, "pending")
     }
 
-    async function record(taskId, gid, job, status, answer, error = null) {
+    async function record(
+        taskId,
+        gid,
+        job,
+        status,
+        answer,
+        error = null,
+        extra = {}
+    ) {
         const data = {
             gid,
             brain_job: job,
             status,
             answer: answer ? String(answer).slice(0, MAX_ANSWER) : null,
+            ...extra,
         }
         if (error) data.error = String(error).slice(0, 300)
         await store.appendEvent(taskId, { type: EV_RESULT, data }, ACTOR)
@@ -328,9 +389,26 @@ export function createThreadNotifier({
                     continue
                 }
                 if (!r || r.status === "running") continue
+                const extra = r.transcript ? { transcript: r.transcript } : {}
                 if (r.status === "failed")
-                    return record(taskId, gid, job, "failed", r.answer, r.error)
-                return record(taskId, gid, job, verdictOf(r.answer), r.answer)
+                    return record(
+                        taskId,
+                        gid,
+                        job,
+                        "failed",
+                        r.answer,
+                        r.error,
+                        extra
+                    )
+                return record(
+                    taskId,
+                    gid,
+                    job,
+                    verdictOf(r.answer),
+                    r.answer,
+                    null,
+                    extra
+                )
             }
             log.warn(
                 { task_id: taskId, brain_job: job },
@@ -437,7 +515,8 @@ export function createThreadNotifier({
             const skip = applies(task)
             if (skip) return skip
             const events = await eventsOf(taskId)
-            const state = noticeState(task, events)
+            // the attempt itself (a dismissed pending job is still running)
+            const state = attemptState(task, events)
             if (state.status === "pending") return { skipped: "pending" }
             if (state.status === "posted") return { skipped: "already_posted" }
             return start(taskId, task, startedJobs(task, events) + 1)
@@ -447,9 +526,12 @@ export function createThreadNotifier({
     /** The notice state; a pending job nobody watches is watched again. */
     async function state(taskId, task) {
         const events = await eventsOf(taskId)
+        // a pending job is followed even when Leo dismissed the notice: its
+        // outcome is still recorded (a later post shows)
+        const attempt = attemptState(task, events)
+        if (attempt && attempt.status === "pending" && attempt.brain_job)
+            watch(taskId, attempt.gid, attempt.brain_job)
         const s = noticeState(task, events)
-        if (s && s.status === "pending" && s.brain_job)
-            watch(taskId, s.gid, s.brain_job)
         if (s) await reconcile(taskId, task, s, events)
         return s
     }
@@ -544,10 +626,32 @@ export function createThreadNotifier({
         return settled()
     }
 
+    /**
+     * Leo dismisses the notice (handled it in Slack himself, or does not
+     * want it): recorded, out of the header and out of Now.
+     */
+    function dismiss(taskId) {
+        return serial(taskId, async () => {
+            const { task } = await store.getTask(taskId)
+            const src = task.source || {}
+            const gid = task.asana && task.asana.gid
+            if (src.type !== "slack" || !src.url || !gid)
+                return { skipped: "no_notice" }
+            await store.appendEvent(
+                taskId,
+                { type: EV_DISMISSED, data: { gid } },
+                "me"
+            )
+            log.info({ task_id: taskId, gid }, "slack thread: notice dismissed")
+            await setNowFlag(taskId, "dismissed")
+            return { dismissed: true }
+        })
+    }
+
     /** Ask Brain once (no wait) about the pending job -> the new state. */
     async function check(taskId) {
         const { task } = await store.getTask(taskId)
-        const s = noticeState(task, await eventsOf(taskId))
+        const s = attemptState(task, await eventsOf(taskId))
         if (
             s &&
             s.status === "pending" &&
@@ -568,6 +672,7 @@ export function createThreadNotifier({
     return {
         asanaCreated,
         post,
+        dismiss,
         state,
         check,
         settled,
@@ -579,8 +684,9 @@ export function createThreadNotifier({
 }
 
 /**
- * Owner routes: POST /api/tasks/:id/slack-notice (post again) and
- * POST /api/tasks/:id/slack-notice/check (ask Brain now). Both answer
+ * Owner routes: POST /api/tasks/:id/slack-notice (post again),
+ * .../slack-notice/dismiss (Leo handled it) and .../slack-notice/check (ask
+ * Brain now). Both answer
  * { slack_notice } (the new state) and what happened.
  */
 export function mountThreadNotice(api, helpers, { notifier }) {
@@ -596,6 +702,12 @@ export function mountThreadNotice(api, helpers, { notifier }) {
         ownerOnly(req)
         const id = parseTaskId(req.params.id)
         const result = await notifier.post(id)
+        res.json({ result, slack_notice: await stateOf(id) })
+    })
+    api.post("/tasks/:id/slack-notice/dismiss", async (req, res) => {
+        ownerOnly(req)
+        const id = parseTaskId(req.params.id)
+        const result = await notifier.dismiss(id)
         res.json({ result, slack_notice: await stateOf(id) })
     })
     api.post("/tasks/:id/slack-notice/check", async (req, res) => {

@@ -1052,6 +1052,27 @@
     font-weight: 400;
 }
 
+.slack-notice-reason {
+    margin: 6px 0 0;
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+
+.slack-notice-why {
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.slack-notice-more {
+    margin-top: 4px;
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.slack-notice-more summary {
+    cursor: pointer;
+}
+
 .slack-notice-answer {
     margin: 6px 0 0;
     padding: 6px 10px;

@@ -387,9 +387,13 @@ only if all of these hold:
 
 A candidate that fails a check is **not** used. It shows on the task page as
 "unclaimed PR on this branch", with a reason, and I can claim it manually
-(one click, recorded in events) or ignore it. The PR URL the agent reports
-via `cc_add_link(type:"pr")` goes through the same checks. Only claimed PRs
-count toward deliverables, Asana comments and closing.
+(one click, recorded in events) or ignore it. A PR URL the agent reports
+via `cc_add_link(type:"pr")` is named on purpose, so checks 2, 3 and the
+branch half of 1 do not apply: a task may work on an existing PR on another
+branch (addressing review on someone's PR, say). It must still be in
+`acme/<repo>` (not a fork), match a pending deliverable for that repo, and
+not be claimed by another task. Only claimed PRs count toward deliverables,
+Asana comments and closing.
 
 ### Follow-up fires
 The scheduler picks `schedules` where `fire_at <= now`:

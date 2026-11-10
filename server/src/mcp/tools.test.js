@@ -854,6 +854,8 @@ describe("cc_add_link: pr and others", () => {
         expect(r).toEqual({ ok: true, deliverable: {} })
         expect(deps.prWatcher.claim).toHaveBeenCalledWith(id, PR, {
             manual: false,
+            reported: true,
+            actor: expect.stringMatching(/^agent:/),
         })
         const t = createAgentTools(makeDeps({ prWatcher: null }))
         await expectError(

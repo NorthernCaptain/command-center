@@ -130,6 +130,7 @@ export default function TaskHeader({
     slackNotice = null,
     onSlackPost,
     onSlackCheck,
+    onSlackDismiss,
     api,
 }) {
     const asanaUrl = task.asana && task.asana.url
@@ -160,6 +161,7 @@ export default function TaskHeader({
                     notice={slackNotice}
                     onPost={onSlackPost}
                     onCheck={onSlackCheck}
+                    onDismiss={onSlackDismiss}
                 />
             ) : null}
             {task.flags &&

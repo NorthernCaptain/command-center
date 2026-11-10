@@ -69,6 +69,65 @@ describe("SlackNotice", () => {
         expect(onPost).toHaveBeenCalledTimes(1)
     })
 
+    it("Dismiss on a warning; none without a handler or when dismissed", async () => {
+        const onDismiss = jest.fn(async () => {})
+        const { rerender, container } = render(
+            <SlackNotice
+                notice={{ ...base, status: "not_posted" }}
+                onPost={jest.fn()}
+                onDismiss={onDismiss}
+            />
+        )
+        fireEvent.click(screen.getByRole("button", { name: "Dismiss" }))
+        await waitFor(() => expect(onDismiss).toHaveBeenCalledTimes(1))
+        rerender(<SlackNotice notice={{ ...base, status: "not_posted" }} />)
+        expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull()
+        rerender(
+            <SlackNotice
+                notice={{ ...base, status: "pending" }}
+                onDismiss={onDismiss}
+            />
+        )
+        expect(screen.queryByRole("button", { name: "Dismiss" })).toBeNull()
+        rerender(<SlackNotice notice={{ ...base, status: "dismissed" }} />)
+        expect(container).toBeEmptyDOMElement()
+    })
+
+    it("a refusal leads with Brain's reason; full answer and transcript", () => {
+        const { rerender } = render(
+            <SlackNotice
+                notice={{
+                    ...base,
+                    status: "not_posted",
+                    answer: "Tried twice.\nRESULT: NOT POSTED - Slack returned not_in_channel",
+                    reason: "Slack returned not_in_channel",
+                    transcript: "https://brain.example.com/chat/1",
+                }}
+            />
+        )
+        const alert = screen.getByRole("alert")
+        expect(alert.querySelector(".slack-notice-reason")).toHaveTextContent(
+            "Why: Slack returned not_in_channel"
+        )
+        expect(screen.getByText("Brain's full answer")).toBeInTheDocument()
+        expect(
+            screen.getByRole("link", { name: "Brain transcript ↗" })
+        ).toHaveAttribute("href", "https://brain.example.com/chat/1")
+        // the answer is just the RESULT line: no extra details
+        rerender(
+            <SlackNotice
+                notice={{
+                    ...base,
+                    status: "not_posted",
+                    answer: "RESULT: NOT POSTED - no access",
+                    reason: "no access",
+                }}
+            />
+        )
+        expect(screen.queryByText("Brain's full answer")).toBeNull()
+        expect(screen.queryByRole("link", { name: /transcript/ })).toBeNull()
+    })
+
     it("failed shows the error; unknown asks to check the thread", () => {
         const { rerender } = render(
             <SlackNotice
