@@ -1515,6 +1515,33 @@ describe("owner: patch, artifact, history", () => {
         expect(h.jobRunner.jobs).toHaveLength(0)
     })
 
+    test("task detail and close-out show a missing change record", async () => {
+        h.store.tasks.get(2).task.area = "access"
+        const res = await bearer(request(h.local).get("/api/tasks/2"))
+        expect(res.body.change_record).toEqual({
+            section: "Change record (SOC2)",
+            present: false,
+            missing: ["what", "why", "risk", "rollback", "tested"],
+        })
+        const job = await bearer(
+            request(h.local).post("/api/tasks/2/close-out")
+        )
+        expect(job.status).toBe(409)
+        expect(job.body.error).toBe("change_record_missing")
+        expect(h.jobRunner.jobs).toHaveLength(0)
+
+        h.store.seed(
+            h.store.tasks.get(2).task,
+            "## Change record (SOC2)\n- What: a\n- Why: b\n- Risk: c\n" +
+                "- Rollback: d\n- Tested:\n"
+        )
+        const partial = await bearer(request(h.local).get("/api/tasks/2"))
+        expect(partial.body.change_record).toMatchObject({
+            present: true,
+            missing: ["tested"],
+        })
+    })
+
     test("done + a new Asana link in the same patch closes out through Asana", async () => {
         const res = await patch(2, {
             patch: { status: "done", asana: { gid: "777" } },

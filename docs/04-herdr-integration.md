@@ -125,6 +125,7 @@ the tree AGENTS.md "only on the user's command" rules are satisfied.
 | **Create PR** (click) | `ready_for_pr` | "Create the PR now: follow tree AGENTS.md §5 (pr skill) for each work repo. Put the line `Command-Center-Task: T-123` in each PR description. Then cc_add_link each PR URL." |
 | **PR feedback** (automatic; also a manual **Address feedback** button) | `pr_feedback` | See the template below. |
 | **Clean folders** (click) | `done` | "Clean: follow tree AGENTS.md §6 for slug k7q2." |
+| **Close agent** with **Clean folders** checked (default on a `done` task with folders) | `done` | The same Clean prompt. The session is marked `close_after` with the prompt's outbox row (recorded before the prompt is sent); once that row was sent and the agent has worked and is idle again with no `…--<slug>` folder left, the service closes its workspace. A failed or cancelled prompt cancels the close. Folders left after the turn: the workspace stays open, Now "Clean-up left folders; agent kept open". |
 | **Send to agent** (inline comment) | any active | "Re T-123 artifact, about '<quote>': <comment>" |
 
 ### PR feedback prompt (template)

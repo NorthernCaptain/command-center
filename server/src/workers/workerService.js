@@ -66,6 +66,17 @@ const START_STATUSES = ["inbox", "ready", "active"]
 // agent states in which Leo may close its workspace
 const IDLE_STATES = ["idle", "done"]
 const SENDABLE = ["idle", "done"]
+// agent_sessions.close_after: Close agent with "Clean folders" queued the
+// clean-up prompt as outbox row <id>, recorded before it is sent:
+// "clean:<id>", plus ":working" once the agent worked after it was sent.
+// The workspace closes when it is idle again and the folders are gone.
+export const CLEAN_LEFT_REASON = "Clean-up left folders; agent kept open"
+
+/** "clean:<id>[:working]" -> { rowId, working } or null. */
+export function parseCloseAfter(value) {
+    const m = /^clean:(\d+)(:working)?$/.exec(String(value || ""))
+    return m ? { rowId: Number(m[1]), working: Boolean(m[2]) } : null
+}
 // A wait:true prompt that has not settled after this long is working: the
 // agent took it (herdr reports agent_prompt_stalled within 5 s otherwise).
 const CONFIRM_MS = 8000
@@ -149,6 +160,9 @@ export function createWorkerService({
     reviveBackoffMs = REVIVE_BACKOFF_MS,
     tickMs,
     mcpHeadersHelper,
+    // runs fn in one database transaction (outbox + sessions share the db);
+    // fn must be synchronous
+    transaction = (fn) => fn(),
 }) {
     const herdrCfg = (config && config.herdr) || {}
     const treeDir = config.treeDir
@@ -1140,7 +1154,76 @@ export function createWorkerService({
         if (status === "blocked") await markBlocked(id, s)
         if (s.kind === "claude" && (status === "blocked" || status === "idle"))
             await checkUsage(id, s)
+        if (s.close_after && (await settleCloseAfter(id, s, status))) return
         if (SENDABLE.includes(status)) await flushTask(id, { revive: false })
+    }
+
+    /**
+     * Close after clean (on the task chain): "working" marks that the agent
+     * took the clean-up turn; once it is idle again with the prompt
+     * delivered, the workspace closes if the task's folders are gone. Folders
+     * left after it worked mean the agent stopped (uncommitted or unpushed
+     * work): the workspace stays open, Now is raised. Returns true when the
+     * workspace was closed.
+     */
+    async function settleCloseAfter(id, s, status) {
+        const mark = parseCloseAfter(s.close_after)
+        const row = mark ? await outbox.byId(mark.rowId) : null
+        // the clean-up prompt never reached the agent (failed, cancelled,
+        // gone): no close
+        if (!row || ["failed", "cancelled"].includes(row.status)) {
+            await sessions.update(s.id, { close_after: null })
+            await logEvent(id, "agent_close_cancelled", {
+                name: s.name,
+                prompt: row ? row.status : "missing",
+            })
+            return false
+        }
+        if (row.status !== "sent") return false
+        if (status === "working") {
+            if (!mark.working)
+                await sessions.update(s.id, {
+                    close_after: `clean:${mark.rowId}:working`,
+                })
+            return false
+        }
+        // only an idle agent that worked since the prompt was sent is done
+        if (!SENDABLE.includes(status) || !mark.working) return false
+        let left
+        try {
+            const { task } = await store.getTask(id)
+            left =
+                task.slug && identity && identity.scanFolders
+                    ? (await identity.scanFolders(task.slug, {
+                          strict: true,
+                      })) || []
+                    : []
+        } catch (err) {
+            log.warn({ err: errMessage(err), task: id }, "close after clean")
+            return false
+        }
+        if (!left.length) {
+            try {
+                await closeWorkspace(id, s, "system", { after: "clean" })
+                return true
+            } catch (err) {
+                log.warn(
+                    { err: errMessage(err), task: id },
+                    "close after clean: workspace close failed"
+                )
+                return false
+            }
+        }
+        await sessions.update(s.id, { close_after: null })
+        const folders = left.map((f) => f.folder)
+        await patchFlags(
+            id,
+            { now: true, now_reason: CLEAN_LEFT_REASON },
+            "clean left folders"
+        )
+        await notify(`T-${id}: ${CLEAN_LEFT_REASON}`, folders.join(", "))
+        await logEvent(id, "agent_close_skipped", { name: s.name, folders })
+        return false
     }
 
     async function handleStatus({ paneId, status }) {
@@ -1261,9 +1344,16 @@ export function createWorkerService({
                             status: a.status,
                         })
                     } else if (SENDABLE.includes(a.status)) {
-                        await serial(s.task_id, () =>
-                            flushTask(s.task_id, { revive: false })
-                        )
+                        await serial(s.task_id, async () => {
+                            // a pending close whose idle event was missed
+                            // (e.g. while the service was down)
+                            if (
+                                s.close_after &&
+                                (await settleCloseAfter(s.task_id, s, a.status))
+                            )
+                                return
+                            await flushTask(s.task_id, { revive: false })
+                        })
                     }
                 } catch (err) {
                     log.warn(
@@ -1399,6 +1489,11 @@ export function createWorkerService({
         })
         if (row.status && row.status !== "pending")
             return { status: row.status, outbox_id: row.id, duplicate: true }
+        return sendQueued(id, row)
+    }
+
+    /** Flush the task now and report what happened to this queued row. */
+    async function sendQueued(id, row) {
         let res
         try {
             res = await serial(id, () => flushTask(id))
@@ -1520,6 +1615,94 @@ export function createWorkerService({
         return row
     }
 
+    /** The task's live agent, checked to be ours and idle (on the chain). */
+    async function idleAgent(id) {
+        const cur = await sessions.current(id)
+        if (!cur) throw conflict("no_agent", `T-${id} has no live agent`)
+        const info = await herdr.agentGet(cur.pane_id || cur.name)
+        const replaced = info && info.name && cur.name && info.name !== cur.name
+        if (!info || !sameAgent(cur, info) || replaced)
+            throw conflict(
+                "agent_not_found",
+                `${cur.name} is not running in its pane any more; close the workspace in herdr if you want it gone`
+            )
+        if (!IDLE_STATES.includes(info.status))
+            throw conflict(
+                "agent_busy",
+                `${cur.name} is ${info.status}; close it when it is idle`,
+                { state: info.status }
+            )
+        return cur
+    }
+
+    /** Close the session's herdr workspace and end it (on the chain). */
+    async function closeWorkspace(id, cur, actor, extra = {}) {
+        await herdr.workspaceClose(cur.workspace_id)
+        await endSession(cur, "gone")
+        await logEvent(
+            id,
+            "agent_closed",
+            {
+                name: cur.name,
+                workspace_id: cur.workspace_id,
+                pane_id: cur.pane_id,
+                ...extra,
+            },
+            actor
+        )
+        return { closed: true, workspace_id: cur.workspace_id }
+    }
+
+    /**
+     * Close agent + Clean folders: queue the clean-up prompt, mark the
+     * session close_after "clean:<outbox id>", then send it; settleCloseAfter
+     * closes the workspace when that turn is over. A prompt that was not
+     * delivered (failed / blocked, or later failed / cancelled) cancels it.
+     */
+    async function closeAfterClean(id, task, actor) {
+        requireStatus(task, ["done"], "Clean folders")
+        if (!task.slug)
+            throw conflict("no_slug", `T-${id} has no folders to clean`)
+        // Queue the prompt and record its row on the task chain: no flush
+        // can send it before the session knows which row to wait for.
+        const { cur, row, duplicate } = await serial(id, async () => {
+            const c = await idleAgent(id)
+            const dup = ((await outbox.pending(id)) || []).find(
+                (r) => r.reason === "clean"
+            )
+            // the prompt row and the marker commit together (a restart
+            // never leaves one without the other)
+            const r = transaction(() => {
+                const queued =
+                    dup ||
+                    outbox.enqueue({
+                        task_id: id,
+                        text: cleanPrompt({ task }),
+                        reason: "clean",
+                        dedupe_key: null,
+                    })
+                sessions.update(c.id, { close_after: `clean:${queued.id}` })
+                return queued
+            })
+            return { cur: c, row: r, duplicate: Boolean(dup) }
+        })
+        const closeAfter = `clean:${row.id}`
+        const delivery = duplicate
+            ? { status: "queued", outbox_id: row.id, duplicate: true }
+            : await sendQueued(id, row)
+        if (["failed", "blocked"].includes(delivery.status)) {
+            await sessions.update(cur.id, { close_after: null })
+            return { delivery, close_after: null }
+        }
+        await logEvent(
+            id,
+            "agent_close_requested",
+            { name: cur.name, after: "clean", outbox_id: delivery.outbox_id },
+            actor
+        )
+        return { delivery, close_after: closeAfter }
+    }
+
     async function action(taskId, name, body, { actor = "system" } = {}) {
         const id = toId(taskId)
         if (!ACTIONS.includes(name)) throw new NotFoundError(`action ${name}`)
@@ -1568,39 +1751,15 @@ export function createWorkerService({
                 break
             case "close-agent":
                 // Leo closes the agent's herdr workspace, only while the
-                // agent sits idle (never mid-work or at a dialog).
-                result = await serial(id, async () => {
-                    const cur = await sessions.current(id)
-                    if (!cur)
-                        throw conflict("no_agent", `T-${id} has no live agent`)
-                    const info = await herdr.agentGet(cur.pane_id || cur.name)
-                    const replaced =
-                        info && info.name && cur.name && info.name !== cur.name
-                    if (!info || !sameAgent(cur, info) || replaced)
-                        throw conflict(
-                            "agent_not_found",
-                            `${cur.name} is not running in its pane any more; close the workspace in herdr if you want it gone`
-                        )
-                    if (!IDLE_STATES.includes(info.status))
-                        throw conflict(
-                            "agent_busy",
-                            `${cur.name} is ${info.status}; close it when it is idle`,
-                            { state: info.status }
-                        )
-                    await herdr.workspaceClose(cur.workspace_id)
-                    await endSession(cur, "gone")
-                    await logEvent(
-                        id,
-                        "agent_closed",
-                        {
-                            name: cur.name,
-                            workspace_id: cur.workspace_id,
-                            pane_id: cur.pane_id,
-                        },
-                        actor
-                    )
-                    return { closed: true, workspace_id: cur.workspace_id }
-                })
+                // agent sits idle (never mid-work or at a dialog). With
+                // clean: the clean-up prompt first, the close once it is done.
+                if (b.clean === true) {
+                    result = await closeAfterClean(id, task, actor)
+                    break
+                }
+                result = await serial(id, async () =>
+                    closeWorkspace(id, await idleAgent(id), actor)
+                )
                 break
             case "focus": {
                 const cur = await sessions.current(id)

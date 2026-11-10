@@ -65,6 +65,17 @@ const ACTION_DONE = {
  */
 export function actionToast(name, res) {
     const delivery = (res && res.delivery) || {}
+    // Close agent + Clean folders: the close follows the clean-up
+    if (
+        name === "close-agent" &&
+        res &&
+        String(res.close_after || "").startsWith("clean:") &&
+        ["sent", "confirmed", "queued"].includes(delivery.status)
+    )
+        return {
+            kind: "success",
+            text: "The agent is cleaning up its folders; its workspace closes when it is done",
+        }
     const detail = delivery.error ? `: ${delivery.error}` : ""
     switch (delivery.status) {
         case "failed":
@@ -160,6 +171,27 @@ export function deliverableState(d, watch = null) {
         label: "no PR yet",
         reason: "no PR yet: open or claim one, or mark No change",
     }
+}
+
+const RECORD_LABELS = {
+    what: "What",
+    why: "Why",
+    risk: "Risk",
+    rollback: "Rollback",
+    tested: "Tested",
+}
+
+/**
+ * Why the SOC2 change record keeps the task from Done, or null.
+ * @param {{ section: string, present: boolean, missing: string[] }|null} rec
+ *   the task payload's change_record (only on SOC2-area tasks)
+ */
+export function changeRecordBlocker(rec) {
+    if (!rec || !(rec.missing || []).length) return null
+    const labels = rec.missing.map((k) => RECORD_LABELS[k] || k).join(", ")
+    return rec.present
+        ? `fill ${labels} in "${rec.section}"`
+        : `add a "${rec.section}" section to the artifact and fill ${labels}`
 }
 
 /** Deliverables that keep the task from Done. */

@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { api as defaultApi } from "./api.js"
 import { getEventStream } from "./events.js"
+import { ACTIVE_JOB_STATUSES } from "./constants.js"
 
 /** Subscribe `handler` to SSE event types for the component's lifetime. */
 export function useEvents(types, handler) {
@@ -194,6 +195,25 @@ export function upsertById(list, item) {
     return arr.map((x) => (x.id === item.id ? { ...x, ...item } : x))
 }
 
+/**
+ * upsertById for center jobs that never moves a finished job back to an
+ * active status. A job that fails at once can report "failed" over SSE
+ * before the POST that queued it returns its "queued" copy; that copy must
+ * not bring the spinner back.
+ */
+export function upsertJob(list, job) {
+    const arr = list || []
+    if (!job || job.id === undefined) return arr
+    const cur = arr.find((x) => x.id === job.id)
+    if (
+        cur &&
+        !ACTIVE_JOB_STATUSES.includes(cur.status) &&
+        ACTIVE_JOB_STATUSES.includes(job.status)
+    )
+        return arr
+    return upsertById(arr, job)
+}
+
 /** Reload errors that mean the task is gone or not visible to us. */
 const LOST_ACCESS = [401, 403, 404]
 
@@ -261,9 +281,7 @@ export function applyTaskEvent(prev, evt) {
             return { ...prev, events: [d.event, ...events] } // newest first
         }
         case "job.updated":
-            return d.job
-                ? { ...prev, jobs: upsertById(prev.jobs, d.job) }
-                : prev
+            return d.job ? { ...prev, jobs: upsertJob(prev.jobs, d.job) } : prev
         case "schedule.updated":
             return d.schedule
                 ? { ...prev, schedules: upsertById(prev.schedules, d.schedule) }

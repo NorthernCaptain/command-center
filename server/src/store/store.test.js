@@ -536,6 +536,25 @@ describe("updateTask", () => {
         await store.updateTask(1, { title: "Again" }, { actor: "me" })
         expect(types()).toEqual(["task.updated", "event.added"])
     })
+
+    test("an area set to a SOC2 area adds the change record section", async () => {
+        const before = await store.getArtifact(1)
+        expect(before.content).not.toContain("## Change record (SOC2)")
+        await store.updateTask(1, { area: "access" }, { actor: "center" })
+        const art = await store.getArtifact(1)
+        expect(art.content).toContain("## Change record (SOC2)\n- What:")
+        expect(art.content).toContain("**Area:** access")
+        expect(types()).toEqual([
+            "task.updated",
+            "artifact.updated",
+            "event.added",
+        ])
+        // already there: a later update leaves the artifact alone
+        events.length = 0
+        await store.updateTask(1, { priority: 1 }, { actor: "me" })
+        expect(types()).toEqual(["task.updated", "event.added"])
+        expect((await store.getArtifact(1)).revision).toBe(art.revision)
+    })
 })
 
 describe("artifact", () => {

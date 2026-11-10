@@ -12,7 +12,7 @@ import nodeFs from "node:fs"
 import path from "node:path"
 import { z } from "zod"
 import { assertClosable, enqueueCloseOut } from "../agent/jobs/close_out.js"
-import { assertTaskChangeRecord } from "../phase3/soc2.js"
+import { assertTaskChangeRecord, changeRecordState } from "../phase3/soc2.js"
 import {
     isShared,
     LANES,
@@ -689,6 +689,9 @@ export function createApp({
             ])
         const extras = {}
         for (const fn of taskExtras) Object.assign(extras, await fn(id, task))
+        // SOC2 areas: what the change record still lacks (blocks Done)
+        const changeRecord = changeRecordState(task, artifact)
+        if (changeRecord) extras.change_record = changeRecord
         res.json({
             ...extras,
             task,
@@ -996,7 +999,10 @@ export function createApp({
                     baseline: { content: art.content, revision: art.revision },
                 }
             }
-            // close_out: one at a time per task (double clicks, Done racing)
+            // close_out: a missing SOC2 change record is a 409 now, not a
+            // job that fails at once (nothing it does can fill the record);
+            // one at a time per task (double clicks, Done racing)
+            if (type === "close_out") await assertTaskChangeRecord(store, task)
             const job =
                 type === "close_out"
                     ? enqueueCloseOut(jobRunner, id).job

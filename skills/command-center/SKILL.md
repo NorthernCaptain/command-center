@@ -79,6 +79,14 @@ staged changes], checks)`. Stop and wait. If the answer is `ok: false`
   (work repos differ from deliverables), fix the registration or explain.
 - **Non-code result** (investigation, doc, answer):
   `cc_report(status="review", summary)`.
+- **SOC2 areas** (infra, access, security, soc2): the task can't be done
+  without a change record. Before you report `review` or `ready_for_pr`,
+  fill the "Change record (SOC2)" section with `cc_update_artifact`
+  (`op="replace"`, with `base_revision`): `- What:`, `- Why:`, `- Risk:`,
+  `- Rollback:`, `- Tested:` each need a value; add `- Approved by:` and
+  `- Evidence:` (PR, commit, Slack thread) when you know them. Write only
+  what you checked or did. A report on such a task answers with
+  `change_record_missing` while labels are still empty.
 - **More work after a review:** when Leo answers or asks for more after a
   `review` report and you start working again, the task goes back to
   `active`. Report again (`review` or `ready_for_pr`) when you are done.

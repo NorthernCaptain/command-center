@@ -8,6 +8,7 @@
 // Send to agent). Untrusted text (review comments, PR bodies) is never pasted
 // in: the feedback prompt lists item ids, kinds, paths and URLs only.
 
+import { SOC2_AREAS } from "../store/artifact.js"
 import { folderName } from "./identity.js"
 
 const KIND_LABELS = {
@@ -58,7 +59,19 @@ function repoLines(repos) {
     return line
 }
 
-function protocolRules(id) {
+/** The SOC2 change record lines for a task in a SOC2 area, else none. */
+function changeRecordRules(task) {
+    if (!SOC2_AREAS.includes(task.area)) return []
+    return [
+        `- SOC2: the area is ${task.area}, so this task can't be done without a change record. Before you`,
+        '  report review or ready_for_pr, fill the "Change record (SOC2)" section (cc_update_artifact):',
+        "  What, Why, Risk, Rollback and Tested must have a value; add Approved by and Evidence (PR,",
+        "  commit, Slack thread) when you know them. Only write what you checked or did.",
+    ]
+}
+
+function protocolRules(task) {
+    const id = task.id
     return [
         `Brief: call cc_get_task(${id}) (or \`cc show ${id}\`) and read it fully before starting.`,
         "Scope: this task is the whole job. Investigate, then fix/change/implement it here, on this",
@@ -80,6 +93,7 @@ function protocolRules(id) {
         "  to active: report again (review or ready_for_pr) when you are done.",
         '- Non-code result: cc_report(status="review", summary). If a repo you were set up in needs no',
         "  change (nothing to commit or PR there), pass it in no_change_repos so the task can close.",
+        ...changeRecordRules(task),
         "- If you need me, ask here. I see blocked/idle states.",
     ].join("\n")
 }
@@ -106,7 +120,7 @@ export function kickoffPrompt({ task, repos, branch, slug, treeDir }) {
         `→ folders: ${folders.join(", ")}`,
         'If a repo\'s instructions force a different branch name, report it with cc_add_link(type="branch", repo, url=<branch>) BEFORE creating it, and use it only if the answer is ok.',
         "",
-        protocolRules(task.id),
+        protocolRules(task),
     ].join("\n")
 }
 
@@ -228,7 +242,7 @@ export function freshContextPrompt({
             : "→ no folders recorded yet",
         `  status: ${task.status}`,
         "",
-        protocolRules(task.id),
+        protocolRules(task),
         "",
         fb.length ? "PR feedback so far:" : "PR feedback so far: none",
         ...fb,

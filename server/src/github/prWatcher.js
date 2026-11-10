@@ -26,6 +26,7 @@ import { AppError, NotFoundError } from "../util/errors.js"
 import { systemClock } from "../util/clock.js"
 import { nullLogger } from "../util/logger.js"
 import { checkCandidate, checkReported, parsePrUrl } from "./claims.js"
+import { changeRecordState } from "../phase3/soc2.js"
 
 export const POLLED_STATUSES = ["ready_for_pr", "pr_open", "pr_feedback"]
 /**
@@ -91,6 +92,7 @@ export const KNOWN_BOTS = [
 ]
 const TRIVIAL_BODIES = new Set(["lgtm", ":+1:", "👍", "thanks", "thank you"])
 const CLOSED_REASON = "PR closed without merge"
+const RECORD_REASON = "SOC2 change record missing"
 const ROUND_EVENT = "feedback_round_delivered"
 const ROUND_FAILED_EVENT = "feedback_round_failed"
 const ROUND_SEALED_EVENT = "feedback_round_sealed"
@@ -1398,8 +1400,9 @@ export function createPrWatcher({
             !canTransition(task.status, "done")
         )
             return
+        if (await waitForChangeRecord(task, summary)) return
         // enqueueCloseOut dedupes against a queued/running/parked close_out;
-        // after a failed job (e.g. SOC2 record missing) the next poll retries.
+        // after a failed job the next poll retries.
         const { existing } = enqueueCloseOut(jobRunner, taskId)
         if (!existing)
             await store.appendEvent(
@@ -1408,6 +1411,35 @@ export function createPrWatcher({
                 ACTOR
             )
         summary.close_out = true
+    }
+
+    /**
+     * A SOC2-area task can't close without a complete change record, and
+     * nothing the close-out does fills it: don't queue a job that fails on
+     * every poll. Leo is told (Now flag, notification, close_out_waiting
+     * event) once per set of missing labels; once the record is filled the
+     * next poll closes out. True while waiting.
+     */
+    async function waitForChangeRecord(task, summary) {
+        const record = changeRecordState(task, await store.getArtifact(task.id))
+        if (!record || !record.missing.length) return false
+        summary.change_record_missing = record.missing
+        const last = (await store.listEvents(task.id, { limit: 200 })).find(
+            (e) => e.type === "close_out_waiting"
+        )
+        const missing = record.missing.join(",")
+        if (last && (last.data && last.data.missing) === missing) return true
+        await store.appendEvent(
+            task.id,
+            { type: "close_out_waiting", data: { missing } },
+            ACTOR
+        )
+        await flagNow(task.id, RECORD_REASON)
+        await notify(
+            `T-${task.id}: ${RECORD_REASON}`,
+            `All PRs are merged. Fill ${record.missing.join(", ")} in "${record.section}" to close it out.`
+        )
+        return true
     }
 
     // ---- poll ----------------------------------------------------------

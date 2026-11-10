@@ -140,6 +140,9 @@ export default function TaskHeader({
     const can = workerActions(task, agent, features)
     const prs = taskPrs(task)
     const agentIdle = Boolean(agent && IDLE_AGENT_STATES.includes(agent.state))
+    // Close agent: clean the folders first (offered when Clean folders is)
+    const [cleanOnClose, setCleanOnClose] = useState(true)
+    const closeWithClean = can.clean && cleanOnClose
 
     return (
         <header className="task-head">
@@ -387,7 +390,11 @@ export default function TaskHeader({
                         <ConfirmButton
                             label="Close agent"
                             title="Close the agent?"
-                            confirmLabel="Close workspace"
+                            confirmLabel={
+                                closeWithClean
+                                    ? "Clean and close"
+                                    : "Close workspace"
+                            }
                             danger
                             disabled={!agentIdle}
                             buttonTitle={
@@ -395,7 +402,11 @@ export default function TaskHeader({
                                     ? "Close the agent's herdr workspace"
                                     : `The agent is ${agent.state}; it can be closed when idle`
                             }
-                            onConfirm={() => onAction("close-agent")}
+                            onConfirm={() =>
+                                closeWithClean
+                                    ? onAction("close-agent", { clean: true })
+                                    : onAction("close-agent")
+                            }
                         >
                             <p>
                                 This closes the herdr workspace of{" "}
@@ -405,10 +416,33 @@ export default function TaskHeader({
                                 and ends its session. Its conversation is not
                                 resumed; Start launches a new agent.
                             </p>
-                            <p>
-                                The task, its folders and branches stay as they
-                                are.
-                            </p>
+                            {can.clean ? (
+                                <label className="field field-check">
+                                    <input
+                                        type="checkbox"
+                                        checked={cleanOnClose}
+                                        onChange={(e) =>
+                                            setCleanOnClose(e.target.checked)
+                                        }
+                                    />
+                                    <span>Clean folders</span>
+                                </label>
+                            ) : null}
+                            {closeWithClean ? (
+                                <p>
+                                    The agent first deletes this task&apos;s
+                                    folders (after checking nothing is
+                                    uncommitted or unpushed). The workspace
+                                    closes when it is done; if it leaves
+                                    folders, it stays open and the task goes to
+                                    Now. Branches and PRs on GitHub stay.
+                                </p>
+                            ) : (
+                                <p>
+                                    The task, its folders and branches stay as
+                                    they are.
+                                </p>
+                            )}
                         </ConfirmButton>
                     ) : null}
                     {open && !can.accept ? (

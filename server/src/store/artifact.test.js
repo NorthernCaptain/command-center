@@ -5,6 +5,7 @@
 
 import {
     buildArtifactTemplate,
+    ensureChangeRecord,
     findSection,
     getSectionBody,
     parseSections,
@@ -195,5 +196,48 @@ describe("buildArtifactTemplate", () => {
         expect(buildArtifactTemplate(task({ source: undefined }))).toContain(
             "> **Source:** manual"
         )
+    })
+})
+
+describe("ensureChangeRecord", () => {
+    const names = (doc) => parseSections(doc).map((s) => s.name)
+
+    test("other areas and a missing task leave the artifact alone", () => {
+        const doc = buildArtifactTemplate(task())
+        expect(ensureChangeRecord(doc, task())).toBe(doc)
+        expect(ensureChangeRecord(doc, null)).toBe(doc)
+    })
+
+    test("adds the section before PR feedback and updates the area", () => {
+        const doc = buildArtifactTemplate(task({ area: "other" }))
+        const out = ensureChangeRecord(doc, task({ area: "access" }))
+        expect(out).toBe(buildArtifactTemplate(task({ area: "access" })))
+        expect(out).toContain("· **Area:** access")
+        expect(getSectionBody(out, "Change record (SOC2)")).toMatch(
+            /^- What:\n- Why:\n- Risk:\n- Rollback:\n- Tested:/
+        )
+        // idempotent
+        expect(ensureChangeRecord(out, task({ area: "access" }))).toBe(out)
+    })
+
+    test("keeps a filled section and only fixes the area line", () => {
+        const doc = buildArtifactTemplate(task({ area: "infra" })).replace(
+            "- What:",
+            "- What: moved the bucket"
+        )
+        const out = ensureChangeRecord(doc, task({ area: "security" }))
+        expect(out).toBe(doc.replace("**Area:** infra", "**Area:** security"))
+    })
+
+    test("without PR feedback it goes before Result, else at the end", () => {
+        const out = ensureChangeRecord(DOC, task({ area: "soc2" }))
+        expect(names(out)).toEqual([
+            "Summary",
+            "Progress",
+            "Change record (SOC2)",
+            "Result",
+        ])
+        const bare = ensureChangeRecord("# Mine\n", task({ area: "soc2" }))
+        expect(names(bare)).toEqual(["Change record (SOC2)"])
     })
 })

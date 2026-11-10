@@ -1933,11 +1933,78 @@ describe("merge, close and close-out", () => {
         expect(s2.close_out).toBe(true)
         expect(jobRunner.enqueue).toHaveBeenCalledTimes(1)
         expect(await eventsOf("close_out_requested")).toHaveLength(1)
-        // the job failed (e.g. SOC2 record missing): the next poll retries
+        // the job failed: the next poll retries
         jobs[0].status = "failed"
         await watcher.pollTask(1)
         expect(jobRunner.enqueue).toHaveBeenCalledTimes(2)
         expect(await eventsOf("close_out_requested")).toHaveLength(2)
+    })
+
+    test("a SOC2 task waits for its change record instead of failing close-outs", async () => {
+        const { gh, watcher, jobRunner, notifier } = await claimedSetup()
+        await store.updateTask(1, { area: "access" }, { actor: "me" })
+        gh.prs[`${REPO}#812`] = fullPr({
+            state: "MERGED",
+            mergedAt: "2026-11-07T11:58:00Z",
+            closedAt: "2026-11-07T11:58:00Z",
+        })
+        const s = await watcher.pollTask(1)
+        expect(s.close_out).toBe(false)
+        expect(s.change_record_missing).toEqual([
+            "what",
+            "why",
+            "risk",
+            "rollback",
+            "tested",
+        ])
+        expect(jobRunner.enqueue).not.toHaveBeenCalled()
+        let task = await getTask()
+        expect(task.flags).toMatchObject({
+            now: true,
+            now_reason: "SOC2 change record missing",
+        })
+        expect(notifier.notify).toHaveBeenCalledWith(
+            expect.objectContaining({
+                title: "T-1: SOC2 change record missing",
+            })
+        )
+        expect(await eventsOf("close_out_waiting")).toHaveLength(1)
+
+        // Leo dismisses the flag: the same gaps don't raise it again
+        await store.updateTask(
+            1,
+            { flags: { now: false, now_reason: null } },
+            { actor: "me" }
+        )
+        notifier.notify.mockClear()
+        await watcher.pollTask(1)
+        task = await getTask()
+        expect(task.flags.now).toBe(false)
+        expect(notifier.notify).not.toHaveBeenCalled()
+        expect(await eventsOf("close_out_waiting")).toHaveLength(1)
+
+        // partly filled: told again with what is left
+        const fill = async (from, to) => {
+            const art = await store.getArtifact(1)
+            await store.writeArtifact(1, art.content.replace(from, to), {
+                actor: "me",
+                baseRevision: art.revision,
+            })
+        }
+        await fill("- What:\n- Why:\n- Risk:", "- What: a\n- Why: b\n- Risk: c")
+        await watcher.pollTask(1)
+        expect(await eventsOf("close_out_waiting")).toHaveLength(2)
+        expect((await getTask()).flags.now).toBe(true)
+
+        // complete: the close-out is queued
+        await fill("- Rollback:\n- Tested:", "- Rollback: d\n- Tested: e")
+        const done = await watcher.pollTask(1)
+        expect(done.close_out).toBe(true)
+        expect(jobRunner.enqueue).toHaveBeenCalledWith(
+            "close_out",
+            {},
+            { task_id: 1 }
+        )
     })
 
     test("an existing close-out job is reused (no event)", async () => {

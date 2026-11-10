@@ -388,4 +388,13 @@ describe("createIdentity", () => {
         expect(id.scanFolders("../x")).toEqual([])
         expect(id.scanFolders(null)).toEqual([])
     })
+
+    test("scanFolders: an unreadable tree is empty, or throws when strict", () => {
+        const id = createIdentity({
+            store: fakeStore([]),
+            treeDir: path.join(tree, "missing"),
+        })
+        expect(id.scanFolders("k7q2")).toEqual([])
+        expect(() => id.scanFolders("k7q2", { strict: true })).toThrow(/ENOENT/)
+    })
 })

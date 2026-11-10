@@ -32,6 +32,7 @@ test("create maps contract fields onto the table columns", () => {
     const s = repo.create(base)
     expect(s).toEqual({
         id: expect.any(Number),
+        close_after: null,
         task_id: 7,
         name: "t7-fix-upload",
         workspace_id: "wE",
@@ -146,6 +147,10 @@ test("update patches state / session_id / last_seen_at", () => {
     })
     clock.set("2026-11-07T12:06:00.000Z")
     expect(repo.update(a.id).last_seen_at).toBe("2026-11-07T12:06:00.000Z")
+    expect(repo.update(a.id, { close_after: "clean" }).close_after).toBe(
+        "clean"
+    )
+    expect(repo.update(a.id, { close_after: null }).close_after).toBeNull()
     expect(() => repo.update(a.id, { pane_id: "x" })).toThrow(ValidationError)
     expect(repo.update(999, { state: "idle" })).toBeNull()
 })

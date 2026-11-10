@@ -359,6 +359,7 @@ export function createSystem({ config, overrides = {} }) {
         clock,
         log,
         localToken: auth.localToken(),
+        transaction: (fn) => db.transaction(fn)(),
     })
     scheduler.setWorkerService(workerService)
     const github = createGithub({

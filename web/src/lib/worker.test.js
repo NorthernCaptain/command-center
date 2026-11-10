@@ -5,6 +5,7 @@
 
 import { ApiError } from "./api.js"
 import {
+    changeRecordBlocker,
     TABS,
     actionToast,
     blockingDeliverables,
@@ -79,6 +80,27 @@ describe("visibleTabs", () => {
 })
 
 describe("actionToast", () => {
+    it("close-agent with clean says the close follows the clean-up", () => {
+        expect(
+            actionToast("close-agent", {
+                close_after: "clean:12",
+                delivery: { status: "sent" },
+            })
+        ).toMatchObject({
+            kind: "success",
+            text: expect.stringContaining("closes when it is done"),
+        })
+        expect(
+            actionToast("close-agent", {
+                close_after: null,
+                delivery: { status: "failed", error: "x" },
+            }).kind
+        ).toBe("error")
+        expect(actionToast("close-agent", { closed: true }).text).toBe(
+            "Closed the agent's herdr workspace"
+        )
+    })
+
     it("is a success for sent or missing deliveries", () => {
         expect(actionToast("create-pr", { ok: true })).toEqual({
             kind: "success",
@@ -250,5 +272,28 @@ describe("deliverable state (what blocks Done)", () => {
             "aws-batch",
         ])
         expect(blockingDeliverables(null, [])).toEqual([])
+    })
+})
+
+describe("changeRecordBlocker", () => {
+    it("is null without a record or gaps, else names the labels", () => {
+        expect(changeRecordBlocker(null)).toBeNull()
+        expect(
+            changeRecordBlocker({ section: "S", present: true, missing: [] })
+        ).toBeNull()
+        expect(
+            changeRecordBlocker({
+                section: "S",
+                present: true,
+                missing: ["what", "odd"],
+            })
+        ).toBe('fill What, odd in "S"')
+        expect(
+            changeRecordBlocker({
+                section: "S",
+                present: false,
+                missing: ["why"],
+            })
+        ).toBe('add a "S" section to the artifact and fill Why')
     })
 })

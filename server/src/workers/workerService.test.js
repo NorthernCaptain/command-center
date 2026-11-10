@@ -12,7 +12,9 @@ import { openDb } from "../store/db.js"
 import { createOutboxRepo } from "../herdr/outboxRepo.js"
 import {
     BLOCKED_REASON,
+    CLEAN_LEFT_REASON,
     createWorkerService,
+    parseCloseAfter,
     isServerError,
     isTransportError,
     START_FAILED_REASON,
@@ -1737,6 +1739,308 @@ describe("actions", () => {
         env2.herdr.setStatus(NAME, "done")
         await env2.svc.action(1, "close-agent")
         expect(env2.herdr.workspaceClose).toHaveBeenCalledTimes(1)
+    })
+
+    describe("close-agent with clean", () => {
+        const FOLDER = { folder: "api--t1-fix--k7q2" }
+        async function doneWithAgent(over = {}) {
+            const env = setup(over)
+            await started(env)
+            await env.svc.start()
+            const t = env.store.tasks.get(1)
+            t.status = "done"
+            t.slug = "k7q2"
+            env.identity.scanFolders.mockImplementation(() => [FOLDER])
+            return env
+        }
+        const status = async (env, st) => {
+            env.events.emit("status", { paneId: "p1", status: st })
+            await env.svc.idle()
+        }
+
+        test("cleans first, closes once the turn is over and the folders are gone", async () => {
+            const env = await doneWithAgent()
+            const r = await env.svc.action(
+                1,
+                "close-agent",
+                { clean: true },
+                { actor: "me" }
+            )
+            expect(r).toMatchObject({
+                ok: true,
+                close_after: `clean:${r.delivery.outbox_id}`,
+                delivery: { status: "sent" },
+            })
+            expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(
+                "Clean: follow tree AGENTS.md §6 for slug k7q2."
+            )
+            const row = r.delivery.outbox_id
+            expect((await env.sessions.current(1)).close_after).toBe(
+                `clean:${row}`
+            )
+            expect(env.store.eventTypes()).toContain("agent_close_requested")
+            // an idle report before it took the turn changes nothing, even
+            // with no folders left
+            env.identity.scanFolders.mockImplementation(() => [])
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            env.identity.scanFolders.mockImplementation(() => [FOLDER])
+            await status(env, "working")
+            expect((await env.sessions.current(1)).close_after).toBe(
+                `clean:${row}:working`
+            )
+            // a dialog mid-clean (rm needs a yes) is left alone
+            await status(env, "blocked")
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            await status(env, "working")
+            env.identity.scanFolders.mockImplementation(() => [])
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
+            expect(await env.sessions.current(1)).toBeNull()
+            const closed = env.store.events.find(
+                (e) => e.type === "agent_closed"
+            )
+            expect(closed.data).toMatchObject({ after: "clean", name: NAME })
+            await env.svc.stop()
+        })
+
+        test("folders left after the turn: stays open, Now raised", async () => {
+            const env = await doneWithAgent()
+            await env.svc.action(1, "close-agent", { clean: true })
+            await status(env, "working")
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            expect((await env.sessions.current(1)).close_after).toBeNull()
+            expect(env.store.tasks.get(1).flags).toMatchObject({
+                now: true,
+                now_reason: CLEAN_LEFT_REASON,
+            })
+            expect(env.notifier.notify).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    title: `T-1: ${CLEAN_LEFT_REASON}`,
+                    body: FOLDER.folder,
+                })
+            )
+            const skipped = env.store.events.find(
+                (e) => e.type === "agent_close_skipped"
+            )
+            expect(skipped.data.folders).toEqual([FOLDER.folder])
+            // later idles do nothing more
+            await status(env, "working")
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            await env.svc.stop()
+        })
+
+        test("refused like Clean folders and like Close agent", async () => {
+            const env = await doneWithAgent()
+            env.store.tasks.get(1).status = "pr_open"
+            await expect(
+                env.svc.action(1, "close-agent", { clean: true })
+            ).rejects.toMatchObject({ code: "invalid_state" })
+            env.store.tasks.get(1).status = "done"
+            env.store.tasks.get(1).slug = null
+            await expect(
+                env.svc.action(1, "close-agent", { clean: true })
+            ).rejects.toMatchObject({ code: "no_slug" })
+            env.store.tasks.get(1).slug = "k7q2"
+            env.herdr.setStatus(NAME, "working")
+            await expect(
+                env.svc.action(1, "close-agent", { clean: true })
+            ).rejects.toMatchObject({ code: "agent_busy" })
+            expect((await env.sessions.current(1)).close_after).toBeFalsy()
+            expect(env.herdr.agentPrompt).toHaveBeenCalledTimes(1) // kickoff
+            await env.svc.stop()
+        })
+
+        test("an undelivered clean-up prompt cancels the close", async () => {
+            const env = await doneWithAgent()
+            const first = await env.sessions.current(1)
+            env.herdr.agentPrompt.mockRejectedValueOnce(herdrErr("boom"))
+            const r = await env.svc.action(1, "close-agent", { clean: true })
+            expect(r).toMatchObject({
+                close_after: null,
+                delivery: { status: "failed" },
+            })
+            expect(
+                env.sessions.rows.find((x) => x.id === first.id).close_after
+            ).toBeNull()
+            // a throwing delivery too
+            const env2 = await doneWithAgent()
+            env2.outbox.pending = jest.fn(async () => {
+                throw new Error("db gone")
+            })
+            await expect(
+                env2.svc.action(1, "close-agent", { clean: true })
+            ).rejects.toThrow("db gone")
+            expect((await env2.sessions.current(1)).close_after).toBeFalsy()
+            await env.svc.stop()
+            await env2.svc.stop()
+        })
+
+        test("a clean-up prompt that later failed or was cancelled cancels the close", async () => {
+            const env = await doneWithAgent()
+            const r = await env.svc.action(1, "close-agent", { clean: true })
+            const cur = await env.sessions.current(1)
+            // e.g. the row was cancelled from the outbox panel
+            env.outbox.byId = jest.fn(async () => ({
+                id: r.delivery.outbox_id,
+                status: "cancelled",
+            }))
+            env.identity.scanFolders.mockImplementation(() => [])
+            await status(env, "working")
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            expect((await env.sessions.current(1)).close_after).toBeNull()
+            const ev = env.store.events.find(
+                (e) => e.type === "agent_close_cancelled"
+            )
+            expect(ev.data).toMatchObject({
+                name: cur.name,
+                prompt: "cancelled",
+            })
+            // a still-queued row waits; a vanished row cancels
+            await env.sessions.update(cur.id, { close_after: "clean:99" })
+            env.outbox.byId = jest.fn(async () => ({
+                id: 99,
+                status: "pending",
+            }))
+            await status(env, "idle")
+            expect((await env.sessions.current(1)).close_after).toBe("clean:99")
+            env.outbox.byId = jest.fn(async () => null)
+            await status(env, "working")
+            expect((await env.sessions.current(1)).close_after).toBeNull()
+            await env.svc.stop()
+        })
+
+        test("the row id keeps a working mark set during the send", async () => {
+            const env = await doneWithAgent()
+            // herdr reports working while the prompt goes out
+            const realPrompt = env.herdr.agentPrompt.getMockImplementation()
+            env.herdr.agentPrompt.mockImplementationOnce(async (...a) => {
+                env.events.emit("status", { paneId: "p1", status: "working" })
+                return realPrompt ? realPrompt(...a) : {}
+            })
+            const r = await env.svc.action(1, "close-agent", { clean: true })
+            await env.svc.idle()
+            expect((await env.sessions.current(1)).close_after).toBe(
+                `clean:${r.delivery.outbox_id}:working`
+            )
+            env.identity.scanFolders.mockImplementation(() => [])
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
+            await env.svc.stop()
+        })
+
+        test("the prompt row and the marker are written in one transaction", async () => {
+            const transaction = jest.fn((fn) => fn())
+            const env = await doneWithAgent({ transaction })
+            const r = await env.svc.action(1, "close-agent", { clean: true })
+            expect(transaction).toHaveBeenCalledTimes(1)
+            expect(r.close_after).toBe(`clean:${r.delivery.outbox_id}`)
+            // a failing marker write leaves no clean-up prompt behind
+            const env2 = await doneWithAgent({
+                transaction: (fn) => {
+                    const before = env2.outbox.rows.length
+                    try {
+                        return fn()
+                    } catch (err) {
+                        env2.outbox.rows.length = before // rollback
+                        throw err
+                    }
+                },
+            })
+            const cur = await env2.sessions.current(1)
+            const realUpdate = env2.sessions.update
+            env2.sessions.update = (id, patch) => {
+                if (patch.close_after) throw new Error("disk full")
+                return realUpdate(id, patch)
+            }
+            await expect(
+                env2.svc.action(1, "close-agent", { clean: true })
+            ).rejects.toThrow("disk full")
+            expect(
+                env2.outbox.rows.filter((x) => x.reason === "clean")
+            ).toEqual([])
+            expect(cur.close_after).toBeFalsy()
+            await env.svc.stop()
+            await env2.svc.stop()
+        })
+
+        test("a clean-up prompt already queued is the one the close waits for", async () => {
+            const env = await doneWithAgent()
+            const queued = await env.outbox.enqueue({
+                task_id: 1,
+                text: "Clean",
+                reason: "clean",
+            })
+            const r = await env.svc.action(1, "close-agent", { clean: true })
+            expect(r).toMatchObject({
+                close_after: `clean:${queued.id}`,
+                delivery: { status: "queued", duplicate: true },
+            })
+            // still pending: a turn now is not the clean-up
+            await status(env, "working")
+            expect((await env.sessions.current(1)).close_after).toBe(
+                `clean:${queued.id}`
+            )
+            await env.svc.stop()
+        })
+
+        test("parseCloseAfter", () => {
+            expect(parseCloseAfter("clean:12")).toEqual({
+                rowId: 12,
+                working: false,
+            })
+            expect(parseCloseAfter("clean:7:working")).toEqual({
+                rowId: 7,
+                working: true,
+            })
+            expect(parseCloseAfter("clean:pending")).toBeNull()
+            expect(parseCloseAfter("other")).toBeNull()
+            expect(parseCloseAfter(null)).toBeNull()
+        })
+
+        test("resync closes a pending close whose idle event was missed", async () => {
+            const env = await doneWithAgent()
+            await env.svc.action(1, "close-agent", { clean: true })
+            await status(env, "working")
+            // the idle event was missed (service down): the row says idle,
+            // herdr says idle, the folders are gone
+            const cur = await env.sessions.current(1)
+            await env.sessions.update(cur.id, { state: "idle" })
+            env.identity.scanFolders.mockImplementation(() => [])
+            await env.svc.resync()
+            expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
+            await env.svc.stop()
+        })
+
+        test("a failed workspace close or folder scan keeps the close pending", async () => {
+            const env = await doneWithAgent()
+            await env.svc.action(1, "close-agent", { clean: true })
+            await status(env, "working")
+            env.identity.scanFolders.mockImplementation(() => {
+                throw new Error("tree unreadable")
+            })
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            expect((await env.sessions.current(1)).close_after).toMatch(
+                /^clean:\d+:working$/
+            )
+            env.identity.scanFolders.mockImplementation(() => [])
+            env.herdr.workspaceClose.mockRejectedValueOnce(
+                new Error("herdr down")
+            )
+            await status(env, "working")
+            await status(env, "idle")
+            expect((await env.sessions.current(1)).close_after).toMatch(
+                /^clean:\d+:working$/
+            )
+            await status(env, "working")
+            await status(env, "idle")
+            expect(await env.sessions.current(1)).toBeNull()
+            await env.svc.stop()
+        })
     })
 
     test("relaunch-codex: kind switch, session ended, fresh codex agent", async () => {

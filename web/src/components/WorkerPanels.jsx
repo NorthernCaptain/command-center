@@ -16,7 +16,11 @@ import {
     groupRounds,
     roundSummary,
 } from "../lib/feedback.js"
-import { deliverableState, watchFor } from "../lib/worker.js"
+import {
+    changeRecordBlocker,
+    deliverableState,
+    watchFor,
+} from "../lib/worker.js"
 
 export { groupRounds, roundSummary }
 
@@ -177,39 +181,48 @@ export function AgentPanel({ agent, outbox, task, onAction }) {
 
 // --- Deliverables ----------------------------------------------------------
 
-/** "Can I press Done?" for the deliverables (the server's close rule). */
-export function DeliverablesSummary({ deliverables, prs }) {
+/**
+ * "Can I press Done?" for the deliverables (the server's close rule) and,
+ * on a SOC2-area task, its change record (changeRecord: the task payload's
+ * change_record).
+ */
+export function DeliverablesSummary({ deliverables, prs, changeRecord }) {
     const list = deliverables || []
     const blocking = list.filter(
         (d) => !deliverableState(d, watchFor(prs, d)).done
     )
+    const record = changeRecordBlocker(changeRecord)
+    if (record || blocking.length)
+        return (
+            <div className="dlv-summary is-blocked" role="status">
+                <strong>
+                    {blocking.length
+                        ? `${blocking.length} of ${list.length} block Done`
+                        : "The SOC2 change record blocks Done"}
+                </strong>
+                <ul>
+                    {blocking.map((d) => (
+                        <li key={d.repo}>
+                            <code>{d.repo}</code>:{" "}
+                            {deliverableState(d, watchFor(prs, d)).reason}
+                        </li>
+                    ))}
+                    {record ? (
+                        <li className="dlv-record">SOC2: {record}</li>
+                    ) : null}
+                </ul>
+            </div>
+        )
     if (!list.length)
         return (
             <p className="dlv-summary is-clear" role="status">
                 ✓ No deliverables: nothing blocks Done.
             </p>
         )
-    if (!blocking.length)
-        return (
-            <p className="dlv-summary is-clear" role="status">
-                ✓ All {list.length} done (merged or no change): nothing blocks
-                Done.
-            </p>
-        )
     return (
-        <div className="dlv-summary is-blocked" role="status">
-            <strong>
-                {blocking.length} of {list.length} block Done
-            </strong>
-            <ul>
-                {blocking.map((d) => (
-                    <li key={d.repo}>
-                        <code>{d.repo}</code>:{" "}
-                        {deliverableState(d, watchFor(prs, d)).reason}
-                    </li>
-                ))}
-            </ul>
-        </div>
+        <p className="dlv-summary is-clear" role="status">
+            ✓ All {list.length} done (merged or no change): nothing blocks Done.
+        </p>
     )
 }
 
@@ -221,6 +234,7 @@ export function DeliverablesSummary({ deliverables, prs }) {
 export function DeliverablesPanel({
     deliverables,
     prs,
+    changeRecord,
     candidates,
     onNoChange,
     onClaim,
@@ -244,7 +258,11 @@ export function DeliverablesPanel({
 
     return (
         <div className="deliverables">
-            <DeliverablesSummary deliverables={list} prs={prs} />
+            <DeliverablesSummary
+                deliverables={list}
+                prs={prs}
+                changeRecord={changeRecord}
+            />
             {list.length ? (
                 <ul className="dlv-list">
                     {list.map((d) => {

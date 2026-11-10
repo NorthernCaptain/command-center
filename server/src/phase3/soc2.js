@@ -86,6 +86,17 @@ export function parseChangeRecord(artifact) {
 }
 
 /**
+ * The change record state shown on the task page: null for areas without
+ * one, else { section, present, missing } (missing: required labels without
+ * a value, in display order).
+ */
+export function changeRecordState(task, artifact) {
+    if (!requiresChangeRecord(task)) return null
+    const { present, missing } = parseChangeRecord(artifact)
+    return { section: SOC2_SECTION, present, missing }
+}
+
+/**
  * Throw 409 change_record_missing when a SOC2-area task's artifact lacks a
  * complete change record. No-op for other areas.
  */

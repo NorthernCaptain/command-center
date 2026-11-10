@@ -17,6 +17,11 @@ import { z } from "zod"
 import { ActorSchema, LINK_TYPES, taskKey } from "../contracts/schemas.js"
 import { newLinkId } from "../agent/jobs/util.js"
 import {
+    parseChangeRecord,
+    requiresChangeRecord,
+    SOC2_SECTION,
+} from "../phase3/soc2.js"
+import {
     AppError,
     NotFoundError,
     StaleRevisionError,
@@ -733,6 +738,21 @@ export function createAgentTools({
         return changed
     }
 
+    /**
+     * For a SOC2-area task whose change record is incomplete: the missing
+     * labels and a reminder, returned with a review / ready_for_pr report
+     * (the task can't be done until they are filled).
+     */
+    async function changeRecordHint(taskId, task) {
+        if (!requiresChangeRecord(task)) return {}
+        const { missing } = parseChangeRecord(await store.getArtifact(taskId))
+        if (!missing.length) return {}
+        return {
+            change_record_missing: missing,
+            note: `T-${taskId} (${task.area}) can't be done without a SOC2 change record: fill ${missing.join(", ")} in "${SOC2_SECTION}" with cc_update_artifact.`,
+        }
+    }
+
     async function cc_report(args, ctx = {}) {
         const { a, taskId, task, actor } = await begin("cc_report", args, ctx)
         if (a.status === "ready_for_pr" && !(a.work_repos || []).length)
@@ -790,7 +810,16 @@ export function createAgentTools({
             },
             actor
         )
-        const result = { ok: true, status: task.status, revision: art.revision }
+        const hint =
+            a.status === "review" || a.status === "ready_for_pr"
+                ? await changeRecordHint(taskId, task)
+                : {}
+        const result = {
+            ok: true,
+            status: task.status,
+            revision: art.revision,
+            ...hint,
+        }
 
         if (a.status === "progress") return result
 

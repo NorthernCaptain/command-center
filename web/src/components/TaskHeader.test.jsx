@@ -447,6 +447,49 @@ describe("TaskHeader Close agent", () => {
         )
     })
 
+    it("on a done task offers Clean folders, checked: clean first, then close", async () => {
+        const h = renderHeader(sampleTask({ status: "done", slug: "k7q2" }), {
+            agent: { state: "idle", name: "t12-fix" },
+        })
+        fireEvent.click(screen.getByRole("button", { name: "Close agent" }))
+        const box = screen.getByRole("checkbox", { name: "Clean folders" })
+        expect(box).toBeChecked()
+        expect(screen.getByRole("alertdialog")).toHaveTextContent(
+            "closes when it is done"
+        )
+        fireEvent.click(screen.getByRole("button", { name: "Clean and close" }))
+        await waitFor(() =>
+            expect(h.onAction).toHaveBeenCalledWith("close-agent", {
+                clean: true,
+            })
+        )
+    })
+
+    it("unchecking Clean folders just closes the workspace", async () => {
+        const h = renderHeader(sampleTask({ status: "done", slug: "k7q2" }), {
+            agent: { state: "idle", name: "t12-fix" },
+        })
+        fireEvent.click(screen.getByRole("button", { name: "Close agent" }))
+        fireEvent.click(screen.getByRole("checkbox", { name: "Clean folders" }))
+        expect(screen.getByRole("alertdialog")).toHaveTextContent(
+            "folders and branches stay"
+        )
+        fireEvent.click(screen.getByRole("button", { name: "Close workspace" }))
+        await waitFor(() =>
+            expect(h.onAction).toHaveBeenCalledWith("close-agent")
+        )
+    })
+
+    it("no Clean folders choice on an open task", () => {
+        renderHeader(sampleTask({ status: "active" }), {
+            agent: { state: "idle" },
+        })
+        fireEvent.click(screen.getByRole("button", { name: "Close agent" }))
+        expect(
+            screen.queryByRole("checkbox", { name: "Clean folders" })
+        ).toBeNull()
+    })
+
     it("is not shown without a live agent", () => {
         renderHeader(sampleTask({ status: "active" }), {
             agent: { state: "gone" },

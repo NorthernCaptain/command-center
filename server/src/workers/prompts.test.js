@@ -170,6 +170,24 @@ test("clean / send / resume prompts", () => {
     )
 })
 
+test("kickoff and fresh-context prompts ask SOC2 tasks for a change record", () => {
+    const args = {
+        repos: orderedRepos(task),
+        branch: task.branch,
+        slug: "k7q2",
+    }
+    expect(kickoffPrompt({ task, ...args })).not.toContain("SOC2")
+    const access = { ...task, area: "access" }
+    const text = kickoffPrompt({ task: access, ...args })
+    expect(text).toContain(
+        "- SOC2: the area is access, so this task can't be done without a change record."
+    )
+    expect(text).toContain('"Change record (SOC2)" section')
+    expect(
+        freshContextPrompt({ task: { ...task, area: "infra" }, artifact: "" })
+    ).toContain("- SOC2: the area is infra")
+})
+
 test("freshContextPrompt carries folders, feedback and artifact", () => {
     const text = freshContextPrompt({
         task,

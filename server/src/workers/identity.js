@@ -180,10 +180,12 @@ export function createIdentity({
     random = defaultRandom,
     org = null,
 }) {
-    function treeEntries() {
+    /** treeDir entries; [] when unreadable, unless strict (then throws). */
+    function treeEntries(strict = false) {
         try {
             return fs.readdirSync(treeDir, { withFileTypes: true })
-        } catch {
+        } catch (err) {
+            if (strict) throw err
             return []
         }
     }
@@ -326,10 +328,14 @@ export function createIdentity({
         }
     }
 
-    /** treeDir/*--<slug> folders with whatever their task notes say. */
-    function scanFolders(slug) {
+    /**
+     * treeDir/*--<slug> folders with whatever their task notes say. strict:
+     * an unreadable tree throws instead of looking empty (callers that act
+     * on "no folders left").
+     */
+    function scanFolders(slug, { strict = false } = {}) {
         if (!SLUG_RE.test(String(slug || ""))) return []
-        const dirs = treeEntries()
+        const dirs = treeEntries(strict)
             .filter((e) => e.isDirectory() && e.name.endsWith(`--${slug}`))
             .map((e) => e.name)
             .sort()

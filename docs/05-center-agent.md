@@ -305,3 +305,24 @@ center agent to Codex at any time, for example when Claude credits run out.
 ```
 
 Section names are stable IDs, so tools address them by name.
+
+**SOC2 change record.** Tasks in the infra, access, security and soc2 areas
+can't be done (status patch, `done` command, `close_out`) until What, Why,
+Risk, Rollback and Tested have a value. So nobody finds out only at close:
+
+- The section is added when a task gets one of these areas after it was
+  created (usually by enrich): every task update on a SOC2-area task adds the
+  empty section if it is missing and fixes the `**Area:**` in the header line.
+- The worker's kickoff (and fresh-context) prompt and the command-center
+  skill ask it to fill the record before it reports `review` or
+  `ready_for_pr`. Those reports answer with `change_record_missing` and a
+  note while labels are still empty.
+- `GET /api/tasks/:id` returns `change_record: { section, present, missing }`
+  for these areas, and the task page's Deliverables tab lists the missing
+  labels as a blocker next to the deliverables.
+- **Close out** answers 409 `change_record_missing` at once instead of
+  queuing a job that would fail.
+- When all PRs are merged, the PR watcher does not queue a close-out while
+  the record is incomplete. It raises Now "SOC2 change record missing",
+  notifies and logs `close_out_waiting` once per set of missing labels; the
+  first poll after the record is complete closes out.

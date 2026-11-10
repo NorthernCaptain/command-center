@@ -181,6 +181,11 @@ export const MIGRATIONS = [
     ALTER TABLE pr_watch ADD COLUMN last_review_at TEXT;
     CREATE INDEX agent_sessions_task ON agent_sessions(task_id, id);
     `,
+    // 4: Close agent with "Clean folders": close the workspace once the
+    // clean-up turn is over ("clean", then "clean:working" once it worked).
+    `
+    ALTER TABLE agent_sessions ADD COLUMN close_after TEXT;
+    `,
 ]
 
 /** Apply pending migrations. Returns the resulting schema version. */

@@ -18,6 +18,8 @@ const ActionBody = z
         text: z.string().max(20000).optional(),
         quote: z.string().max(5000).optional(),
         id: z.coerce.number().int().positive().optional(),
+        // close-agent: clean the folders first, close when that is done
+        clean: z.boolean().optional(),
     })
     .passthrough()
 const ActionName = z.enum(ACTIONS)

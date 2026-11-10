@@ -10,6 +10,7 @@ import {
     setAgentState,
     removeFromLanes,
     upsertById,
+    upsertJob,
     upsertComment,
     useBoard,
     useDebounced,
@@ -93,6 +94,31 @@ describe("upsertById", () => {
             { id: 1, a: 1, b: 2 },
         ])
         expect(upsertById([{ id: 1 }], null)).toEqual([{ id: 1 }])
+    })
+})
+
+describe("upsertJob", () => {
+    it("inserts and merges like upsertById", () => {
+        expect(upsertJob(null, { id: "j1", status: "queued" })).toEqual([
+            { id: "j1", status: "queued" },
+        ])
+        expect(
+            upsertJob([{ id: "j1", status: "queued" }], {
+                id: "j1",
+                status: "failed",
+                error: "x",
+            })
+        ).toEqual([{ id: "j1", status: "failed", error: "x" }])
+        const list = [{ id: "j1" }]
+        expect(upsertJob(list, null)).toBe(list)
+    })
+
+    it("does not move a finished job back to an active status", () => {
+        const list = [{ id: "j1", status: "failed", error: "x" }]
+        expect(upsertJob(list, { id: "j1", status: "queued" })).toBe(list)
+        expect(upsertJob(list, { id: "j1", status: "done" })).toEqual([
+            { id: "j1", status: "done", error: "x" },
+        ])
     })
 })
 

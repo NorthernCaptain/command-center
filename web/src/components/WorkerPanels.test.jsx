@@ -514,6 +514,47 @@ describe("DeliverablesSummary", () => {
         expect(box).not.toHaveTextContent(/a:/)
     })
 
+    it("a missing SOC2 change record blocks Done", () => {
+        const rec = {
+            section: "Change record (SOC2)",
+            present: true,
+            missing: ["rollback", "tested"],
+        }
+        const { rerender } = render(
+            <DeliverablesSummary
+                deliverables={[{ repo: "a", disposition: "no_change" }]}
+                changeRecord={rec}
+            />
+        )
+        let box = screen.getByRole("status")
+        expect(box).toHaveTextContent("The SOC2 change record blocks Done")
+        expect(box).toHaveTextContent(
+            'SOC2: fill Rollback, Tested in "Change record (SOC2)"'
+        )
+        rerender(
+            <DeliverablesSummary
+                deliverables={[{ repo: "b", disposition: "pending" }]}
+                changeRecord={{ ...rec, present: false }}
+            />
+        )
+        box = screen.getByRole("status")
+        expect(box).toHaveTextContent("1 of 1 block Done")
+        expect(box).toHaveTextContent(/b: no PR yet/)
+        expect(box).toHaveTextContent(
+            'SOC2: add a "Change record (SOC2)" section to the artifact and fill Rollback, Tested'
+        )
+        // complete record: back to the plain summary
+        rerender(
+            <DeliverablesSummary
+                deliverables={[]}
+                changeRecord={{ ...rec, missing: [] }}
+            />
+        )
+        expect(screen.getByRole("status")).toHaveTextContent(
+            "No deliverables: nothing blocks Done."
+        )
+    })
+
     it("each row says done or blocks Done", () => {
         render(
             <DeliverablesPanel

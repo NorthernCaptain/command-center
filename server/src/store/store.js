@@ -53,6 +53,8 @@ import {
 import {
     buildArtifactTemplate,
     parseSections,
+    SOC2_AREAS,
+    ensureChangeRecord,
     setSection,
     setTitleLine,
 } from "./artifact.js"
@@ -547,9 +549,16 @@ export function createStore({
             const written = await writeTaskFile(candidate)
             const task = written.task
             let artifactRevision = null
-            if (changed.includes("title")) {
+            // The title line follows the title; a SOC2-area task (also one
+            // whose area was set later) gets its change record section.
+            if (changed.includes("title") || SOC2_AREAS.includes(task.area)) {
                 const art = await readArtifact(id)
-                const content = setTitleLine(art.content, id, task.title)
+                const content = ensureChangeRecord(
+                    changed.includes("title")
+                        ? setTitleLine(art.content, id, task.title)
+                        : art.content,
+                    task
+                )
                 if (content !== art.content)
                     artifactRevision = await writeArtifactFile(id, content)
             }

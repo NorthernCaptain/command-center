@@ -1113,6 +1113,55 @@ describe("cc_report", () => {
         expect(body).toContain("  - Checks: tests pass, review GOOD_TO_GO")
     })
 
+    test("review on a SOC2 task reminds about a missing change record", async () => {
+        await store.updateTask(id, { area: "access" }, { actor: "me" })
+        const r = await tools.cc_report({
+            task_id: id,
+            status: "review",
+            summary: "granted",
+        })
+        expect(r).toMatchObject({
+            ok: true,
+            status: "review",
+            change_record_missing: [
+                "what",
+                "why",
+                "risk",
+                "rollback",
+                "tested",
+            ],
+        })
+        expect(r.note).toContain(
+            'fill what, why, risk, rollback, tested in "Change record (SOC2)"'
+        )
+        const { content, revision } = await store.getArtifact(id)
+        await store.writeArtifact(
+            id,
+            content
+                .replace("- What:", "- What: a")
+                .replace("- Why:", "- Why: b")
+                .replace("- Risk:", "- Risk: c")
+                .replace("- Rollback:", "- Rollback: d")
+                .replace("- Tested:", "- Tested: e"),
+            { actor: "me", baseRevision: revision }
+        )
+        const r2 = await tools.cc_report({
+            task_id: id,
+            status: "review",
+            summary: "again",
+        })
+        expect(r2.change_record_missing).toBeUndefined()
+        expect(r2.note).toBeUndefined()
+        // progress reports never carry it
+        const fresh = await seedTask({ area: "security" })
+        const r3 = await tools.cc_report({
+            task_id: fresh,
+            status: "progress",
+            summary: "x",
+        })
+        expect(r3.change_record_missing).toBeUndefined()
+    })
+
     test("ready_for_pr ignores deliverables Leo marked no_change", async () => {
         const mixed = await seedTask({
             deliverables: [

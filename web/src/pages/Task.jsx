@@ -43,7 +43,7 @@ import { useToast } from "../components/Toasts.jsx"
 import { api, errorMessage } from "../lib/api.js"
 import { taskKey } from "../lib/constants.js"
 import { doneMessage } from "../lib/done.js"
-import { upsertById, upsertComment, useTask } from "../lib/hooks.js"
+import { upsertById, upsertComment, upsertJob, useTask } from "../lib/hooks.js"
 import {
     hasConflictMarkers,
     normalizeEol,
@@ -52,6 +52,7 @@ import {
 import { snoozeTask } from "../lib/snooze.js"
 import {
     blockingDeliverables,
+    changeRecordBlocker,
     actionToast,
     pollError,
     visibleTabs,
@@ -209,12 +210,14 @@ export default function TaskPage({ id }) {
         comments: openCount,
         feedback: openFeedback,
         // deliverables that keep the task from Done
-        deliverables: blockingDeliverables(task, data.prs).length,
+        deliverables:
+            blockingDeliverables(task, data.prs).length +
+            (changeRecordBlocker(data.change_record) ? 1 : 0),
     }
 
     function addJob(job) {
         if (job)
-            setData((prev) => ({ ...prev, jobs: upsertById(prev.jobs, job) }))
+            setData((prev) => ({ ...prev, jobs: upsertJob(prev.jobs, job) }))
     }
 
     async function patch(p) {
@@ -598,6 +601,7 @@ export default function TaskPage({ id }) {
             <DeliverablesPanel
                 deliverables={task.deliverables}
                 prs={data.prs}
+                changeRecord={data.change_record}
                 candidates={data.pr_candidates}
                 onNoChange={noChange}
                 onClaim={claim}

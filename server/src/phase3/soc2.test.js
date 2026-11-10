@@ -9,6 +9,7 @@ import { createFakeClock } from "../util/clock.js"
 import {
     assertChangeRecord,
     assertTaskChangeRecord,
+    changeRecordState,
     createSoc2,
     parseBound,
     parseChangeRecord,
@@ -91,6 +92,22 @@ describe("parseChangeRecord", () => {
         })
         expect(parseChangeRecord(null).present).toBe(false)
         expect(parseChangeRecord(undefined).present).toBe(false)
+    })
+})
+
+describe("changeRecordState", () => {
+    test("null outside SOC2 areas, else section, presence and gaps", () => {
+        expect(changeRecordState({ area: "backend" }, FULL)).toBeNull()
+        expect(changeRecordState({ area: "infra" }, FULL)).toEqual({
+            section: "Change record (SOC2)",
+            present: true,
+            missing: [],
+        })
+        expect(changeRecordState({ area: "access" }, "# T-1\n")).toEqual({
+            section: "Change record (SOC2)",
+            present: false,
+            missing: ["what", "why", "risk", "rollback", "tested"],
+        })
     })
 })
 

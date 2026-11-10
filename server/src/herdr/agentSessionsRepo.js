@@ -26,6 +26,7 @@ function toSession(row) {
         started_at: row.started_at,
         last_seen_at: row.last_seen_at,
         ended_at: row.ended_at,
+        close_after: row.close_after ?? null,
     }
 }
 
@@ -33,6 +34,7 @@ const UPDATABLE = {
     state: "state",
     session_id: "claude_session_id",
     last_seen_at: "last_seen_at",
+    close_after: "close_after",
 }
 
 export function createAgentSessionsRepo(db, { clock = systemClock } = {}) {
@@ -121,7 +123,7 @@ export function createAgentSessionsRepo(db, { clock = systemClock } = {}) {
             return st.live.all().map(toSession)
         },
 
-        /** update(id, { state?, session_id?, last_seen_at? }) -> row. last_seen_at defaults to now. */
+        /** update(id, { state?, session_id?, last_seen_at?, close_after? }) -> row. last_seen_at defaults to now. */
         update(id, patch = {}) {
             const sets = []
             const values = []

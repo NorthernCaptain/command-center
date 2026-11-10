@@ -11,6 +11,18 @@ import { taskKey } from "../contracts/schemas.js"
 export const SOC2_AREAS = ["infra", "access", "security", "soc2"]
 const SOC2_SECTION = "Change record (SOC2)"
 const RESULT_SECTION = "Result"
+const PR_FEEDBACK_SECTION = "PR feedback"
+// Labels checked before done (phase3/soc2.js): What, Why, Risk, Rollback,
+// Tested must have a value.
+const CHANGE_RECORD_BODY = [
+    "- What:",
+    "- Why:",
+    "- Risk:",
+    "- Rollback:",
+    "- Tested:",
+    "- Approved by:",
+    "- Evidence:",
+].join("\n")
 
 const HEADING_RE = /^## +(.+?)[ \t]*#*[ \t]*$/
 const FENCE_RE = /^ {0,3}(`{3,}|~{3,})/
@@ -170,23 +182,9 @@ export function buildArtifactTemplate(task) {
         ["Progress", "<!-- worker appends -->"],
         ["Links", "<!-- rendered from task links -->"],
     ]
-    if (SOC2_AREAS.includes(task.area)) {
-        sections.push([
-            SOC2_SECTION,
-            // Labels checked before done (phase3/soc2.js): What, Why, Risk,
-            // Rollback, Tested must have a value.
-            [
-                "- What:",
-                "- Why:",
-                "- Risk:",
-                "- Rollback:",
-                "- Tested:",
-                "- Approved by:",
-                "- Evidence:",
-            ].join("\n"),
-        ])
-    }
-    sections.push(["PR feedback", "<!-- per PR and round -->"])
+    if (SOC2_AREAS.includes(task.area))
+        sections.push([SOC2_SECTION, CHANGE_RECORD_BODY])
+    sections.push([PR_FEEDBACK_SECTION, "<!-- per PR and round -->"])
     sections.push([RESULT_SECTION, "<!-- filled by close_out -->"])
 
     const parts = [titleLine(task.id, task.title), "", ...header, ""]
@@ -196,4 +194,23 @@ export function buildArtifactTemplate(task) {
         parts.push("")
     }
     return parts.join("\n")
+}
+
+/**
+ * Keep the artifact in step with a SOC2-area task (area set after creation,
+ * e.g. by enrich): add the empty "Change record (SOC2)" section when it is
+ * missing (before "## PR feedback", else before "## Result", else at the
+ * end) and update the "**Area:**" in the header line. Other areas: unchanged.
+ */
+export function ensureChangeRecord(content, task) {
+    if (!task || !SOC2_AREAS.includes(task.area)) return content
+    let out = content.replace(
+        /^(> \*\*Source:\*\* .* · \*\*Area:\*\* )\S+$/m,
+        (_, head) => head + task.area
+    )
+    if (findSection(out, SOC2_SECTION)) return out
+    const feedback = findSection(out, PR_FEEDBACK_SECTION)
+    if (!feedback) return setSection(out, SOC2_SECTION, CHANGE_RECORD_BODY)
+    const block = `## ${SOC2_SECTION}\n${CHANGE_RECORD_BODY}\n\n`
+    return out.slice(0, feedback.start) + block + out.slice(feedback.start)
 }
