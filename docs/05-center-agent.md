@@ -9,8 +9,9 @@ The "center agent" is **not a single long-running conversation** that
 handles my requests one at a time. It is a shared configuration (system
 prompt, tools, model choice) plus a **job runner**. Every request is an
 independent, short-lived job with only the context it needs: the task's
-artifact, the relevant comment thread, the last few chat messages. Many jobs
-run at the same time.
+artifact, the relevant comment thread, the last few chat messages (a chat
+job gets the task's previous chat exchanges, since every chat bar message
+is its own thread). Many jobs run at the same time.
 
 ## Concurrency and responsiveness
 
@@ -129,7 +130,7 @@ center agent to Codex at any time, for example when Claude credits run out.
 | `asana_create` | background | **Create in Asana** / Start | asana | gid + link (mostly deterministic code; LLM only drafts the notes) |
 | `pr_feedback` | background | PR watcher found new comments/reviews/CI failures (phase 2) | gh read | per item: actionable?, one-line summary (written to `feedback.jsonl`) |
 | `asana_sync` | background | branch assigned, PR claimed, feedback round resolved, status change | asana | Asana description block + attachments refreshed (deterministic; LLM only rewrites prose) |
-| `close_out` | background | PRs merged / accepted | asana, artifact | Result section, Asana comment + complete |
+| `close_out` | background | PRs merged / accepted | asana, artifact | Result section (if empty), Asana conclusion comment + complete |
 | `followup` | background | `center_job` schedule | gh read, herdr read, task tools | surface / prompt agent / reschedule |
 
 ## Tools exposed to the center agent

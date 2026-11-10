@@ -3,18 +3,13 @@
  * MIT license.
  */
 
-import {
-    useCallback,
-    useEffect,
-    useLayoutEffect,
-    useRef,
-    useState,
-} from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import Board from "../components/Board.jsx"
 import CaptureBox from "../components/CaptureBox.jsx"
 import DigestCard from "../components/DigestCard.jsx"
-import { JobChip } from "../components/JobChips.jsx"
+import JobPanel from "../components/JobPanel.jsx"
+export { mergeJob } from "../components/JobPanel.jsx"
 import TaskRow from "../components/TaskRow.jsx"
 import { TOPBAR_SLOT_ID } from "../components/TopBar.jsx"
 import { EmptyState, SkeletonRows } from "../components/Skeleton.jsx"
@@ -101,61 +96,6 @@ function useSearch(isOwner) {
         }
     }, [q, version, isOwner])
     return { q, setQ, results, searching }
-}
-
-const JOB_STAGE = { queued: 0, running: 1, parked: 1 }
-const jobStage = (status) => JOB_STAGE[status] ?? 2 // terminal = 2
-
-/**
- * Merge a job view into the panel state. A fetched response can be older
- * than an SSE event that already arrived: never move a job back to an
- * earlier stage (queued -> running/parked -> done|failed|cancelled).
- */
-export function mergeJob(state, next) {
-    if (!next || next.id !== state.id) return state
-    if (jobStage(next.status) < jobStage(state.status)) return state
-    return { ...state, ...next }
-}
-
-/** Live view of a /api/command job. */
-function CommandPanel({ job, prompt, onClose }) {
-    const [state, setState] = useState(job)
-    const [text, setText] = useState("")
-    // SSE only carries future changes: fetch the stored job on mount and
-    // after a reconnect, so a job that finished meanwhile still shows up.
-    const refresh = useCallback(() => {
-        api.getJob(job.id)
-            .then((res) => setState((s) => mergeJob(s, res && res.job)))
-            .catch(() => {})
-    }, [job.id])
-    useEffect(() => {
-        refresh()
-    }, [refresh])
-    useEvents(["job.updated", "job.delta", "stream.reconnected"], (evt) => {
-        if (evt.type === "stream.reconnected") return refresh()
-        const d = evt.data || {}
-        if (evt.type === "job.updated" && d.job && d.job.id === job.id)
-            setState((s) => mergeJob(s, d.job))
-        if (evt.type === "job.delta" && d.job_id === job.id)
-            setText((t) => t + (d.text || ""))
-    })
-    return (
-        <section className="command-panel" aria-label="Center agent command">
-            <p className="command-prompt">
-                <span aria-hidden="true">›</span> {prompt}
-            </p>
-            <JobChip job={state} text={text} onDismiss={onClose} />
-            {["done", "failed", "cancelled"].includes(state.status) ? null : (
-                <button
-                    type="button"
-                    className="btn btn-ghost btn-xs command-close"
-                    onClick={onClose}
-                >
-                    Hide
-                </button>
-            )}
-        </section>
-    )
 }
 
 /** The top bar's slot element, found before the first paint (or null). */
@@ -285,7 +225,7 @@ export default function Home() {
             {isOwner && features.digest && !q.trim() ? <DigestCard /> : null}
 
             {command ? (
-                <CommandPanel
+                <JobPanel
                     key={command.job.id}
                     job={command.job}
                     prompt={command.prompt}

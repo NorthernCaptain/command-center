@@ -66,6 +66,72 @@ export function prLabel(url) {
     return m ? `${m[1]}#${m[2]}` : null
 }
 
+// a Markdown link or a bare URL (trailing punctuation stays outside)
+const LINK_RE =
+    /\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)|https?:\/\/[^\s<>()"'`]*[^\s<>()"'`.,;:!?]/g
+
+function boldHtml(text) {
+    return escapeHtml(text).replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+}
+
+/**
+ * One line of the center agent's text -> Asana rich text: `code`,
+ * **bold**, [label](url) and bare URLs as links; everything else escaped.
+ */
+export function inlineHtml(text) {
+    return String(text ?? "")
+        .split(/(`[^`\n]+`)/)
+        .map((part) => {
+            if (/^`[^`\n]+`$/.test(part))
+                return `<code>${escapeHtml(part.slice(1, -1))}</code>`
+            let out = ""
+            let last = 0
+            for (const m of part.matchAll(LINK_RE)) {
+                out += boldHtml(part.slice(last, m.index))
+                out += m[2] ? link(m[2], m[1]) : link(m[0])
+                last = m.index + m[0].length
+            }
+            return out + boldHtml(part.slice(last))
+        })
+        .join("")
+}
+
+const clean = (items) =>
+    (items || []).map((s) => String(s ?? "").trim()).filter(Boolean)
+
+/**
+ * The conclusion posted on the Asana task at close-out, as rich text
+ * (`html_text`) or plain text. Empty string when there is nothing to say.
+ * @param {{ outcome?: string, points?: string[], open_items?: string[] }} c
+ * @returns {{ html: string, text: string }}
+ */
+export function buildConclusion(c = {}) {
+    const outcome = String(c.outcome ?? "").trim()
+    const points = clean(c.points)
+    const open = clean(c.open_items)
+    if (!outcome && !points.length) return { html: "", text: "" }
+    const list = (items) =>
+        `<ul>${items.map((i) => `<li>${inlineHtml(i)}</li>`).join("")}</ul>`
+    const blocks = [
+        ["Done", outcome, []],
+        ["Details", "", points],
+        ["Still open", "", open],
+    ].filter(([, t, items]) => t || items.length)
+    const html = blocks
+        .map(
+            ([title, t, items]) =>
+                `<strong>${title}</strong>\n${t ? inlineHtml(t) : list(items)}`
+        )
+        .join("\n\n")
+    const text = blocks
+        .map(
+            ([title, t, items]) =>
+                `${title}\n${t || items.map((i) => `- ${i}`).join("\n")}`
+        )
+        .join("\n\n")
+    return { html: `<body>${html}</body>`, text }
+}
+
 function paragraph(title, text) {
     const t = String(text ?? "").trim()
     if (!t) return ""

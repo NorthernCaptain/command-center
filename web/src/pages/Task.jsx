@@ -3,19 +3,29 @@
  * MIT license.
  */
 
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { isLiveAgent } from "../components/AgentChip.jsx"
 import ArtifactEditor from "../components/ArtifactEditor.jsx"
 import ArtifactView from "../components/ArtifactView.jsx"
 import { allLinks, withLinksSection } from "../lib/links.js"
+import { withFeedbackSection } from "../lib/feedback.js"
+import {
+    closedChat,
+    latestChat,
+    rememberClosedChat,
+    splitChat,
+} from "../lib/chat.js"
 import ChatBar from "../components/ChatBar.jsx"
+import ChatPanel from "../components/ChatPanel.jsx"
 import CommentsPanel from "../components/CommentsPanel.jsx"
 import HistoryDrawer from "../components/HistoryDrawer.jsx"
 import JobChips from "../components/JobChips.jsx"
+import JobPanel from "../components/JobPanel.jsx"
 import Link from "../components/Link.jsx"
 import SelectionPopover from "../components/SelectionPopover.jsx"
 import { EmptyState, SkeletonDoc } from "../components/Skeleton.jsx"
 import TaskHeader from "../components/TaskHeader.jsx"
+import useDockHeight from "../lib/useDockHeight.js"
 import {
     ActivityList,
     LinksList,
@@ -62,6 +72,11 @@ export default function TaskPage({ id }) {
         useTask(id)
     const [tab, setTab] = useState("comments")
     const [sheetOpen, setSheetOpen] = useState(false)
+    // the last chat request and its live reply, shown above the chat input
+    const [chat, setChat] = useState(null)
+    // chat jobs closed from the panel don't come back as chips (the one in
+    // the panel isn't a chip either; a replaced, still running one is)
+    const closedChatJobs = useRef(new Set())
     const [historyOpen, setHistoryOpen] = useState(false)
     const [editing, setEditing] = useState(null)
     const [orphans, setOrphans] = useState([])
@@ -85,6 +100,29 @@ export default function TaskPage({ id }) {
         []
     )
     const closeHistory = useCallback(() => setHistoryOpen(false), [])
+    // the dock grows with the chat reply: the page reserves its real height
+    const dockRef = useRef(null)
+    useDockHeight(dockRef, Boolean(isOwner && data && !hidden))
+    // back on the page: the latest chat exchange (saved as a comment thread
+    // and its assist job) shows again unless it was closed here
+    const chatFor = useRef(null)
+    // the chat bar's threads are the Chat tab, the rest are comments (kept
+    // stable: the artifact re-highlights when its threads change)
+    const comments = data ? data.comments : null
+    const { comments: threads, chats } = useMemo(
+        () => splitChat(comments),
+        [comments]
+    )
+    const loadedId = data && data.task ? String(data.task.id) : null
+    useEffect(() => {
+        if (!isOwner || !loadedId || chatFor.current === loadedId) return
+        chatFor.current = loadedId
+        const last = latestChat(data.comments, data.jobs)
+        if (last && closedChat(loadedId) === last.job.id) {
+            closedChatJobs.current.add(last.job.id)
+            setChat(null)
+        } else setChat(last)
+    }, [isOwner, loadedId, data])
 
     if (hidden) {
         return (
@@ -152,7 +190,6 @@ export default function TaskPage({ id }) {
     const { task, artifact } = data
     // source link (e.g. the Slack thread) + task links, for the tab and doc
     const links = allLinks(task)
-    const threads = data.comments || []
     const openCount = threads.filter((t) => t.status !== "resolved").length
     const tabs = visibleTabs(data, features)
     const currentTab = tabs.some((t) => t.id === tab) ? tab : "comments"
@@ -307,6 +344,14 @@ export default function TaskPage({ id }) {
         } catch (err) {
             toast.error(err)
             throw err
+        }
+    }
+
+    async function cancelJob(job) {
+        try {
+            await api.cancelJob(job.id)
+        } catch (err) {
+            toast.error(err)
         }
     }
 
@@ -506,6 +551,8 @@ export default function TaskPage({ id }) {
                 }
                 onStatus={setCommentStatus}
             />
+        ) : currentTab === "chat" ? (
+            <ChatPanel threads={chats} />
         ) : currentTab === "agent" ? (
             <AgentPanel
                 agent={data.agent}
@@ -624,7 +671,10 @@ export default function TaskPage({ id }) {
                     ) : (
                         <ArtifactView
                             rootRef={artifactRef}
-                            content={withLinksSection(artifact.content, links)}
+                            content={withFeedbackSection(
+                                withLinksSection(artifact.content, links),
+                                data.feedback
+                            )}
                             threads={isOwner ? threads : []}
                             activeId={activeId}
                             focusKey={focus.n}
@@ -688,17 +738,34 @@ export default function TaskPage({ id }) {
             </div>
 
             {isOwner ? (
-                <div className="dock">
+                <div className="dock" ref={dockRef}>
+                    {chat ? (
+                        <JobPanel
+                            key={chat.job.id}
+                            job={chat.job}
+                            prompt={chat.prompt}
+                            className="dock-reply"
+                            onCancel={cancelJob}
+                            onMore={() => {
+                                setTab("chat")
+                                setSheetOpen(true)
+                            }}
+                            moreLabel="Full chat"
+                            onClose={() => {
+                                closedChatJobs.current.add(chat.job.id)
+                                rememberClosedChat(loadedId, chat.job.id)
+                                setChat(null)
+                            }}
+                        />
+                    ) : null}
                     <JobChips
-                        jobs={data.jobs}
+                        jobs={(data.jobs || []).filter(
+                            (j) =>
+                                !(chat && j.id === chat.job.id) &&
+                                !closedChatJobs.current.has(j.id)
+                        )}
                         deltas={deltas}
-                        onCancel={async (job) => {
-                            try {
-                                await api.cancelJob(job.id)
-                            } catch (err) {
-                                toast.error(err)
-                            }
-                        }}
+                        onCancel={cancelJob}
                     />
                     <div className="dock-row">
                         <button
@@ -710,9 +777,14 @@ export default function TaskPage({ id }) {
                             ☰ <span className="lane-count">{openCount}</span>
                         </button>
                         <ChatBar
-                            onSend={(body) =>
-                                postComment({ body, intent: "chat" })
-                            }
+                            onSend={async (body) => {
+                                const res = await postComment({
+                                    body,
+                                    intent: "chat",
+                                })
+                                if (res && res.job)
+                                    setChat({ job: res.job, prompt: body })
+                            }}
                         />
                     </div>
                 </div>

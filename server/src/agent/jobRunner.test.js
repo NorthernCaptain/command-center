@@ -149,6 +149,40 @@ describe("job runner", () => {
         await s.runner.stop()
     })
 
+    test("afterApply runs outside the task lock and its result wins", async () => {
+        const seen = []
+        const locks = createLockManager()
+        const s = setup({
+            modules: [
+                mod({
+                    lock: true,
+                    needsTask: true,
+                    apply: async (ctx, out, context) => {
+                        context.fromApply = true
+                        return { summary: "apply" }
+                    },
+                    afterApply: async (ctx, out, context) => {
+                        seen.push(context.fromApply)
+                        // another holder (no lock context of ours) can take
+                        // the task lock now; inside the lock this would hang
+                        await locks.outside(() =>
+                            locks.withLock(1, async () => seen.push("lock"))
+                        )
+                        return { summary: "after" }
+                    },
+                }),
+            ],
+        })
+        s.store.withTaskLock = (id, fn) => locks.withLock(id, fn)
+        s.store.outsideLocks = (fn) => locks.outside(fn)
+        s.runner.start()
+        const job = s.runner.enqueue("t", {}, { task_id: 1 })
+        await waitFor(() => s.runner.get(job.id)?.status === "done")
+        expect(seen).toEqual([true, "lock"])
+        expect(s.runner.get(job.id).summary).toBe("after")
+        await s.runner.stop()
+    })
+
     test("runs a job to done, persists and emits", async () => {
         const deltaMod = mod({
             buildPrompt: (ctx) => {
@@ -926,6 +960,14 @@ describe("job runner", () => {
             task_id: null,
         })
         expect(publicJob(job)).not.toHaveProperty("input")
+        expect(publicJob(job)).not.toHaveProperty("comment_id")
+        // an assist job names the comment thread it answers, nothing more
+        const assist = publicJob({
+            ...job,
+            input: { comment_id: "c_1", message: "hi" },
+        })
+        expect(assist.comment_id).toBe("c_1")
+        expect(assist).not.toHaveProperty("input")
         expect(fromRow({ id: "y", status: "queued" }).input).toEqual({})
     })
 

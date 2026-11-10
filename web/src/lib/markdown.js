@@ -13,6 +13,7 @@
 // data through an image URL): they render as links instead.
 
 import MarkdownIt from "markdown-it"
+import { isAppPath } from "./links.js"
 
 const TASK_RE = /^\[([ xX])\]\s+/
 const LEADING_COMMENTS_RE = /^(?:\s*<!--[\s\S]*?-->)+/
@@ -118,8 +119,11 @@ function configure(md) {
             self.renderToken(tokens, idx, options))
     md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
         const token = tokens[idx]
-        token.attrSet("target", "_blank")
-        token.attrSet("rel", "noopener noreferrer")
+        // app pages ("/t/2") open in this tab; everything else in a new one
+        if (!isAppPath(token.attrGet("href"))) {
+            token.attrSet("target", "_blank")
+            token.attrSet("rel", "noopener noreferrer")
+        }
         return defaultLinkOpen(tokens, idx, options, env, self)
     }
 

@@ -74,6 +74,9 @@ staged changes], checks)`. Stop and wait. If the answer is `ok: false`
   (work repos differ from deliverables), fix the registration or explain.
 - **Non-code result** (investigation, doc, answer):
   `cc_report(status="review", summary)`.
+- **More work after a review:** when Leo answers or asks for more after a
+  `review` report and you start working again, the task goes back to
+  `active`. Report again (`review` or `ready_for_pr`) when you are done.
 - **No change needed** in a repo you were set up in (every repo you got a
   folder for is a deliverable, and the task can't close while one is
   pending): say so in the same report with

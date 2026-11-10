@@ -392,6 +392,29 @@ describe("FeedbackPanel", () => {
         expect(onReopen.mock.calls[0][0].id).toBe("gh-ic-3")
     })
 
+    it("says when all feedback is addressed, or how much is open", () => {
+        const done = [
+            { ...items[0], actionable: true },
+            { ...items[2], actionable: false },
+        ]
+        const { rerender } = render(
+            <FeedbackPanel feedback={done} onReopen={jest.fn()} />
+        )
+        expect(screen.getByRole("status")).toHaveTextContent(
+            "✓ All feedback addressed (1 item)"
+        )
+        expect(screen.getByRole("status")).toHaveClass("fb-state-addressed")
+        rerender(
+            <FeedbackPanel
+                feedback={[...done, { ...items[3], actionable: true }]}
+                onReopen={jest.fn()}
+            />
+        )
+        expect(screen.getByRole("status")).toHaveTextContent(
+            "1 of 2 feedback items open"
+        )
+    })
+
     it("shows an empty state", () => {
         render(<FeedbackPanel feedback={[]} onReopen={jest.fn()} />)
         expect(screen.getByText("No PR feedback yet.")).toBeInTheDocument()

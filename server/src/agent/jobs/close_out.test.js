@@ -5,7 +5,11 @@
 
 import { jest } from "@jest/globals"
 import { createFakeStore, makeCtx, makeTask } from "../testing/fakes.js"
-import job, { enqueueCloseOut, openDeliverables } from "./close_out.js"
+import job, {
+    enqueueCloseOut,
+    hasResult,
+    openDeliverables,
+} from "./close_out.js"
 
 const ASANA = {
     gid: "777",
@@ -14,7 +18,13 @@ const ASANA = {
     no_section: false,
     attachments: [],
 }
-const OUT = { result_md: "Shipped PR #12.", asana_comment: "Done, see PR #12." }
+const CONCLUSION = {
+    outcome: "Shipped the retry fix.",
+    points: ["Fix in https://github.com/acme/api/pull/12"],
+    open_items: [],
+}
+const OUT = { result_md: "Shipped PR #12.", asana_conclusion: CONCLUSION }
+const NO_CONCLUSION = { outcome: " ", points: [], open_items: [] }
 
 function setup(taskOver = {}, deps) {
     const store = createFakeStore({
@@ -22,6 +32,7 @@ function setup(taskOver = {}, deps) {
     })
     const asanaService = {
         comment: jest.fn(),
+        commentHtml: jest.fn(),
         complete: jest.fn(),
         getTask: jest.fn(async () => ({ completed: false })),
     }
@@ -51,23 +62,29 @@ describe("close_out", () => {
         expect((await store.getArtifact(1)).content).toMatch(
             /## Result\nShipped PR #12.\n/
         )
-        expect(asanaService.comment).toHaveBeenCalledWith(
+        expect(asanaService.commentHtml).toHaveBeenCalledWith(
             "777",
-            "Done, see PR #12."
+            '<body><strong>Done</strong>\nShipped the retry fix.\n\n<strong>Details</strong>\n<ul><li>Fix in <a href="https://github.com/acme/api/pull/12">https://github.com/acme/api/pull/12</a></li></ul></body>'
         )
+        expect(asanaService.comment).not.toHaveBeenCalled()
         expect(asanaService.complete).toHaveBeenCalledWith("777")
         expect((await store.getTask(1)).task.status).toBe("done")
         expect(res.summary).toBe("Closed out (Asana completed)")
         await job.apply({ ...ctx, attempt: 2 }, OUT, context)
-        expect(asanaService.comment).toHaveBeenCalledTimes(1)
+        expect(asanaService.commentHtml).toHaveBeenCalledTimes(1)
         expect(asanaService.complete).toHaveBeenCalledTimes(1)
     })
 
     test("empty comment skips the comment but completes", async () => {
         const { ctx, asanaService } = setup({ asana: ASANA })
         const { context } = await job.prepare(ctx)
-        await job.apply(ctx, { ...OUT, asana_comment: " " }, context)
+        await job.apply(
+            ctx,
+            { ...OUT, asana_conclusion: NO_CONCLUSION },
+            context
+        )
         expect(asanaService.comment).not.toHaveBeenCalled()
+        expect(asanaService.commentHtml).not.toHaveBeenCalled()
         expect(asanaService.complete).toHaveBeenCalled()
     })
 
@@ -90,6 +107,58 @@ describe("close_out", () => {
         expect(c.store.calls.filter((x) => x[0] === "updateTask")).toHaveLength(
             0
         )
+    })
+
+    test("a written Result is kept; the conclusion is based on it", async () => {
+        const { ctx, store, asanaService } = setup({ asana: ASANA })
+        const art = await store.getArtifact(1)
+        await store.setArtifact(
+            1,
+            art.content.replace(
+                /## Result\n[^#]*/,
+                "## Result\n<!-- filled by close_out -->\nRoot cause: radio off.\n"
+            )
+        )
+        const { context } = await job.prepare(ctx)
+        expect(context.keepResult).toBe(true)
+        expect(job.buildPrompt(ctx, context).prompt).toMatch(
+            /Result section is already written: keep it/
+        )
+        const res = await job.apply(
+            ctx,
+            { ...OUT, result_md: "a rewrite" },
+            context
+        )
+        const content = (await store.getArtifact(1)).content
+        expect(content).toMatch(/Root cause: radio off\./)
+        expect(content).not.toMatch(/a rewrite/)
+        expect(asanaService.commentHtml).toHaveBeenCalledTimes(1)
+        expect(res.summary).toBe(
+            "Closed out (kept the written Result; Asana completed)"
+        )
+    })
+
+    test("an empty Result needs result_md", async () => {
+        const { ctx, store, asanaService } = setup({ asana: ASANA })
+        const { context } = await job.prepare(ctx)
+        expect(context.keepResult).toBe(false)
+        expect(job.buildPrompt(ctx, context).prompt).toMatch(
+            /Result section is empty: write result_md/
+        )
+        await expect(
+            job.apply(ctx, { ...OUT, result_md: "  " }, context)
+        ).rejects.toMatchObject({ code: "invalid_output" })
+        expect(asanaService.commentHtml).not.toHaveBeenCalled()
+        expect((await store.getTask(1)).task.status).toBe("active")
+    })
+
+    test("hasResult", () => {
+        expect(
+            hasResult("# x\n\n## Result\n<!-- filled by close_out -->\n")
+        ).toBe(false)
+        expect(hasResult("# x\n\n## Summary\nok\n")).toBe(false)
+        expect(hasResult(null)).toBe(false)
+        expect(hasResult("# x\n\n## Result\nShipped.\n")).toBe(true)
     })
 
     test("Result edited meanwhile is kept on retry", async () => {
@@ -160,7 +229,7 @@ describe("close_out", () => {
         asanaService.complete.mockRejectedValueOnce(new Error("asana 500"))
         const c1 = (await job.prepare(ctx)).context
         await expect(job.apply(ctx, OUT, c1)).rejects.toThrow(/asana 500/)
-        expect(asanaService.comment).toHaveBeenCalledTimes(1)
+        expect(asanaService.commentHtml).toHaveBeenCalledTimes(1)
         const events = (await store.listEvents(1)).map((e) => e.type)
         expect(events).toContain("asana_close_commented")
         expect(events).not.toContain("asana_completed")
@@ -168,7 +237,7 @@ describe("close_out", () => {
         // retry (fresh context): no second comment, completes now
         const c2 = (await job.prepare(ctx)).context
         await job.apply(ctx, OUT, c2)
-        expect(asanaService.comment).toHaveBeenCalledTimes(1)
+        expect(asanaService.commentHtml).toHaveBeenCalledTimes(1)
         expect(asanaService.complete).toHaveBeenCalledTimes(2) // 1 failed + 1
         expect((await store.listEvents(1)).map((e) => e.type)).toContain(
             "asana_completed"
@@ -180,7 +249,11 @@ describe("close_out", () => {
         const { ctx, asanaService } = setup({ asana: ASANA })
         asanaService.getTask.mockResolvedValueOnce({ completed: true })
         const { context } = await job.prepare(ctx)
-        await job.apply(ctx, { ...OUT, asana_comment: "" }, context)
+        await job.apply(
+            ctx,
+            { ...OUT, asana_conclusion: NO_CONCLUSION },
+            context
+        )
         expect(asanaService.complete).not.toHaveBeenCalled()
     })
 
@@ -191,7 +264,11 @@ describe("close_out", () => {
         const c = { ...ctx, store: bare, deps: { asanaService: svc } }
         const { context } = await job.prepare(c)
         await job.apply(c, OUT, context)
-        expect(svc.comment).toHaveBeenCalledTimes(1)
+        // no rich-text support: the plain version
+        expect(svc.comment).toHaveBeenCalledWith(
+            "777",
+            "Done\nShipped the retry fix.\n\nDetails\n- Fix in https://github.com/acme/api/pull/12"
+        )
         expect(svc.complete).toHaveBeenCalledTimes(1)
     })
 })

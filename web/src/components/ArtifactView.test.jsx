@@ -3,8 +3,9 @@
  * MIT license.
  */
 
-import { render } from "@testing-library/react"
+import { fireEvent, render } from "@testing-library/react"
 import ArtifactView, { highlightable } from "./ArtifactView.jsx"
+import { currentPath } from "../lib/router.js"
 
 const CONTENT = "## Summary\nThe upload lambda has a cold start of 12s.\n"
 const thread = (id, exact) => ({
@@ -107,5 +108,27 @@ describe("ArtifactView", () => {
                 { id: "d", anchor: null },
             ]).map((t) => t.id)
         ).toEqual(["a"])
+    })
+
+    it("a task link routes in place; modified clicks and web links are left alone", () => {
+        window.scrollTo = jest.fn() // the router scrolls to top on navigate
+        window.history.replaceState(null, "", "/t/5")
+        const { container } = render(
+            <ArtifactView
+                content={
+                    "## Links\n\n- [spun off from T-2](</t/2>)\n- [web](<https://example.com/a>)\n"
+                }
+                threads={[]}
+            />
+        )
+        const app = container.querySelector('a[href="/t/2"]')
+        expect(app.hasAttribute("target")).toBe(false)
+        expect(fireEvent.click(app, { metaKey: true })).toBe(true)
+        expect(currentPath()).toBe("/t/5")
+        expect(fireEvent.click(app)).toBe(false) // default prevented
+        expect(currentPath()).toBe("/t/2")
+        const web = container.querySelector('a[href="https://example.com/a"]')
+        expect(fireEvent.click(web)).toBe(true)
+        expect(currentPath()).toBe("/t/2")
     })
 })

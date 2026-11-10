@@ -41,9 +41,15 @@ const JOB_PROMPTS = {
     assist: `Job: assist. Leo comments on a task artifact (a Markdown document with "## " sections) or chats about it.
 - intent "ask": answer the question in "reply"; return no edits.
 - intent "change": make the requested change as section edits and summarize what changed in one line in "reply".
-- intent "chat": answer, and include edits only if Leo clearly asks for a change.
+- intent "chat": one ongoing conversation about this task. When Leo asks for a change, make it. When he states new facts, corrections or scope for the task (the right repo, extra work, a decision), record them in the fitting artifact sections and say so in one line: that is why he tells you. Answer questions without edits.
+- Chat history, when given, is the earlier chat on this task, oldest first. Use it to understand Leo's current message: "add my note", "do it", "update the artifact", "that" refer to it, and when he accepts something you offered there, do it now. Never ask him to repeat what the history already says.
 - Each edit addresses one section by its exact name. "replace" gives the full new section body (without the "## " heading); "append" adds text at the end of the section. Prefer the smallest edit. Keep untouched content intact when replacing.
-- If an anchor quote is given, focus on that passage.`,
+- If an anchor quote is given, focus on that passage.
+- Everything here is about this task (its artifact, repos and agent); never act on another task.
+- links: when Leo asks to add or attach a link (Slack thread, doc, PR, ticket), return it here with its exact URL from his message and a short label (e.g. "Slack: bugs found after testing"); it shows in the task's Links tab and the artifact's Links section. Never edit the "Links" or "PR feedback" sections: they are filled from the task. Else [].
+- title: a new task title (max 100 chars) only when Leo asks to rename the task or the request changed so the title is wrong; else null.
+- message_agent: this task has a herdr coding agent working in its repos. true only when Leo's message is an instruction for that agent (e.g. "tell the agent to create a PR"); the system then passes his message to the agent verbatim and adds the outcome to your reply. Otherwise false. Keep "reply" short in that case; do not repeat his message.
+- If you cannot do what Leo asks, say so plainly in "reply" and say what he can do instead. Never claim something happened that you did not do.`,
 
     command: `Job: command. Leo typed a command or question in the home command bar. You get a compact board of tasks.
 - Answer questions in "reply" using the board only.
@@ -59,8 +65,12 @@ const JOB_PROMPTS = {
 Plain text with simple Markdown only; no headings, no HTML.`,
 
     close_out: `Job: close_out. The task is finished. From the artifact, write:
-- result_md: the "Result" section body: what was delivered, links to PRs or docs mentioned in the artifact, and any follow-ups. Short Markdown.
-- asana_comment: a 1-3 sentence plain-text completion note for teammates.`,
+- result_md: the "Result" section body: what was delivered, links to PRs or docs mentioned in the artifact, and any follow-ups. Short Markdown. Return "" when told the Result section is already written (it is kept).
+- asana_conclusion: the conclusion posted on the team's Asana task, for teammates who never saw the artifact. Base it on the Result section when there is one; keep its substance (cause, fix, where, links), drop internal detail.
+  - outcome: 1-3 sentences: what was found or delivered, and the answer to the task's question.
+  - points: the key facts, one short line each: root cause, what changed and where, PRs / docs / threads with their full URLs as given in the artifact, decisions. 2-8 items.
+  - open_items: what is still left to do (and who, if known), one line each; [] when nothing.
+  Plain sentences; \`code\` and **bold** allowed; no headings, no Markdown lists inside items.`,
 }
 
 /** Full system prompt for a job type. */

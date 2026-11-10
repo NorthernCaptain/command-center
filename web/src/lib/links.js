@@ -25,13 +25,21 @@ export function fileUrl(p) {
         .join("/")}`
 }
 
+const APP_PATH_RE = /^\/t\/(?:T-)?\d+\/?$/i
+
+/** A page of this app, e.g. "/t/2" (the link back to a parent task). */
+export function isAppPath(url) {
+    return APP_PATH_RE.test(String(url || "").trim())
+}
+
 /**
- * Where a link points in the browser: web URLs as they are, absolute local
- * paths (repo folders) as file:// URLs, anything else null (not a link).
+ * Where a link points in the browser: web URLs and app pages ("/t/2") as
+ * they are, other absolute local paths (repo folders) as file:// URLs,
+ * anything else null (not a link).
  */
 export function hrefFor(url) {
     const u = String(url || "")
-    if (isWebUrl(u) || /^file:\/\/\//i.test(u)) return u
+    if (isWebUrl(u) || /^file:\/\/\//i.test(u) || isAppPath(u)) return u
     if (u.startsWith("/")) return fileUrl(u)
     return null
 }
@@ -93,21 +101,21 @@ export function linksMarkdown(links) {
         .join("\n")
 }
 
-const LINKS_HEADING_RE = /^##[ \t]+Links[ \t]*$/m
 const NEXT_H2_RE = /^##[ \t]+\S/m
+const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 /**
- * The artifact with its "## Links" section filled from `links` (display
- * only). Text already in the section stays (the template comment is not
- * rendered). Without such a section the list is added at the end; without
- * links the content is unchanged.
+ * The artifact with its "## <heading>" section filled with `list`
+ * (Markdown; display only). Text already in the section stays (the
+ * template comment is not rendered). Without such a section the list is
+ * added at the end; with an empty list the content is unchanged.
  */
-export function withLinksSection(content, links) {
+export function withSection(content, heading, list) {
     const src = String(content || "")
-    const list = linksMarkdown(links)
     if (!list) return src
-    const m = LINKS_HEADING_RE.exec(src)
-    if (!m) return `${src.replace(/\s*$/, "")}\n\n## Links\n\n${list}\n`
+    const re = new RegExp(`^##[ \\t]+${escRe(heading)}[ \\t]*$`, "m")
+    const m = re.exec(src)
+    if (!m) return `${src.replace(/\s*$/, "")}\n\n## ${heading}\n\n${list}\n`
     const bodyStart = m.index + m[0].length
     const rest = src.slice(bodyStart)
     const next = NEXT_H2_RE.exec(rest)
@@ -115,6 +123,11 @@ export function withLinksSection(content, links) {
     const body = src.slice(bodyStart, bodyEnd).replace(/\s*$/, "")
     const tail = src.slice(bodyEnd)
     return `${src.slice(0, bodyStart)}${body}\n\n${list}\n${tail ? `\n${tail}` : ""}`
+}
+
+/** The artifact with its "## Links" section filled from `links`. */
+export function withLinksSection(content, links) {
+    return withSection(content, "Links", linksMarkdown(links))
 }
 
 const PR_URL_RE = /^https:\/\/github\.com\/[^/]+\/([^/]+)\/pull\/(\d+)/

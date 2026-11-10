@@ -7,15 +7,20 @@ import AgentChip, { isLiveAgent } from "./AgentChip.jsx"
 import { useApp } from "./AppContext.jsx"
 import Link from "./Link.jsx"
 import SnoozeMenu from "./SnoozeMenu.jsx"
-import { STATUS_LABELS, isOpenStatus, taskKey } from "../lib/constants.js"
+import {
+    KIND_LABELS,
+    LANE_LABELS,
+    STATUS_LABELS,
+    isOpenStatus,
+    statusLane,
+    taskKey,
+} from "../lib/constants.js"
 import { formatDue, relativeTime } from "../lib/time.js"
 import { taskPrs } from "../lib/links.js"
 import { blockingDeliverables } from "../lib/worker.js"
 
 const START_STATUSES = ["inbox", "ready", "active"]
 const SOURCE_PILL = { slack: "Slack" }
-
-const KIND_GLYPH = { reminder: "⏰", todo: "◻", agent_task: "◆" }
 
 function timeLabel(task, lane) {
     if (lane === "waiting") {
@@ -83,13 +88,20 @@ export default function TaskRow({
     const asanaUrl = task.asana && task.asana.url
     const src = task.source || {}
     const sourcePill = src.url && SOURCE_PILL[src.type]
+    // the lane color of the task's status (Inbox blue, Active green, …)
+    const home = statusLane(task.status)
+    const dotTitle = [LANE_LABELS[home], KIND_LABELS[task.kind]]
+        .filter(Boolean)
+        .join(" · ")
     return (
         <li className={`row status-${task.status}`} data-task-id={task.id}>
             <div className="row-main">
                 <span className="row-key">
-                    <span className="row-glyph" aria-hidden="true">
-                        {KIND_GLYPH[task.kind] || "◻"}
-                    </span>
+                    <span
+                        className={`lane-dot lane-dot-${home}`}
+                        title={dotTitle}
+                        aria-hidden="true"
+                    />
                     {taskKey(task.id)}
                 </span>
                 {/* the title link is stretched over the whole row; the

@@ -536,6 +536,11 @@
     right: 10px;
 }
 
+.command-more {
+    display: block;
+    margin: 8px 0 0 auto;
+}
+
 /* --- board ------------------------------------------------------------- */
 
 .board {
@@ -755,8 +760,64 @@
     padding-top: 2px;
 }
 
-.row-glyph {
-    font-size: 12px;
+/* lane color dot: board rows, the "All" list headers */
+.lane-dot {
+    flex: none;
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-faint);
+    align-self: center;
+}
+.lane-dot-inbox {
+    background: var(--blue);
+}
+.lane-dot-ready {
+    background: var(--text);
+}
+.lane-dot-active {
+    background: var(--live);
+}
+.lane-dot-prs {
+    background: var(--accent);
+    opacity: 0.7;
+}
+.lane-dot-waiting {
+    background: var(--violet);
+}
+.lane-dot-done {
+    background: var(--green);
+}
+
+/* "All": a small header per lane between the groups */
+.lane-group + .lane-group {
+    margin-top: 14px;
+}
+
+.lane-sep {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 6px;
+    padding: 0 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+}
+
+.lane-sep::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+}
+
+.lane-sep-count {
+    letter-spacing: 0;
 }
 
 .row-title {
@@ -1491,6 +1552,7 @@
 }
 
 .sheet-bar {
+    flex: none;
     position: relative;
     display: flex;
     justify-content: center;
@@ -1541,9 +1603,16 @@
     .dock-comments {
         display: none !important;
     }
+    /* all tabs in view: wrap instead of a hidden sideways scroll */
+    .side-tabs {
+        flex-wrap: wrap;
+        overflow-x: visible;
+    }
 }
 
 .side-tabs {
+    /* never squeezed by a long panel body (it scrolls instead) */
+    flex: none;
     display: flex;
     gap: 2px;
     padding: 0 8px;
@@ -1574,7 +1643,8 @@
 }
 
 .side-body {
-    flex: 1;
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
     padding: 12px;
@@ -1916,12 +1986,13 @@
 .chatbar {
     flex: 1;
     display: flex;
-    align-items: center;
+    /* multi-line: the glyph and Send stay on the last line */
+    align-items: flex-end;
     gap: 8px;
     min-width: 0;
     padding: 4px 4px 4px 14px;
     border: 1px solid var(--line-strong);
-    border-radius: 999px;
+    border-radius: var(--r-md);
     background: var(--panel);
     box-shadow: 0 14px 40px -16px rgba(0, 0, 0, 0.9);
 }
@@ -1932,6 +2003,7 @@
 }
 
 .chatbar-glyph {
+    align-self: center;
     color: var(--violet);
 }
 
@@ -1946,7 +2018,8 @@
 }
 
 .chatbar .btn {
-    border-radius: 999px;
+    margin-bottom: 4px;
+    border-radius: var(--r-sm);
 }
 
 .jobs {
@@ -2034,6 +2107,31 @@
 .job-summary {
     margin: 6px 0 0;
     color: var(--text-dim);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+/* the task chat's reply, above the input in the dock */
+.dock .dock-reply {
+    margin: 0 auto 8px;
+    padding: 10px 12px;
+    max-height: 40vh;
+    overflow-y: auto;
+    /* opaque: the page scrolls underneath */
+    background: linear-gradient(180deg, var(--violet-soft), transparent 60%)
+        var(--panel);
+    box-shadow: var(--shadow-pop);
+}
+
+.dock-reply .command-prompt {
+    margin-bottom: 6px;
+    padding-right: 56px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.dock-reply .job-summary {
+    color: var(--text);
 }
 
 /* --- history drawer ---------------------------------------------------- */
@@ -2613,6 +2711,20 @@ textarea.chatbar-input {
     opacity: 0.7;
 }
 
+.fb-state {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.fb-state-addressed {
+    color: var(--green);
+}
+
+.fb-state-open {
+    color: var(--text-dim);
+}
+
 .fb-round + .fb-round {
     margin-top: 6px;
 }
@@ -3005,4 +3117,82 @@ textarea.chatbar-input {
 
 .btn-start {
     color: var(--accent);
+}
+
+/* --- task chat (side panel "Chat" tab) --------------------------------- */
+
+.chat-log {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.chat-turn + .chat-turn {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+}
+
+.chat-msg + .chat-msg {
+    margin-top: 8px;
+}
+
+.chat-me .msg-body {
+    padding: 8px 10px;
+    border-radius: var(--r-sm);
+    background: var(--bg-sunk);
+    overflow-wrap: anywhere;
+}
+
+.chat-center .msg-author {
+    color: var(--violet);
+}
+
+.chat-md {
+    margin-top: 2px;
+    font-size: 15px;
+    overflow-wrap: anywhere;
+}
+
+.chat-md > :first-child {
+    margin-top: 0;
+}
+
+.chat-md > :last-child {
+    margin-bottom: 0;
+}
+
+.chat-md p,
+.chat-md ul,
+.chat-md ol {
+    margin: 6px 0;
+}
+
+.chat-md ul,
+.chat-md ol {
+    padding-left: 20px;
+}
+
+.chat-md pre {
+    overflow-x: auto;
+    padding: 8px;
+    border-radius: var(--r-sm);
+    background: var(--bg-sunk);
+}
+
+.chat-note {
+    margin: 8px 0 0;
+    font-size: 13px;
+    color: var(--text-faint);
+}
+
+.chat-failed {
+    color: var(--red);
+}
+
+.chat-hint {
+    margin: 14px 0 0;
+    font-size: 12px;
+    color: var(--text-faint);
+    text-align: center;
 }

@@ -43,9 +43,13 @@ export default function TextBox({
     }
 
     // Auto-grow: reset, then fit the content (capped at maxRows lines).
+    // The reset shrinks the box and loses its scroll position, so once it
+    // scrolls keep the caret in view: typing at the end follows the end,
+    // elsewhere the previous position is restored.
     useLayoutEffect(() => {
         const el = own.current
         if (!el) return
+        const scrolled = el.scrollTop
         el.style.height = "auto"
         const style = window.getComputedStyle(el)
         const line = parseFloat(style.lineHeight) || 20
@@ -55,7 +59,12 @@ export default function TextBox({
         const max = line * maxRows + pad
         const next = Math.min(el.scrollHeight, max)
         if (next > 0) el.style.height = `${next}px`
-        el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden"
+        const overflows = el.scrollHeight > max
+        el.style.overflowY = overflows ? "auto" : "hidden"
+        if (overflows) {
+            const atEnd = el.selectionEnd >= String(el.value).length
+            el.scrollTop = atEnd ? el.scrollHeight : scrolled
+        }
     }, [value, maxRows])
 
     function handleKeyDown(e) {

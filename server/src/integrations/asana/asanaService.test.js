@@ -510,6 +510,18 @@ describe("comment / complete / getTask", () => {
         expect(client.calls[0].body).toEqual({ text: "Done: PR merged" })
     })
 
+    test("commentHtml posts a rich-text story", async () => {
+        const client = fakeClient({ "POST /tasks/5/stories": { gid: "st" } })
+        const svc = createAsanaService({
+            githubOrg: "acme",
+            client,
+            config: CONFIG,
+        })
+        await svc.commentHtml("5", "<body>ok</body>")
+        expect(client.calls[0].body).toEqual({ html_text: "<body>ok</body>" })
+        await expect(svc.commentHtml("../x", "t")).rejects.toThrow()
+    })
+
     test("complete sets completed", async () => {
         const client = fakeClient({ "PUT /tasks/5": { completed: true } })
         const svc = createAsanaService({

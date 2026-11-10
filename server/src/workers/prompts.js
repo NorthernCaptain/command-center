@@ -76,6 +76,8 @@ function protocolRules(id) {
         "- No commit/push/PR until I ask (I'll ask through this session). Exception, standing",
         "  instruction: when I send you PR review feedback, you fix, test, commit, push and reply",
         "  on GitHub, as that prompt describes.",
+        "- After a review report, if I answer or ask for more and you work again, the task goes back",
+        "  to active: report again (review or ready_for_pr) when you are done.",
         '- Non-code result: cc_report(status="review", summary). If a repo you were set up in needs no',
         "  change (nothing to commit or PR there), pass it in no_change_repos so the task can close.",
         "- If you need me, ask here. I see blocked/idle states.",

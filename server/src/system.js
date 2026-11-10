@@ -250,6 +250,18 @@ export function createSystem({ config, overrides = {} }) {
             dateParser,
             // command: "done" on an Asana-linked task enqueues close_out.
             jobRunner: runnerProxy,
+            // assist: pass Leo's message on to the task's herdr agent
+            // (the worker service is created further down)
+            workers: {
+                agentState: (...a) => workerService.agentState(...a),
+                send: (id, text) =>
+                    workerService.action(
+                        id,
+                        "send",
+                        { text },
+                        { actor: "center" }
+                    ),
+            },
             timezone: config.timezone,
             mcpServers: loadMcpServers({ config, readFile, log }),
         },

@@ -18,9 +18,32 @@ const TRANSITIONS = {
     waiting: [...ANY_OPEN.filter((s) => s !== "waiting"), "done", "cancelled"],
     active: ["ready", "ready_for_pr", "review", "waiting", "done", "cancelled"],
     ready_for_pr: ["active", "pr_open", "waiting", "done", "cancelled"],
-    pr_open: ["pr_feedback", "active", "waiting", "done", "cancelled"],
-    pr_feedback: ["pr_open", "active", "waiting", "done", "cancelled"],
-    review: ["active", "waiting", "done", "cancelled"],
+    // review: the agent reports a result again after more work on a task
+    // with an open PR (still watched in review)
+    pr_open: [
+        "pr_feedback",
+        "active",
+        "review",
+        "waiting",
+        "done",
+        "cancelled",
+    ],
+    pr_feedback: [
+        "pr_open",
+        "active",
+        "review",
+        "waiting",
+        "done",
+        "cancelled",
+    ],
+    review: [
+        "active",
+        "pr_open",
+        "pr_feedback",
+        "waiting",
+        "done",
+        "cancelled",
+    ],
     done: ["ready", "active"],
     cancelled: ["ready", "inbox"],
 }

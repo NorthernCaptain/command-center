@@ -139,6 +139,10 @@ events for shared tasks, with internal fields stripped.
 - Filters: area chips, status, source, has-PR. Search box uses FTS (`/`
   focuses it). `Cmd+K` palette for jump-to-task.
 - Live: rows update over SSE (agent overlay, enrichment, status).
+- Lane pills under Now show one lane at a time. **All** (first pill) is
+  Inbox, Active and PRs in one list, in that order, each under a small
+  lane header. Each row starts with a dot in its lane's color (Inbox
+  blue, Active green, …). The chosen pill is remembered per device.
 - Home command bar (same box, prefix `>` or `Cmd+Enter`): talk to the
   center agent about the whole board ("snooze everything waiting on Ron to
   Monday").
@@ -166,9 +170,29 @@ events for shared tasks, with internal fields stripped.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Chat bar** → `edit_artifact` or `answer` job. The result shows as a
-  diff flash on the changed section, with an Undo that restores the
-  previous revision.
+- **Chat bar** → `assist` job (intent "chat"), scoped to this task. Its
+  reply shows live in a panel above the input (and as a comment). It can
+  edit sections, rename the task, and pass my message on to the task's
+  herdr agent, verbatim, when it opens with an instruction to the agent
+  ("tell the agent to create a PR", "agent: …"); the reply says whether it
+  was sent, queued or why not. The latest exchange shows again when I
+  come back to the page (for a day) until I close it. Every request and
+  reply is kept: the side panel's **Chat** tab (and "Full chat" on the
+  reply panel) shows the whole conversation, oldest first; chat threads
+  are not repeated in Comments. Each chat job gets the last few exchanges
+  (up to 8, about 12k characters), so "add my note" or "update the
+  artifact" picks up what was said before, and facts or corrections I
+  state (the right repo, extra scope) go into the artifact. "Add this link"
+  adds a task link (Links tab and the rendered Links section), only for
+  URLs I wrote; the Links and PR feedback sections are never edited as
+  text.
+- The artifact's **Links** and **PR feedback** sections are filled at
+  display time: links from the task, feedback per PR and round (status,
+  place, summary, comment / reply links, commit, the agent's note; replies
+  that needed no action as a count), headed by "All feedback addressed"
+  once every item that needed work is resolved (or how many are open);
+  the PR feedback tab shows the same line. The file keeps only
+  placeholders.
 - **Revision history** drawer: every git commit of the task folder, with
   author (me / center / agent name, from the `Actor:` trailer) and a diff.
   This is the audit trail.

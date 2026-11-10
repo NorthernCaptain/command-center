@@ -419,6 +419,13 @@ export function createAsanaService({
         })
     }
 
+    /** A rich-text comment (Asana `html_text`, built by asanaNotes). */
+    async function commentHtml(gid, html) {
+        return client.request("POST", `/tasks/${assertGid(gid)}/stories`, {
+            body: { html_text: String(html) },
+        })
+    }
+
     async function complete(gid) {
         return client.request("PUT", `/tasks/${assertGid(gid)}`, {
             body: { completed: true },
@@ -445,6 +452,7 @@ export function createAsanaService({
         findByMarker,
         syncTracking,
         comment,
+        commentHtml,
         complete,
         getTask,
         artifactUrlFor,

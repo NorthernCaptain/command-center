@@ -48,6 +48,8 @@ export const START_FAILED_REASON = "Agent failed to start"
 export const PROMPT_FAILED_REASON = "Prompt not delivered"
 export const UNCONFIRMED_REASON = "Agent prompt not confirmed"
 export const UNCERTAIN_REASON = "Delivery uncertain"
+// Now reason of cc_report(review) (mcp/tools.js)
+export const REVIEW_REASON = "Ready for review"
 export const ACTIONS = [
     "create-pr",
     "address-feedback",
@@ -104,6 +106,13 @@ export function isTransportError(err) {
 
 // Tasks that never get agent work again (revive, relaunch).
 const CLOSED_STATUSES = ["done", "cancelled"]
+
+/** A claimed PR not merged yet: the PR watcher keeps polling the task. */
+function hasOpenPr(task) {
+    return (task.deliverables || []).some(
+        (d) => d.disposition === "pr" && d.pr && !d.merged_at
+    )
+}
 
 function conflict(code, message, details) {
     return new AppError(code, message, { status: 409, details })
@@ -230,6 +239,80 @@ export function createWorkerService({
             )
         } catch (err) {
             log.warn({ err: errMessage(err) }, "worker flags not updated")
+        }
+    }
+
+    /**
+     * The agent went back to work on a task waiting for Leo's review (he
+     * answered it, or asked for more): it is not ready any more. review ->
+     * active (pr_open when a claimed PR is still open, so the PR watcher
+     * keeps polling it) and the "Ready for review" Now flag goes; the agent
+     * reports review / ready_for_pr again when it is done.
+     */
+    async function leaveReview(taskId) {
+        let left = null
+        try {
+            await store.withTaskLock(taskId, async () => {
+                const { task } = await store.getTask(taskId)
+                if (task.status !== "review") return
+                const patch = { status: hasOpenPr(task) ? "pr_open" : "active" }
+                const reason = String(
+                    (task.flags && task.flags.now_reason) || ""
+                )
+                if (
+                    task.flags &&
+                    task.flags.now &&
+                    reason.startsWith(REVIEW_REASON)
+                )
+                    patch.flags = { now: false, now_reason: null }
+                await store.updateTask(taskId, patch, {
+                    actor: "system",
+                    reason: "agent working again",
+                })
+                left = {
+                    to: patch.status,
+                    now_reason: patch.flags ? reason : null,
+                }
+            })
+        } catch (err) {
+            log.warn({ err: errMessage(err), task: taskId }, "review not left")
+            return null
+        }
+        if (left)
+            await logEvent(taskId, "agent_resumed_work", { from: "review" })
+        return left
+    }
+
+    /**
+     * Undo leaveReview() when the agent could not be relaunched after all:
+     * back to review unless the task moved on meanwhile. The "Ready for
+     * review" Now flag comes back only when no other Now flag (e.g. the
+     * launch failure) took its place.
+     */
+    async function restoreReview(taskId, left) {
+        if (!left) return
+        try {
+            await store.withTaskLock(taskId, async () => {
+                const { task } = await store.getTask(taskId)
+                const f = task.flags || {}
+                if (
+                    task.status !== left.to ||
+                    !canTransition(task.status, "review")
+                )
+                    return
+                const patch = { status: "review" }
+                if (left.now_reason && !f.now)
+                    patch.flags = { now: true, now_reason: left.now_reason }
+                await store.updateTask(taskId, patch, {
+                    actor: "system",
+                    reason: "agent relaunch failed",
+                })
+            })
+        } catch (err) {
+            log.warn(
+                { err: errMessage(err), task: taskId },
+                "review not restored"
+            )
         }
     }
 
@@ -757,6 +840,9 @@ export function createWorkerService({
             emitState(id, session.state)
             await retrack()
             if (!action) return { session, revived: true, adopted: true }
+            // more work for it: not ready for review any more (before the
+            // prompt goes out, so its next review report is not undone)
+            await leaveReview(id)
             await outbox.enqueue({
                 task_id: id,
                 text: resumePrompt({ task, folder: mainFolder, action }),
@@ -773,7 +859,18 @@ export function createWorkerService({
             }
         }
 
-        const name = await freeName(base)
+        // A relaunched agent always gets work (an action, the message that
+        // follows, or "continue"), and its session starts as working, so no
+        // idle -> working transition will leave review later: do it now,
+        // before the prompt goes out (undone if the launch fails).
+        const left = await leaveReview(id)
+        let name
+        try {
+            name = await freeName(base)
+        } catch (err) {
+            await restoreReview(id, left)
+            throw err
+        }
         const canResume = Boolean(
             !fresh && last && last.kind === kind && last.session_id
         )
@@ -796,15 +893,22 @@ export function createWorkerService({
             })
             if (action) prompt += `\n\nThen: ${String(action).trim()}`
         }
-        const { session, delivery } = await launch(id, task, {
-            kind,
-            name,
-            args: canResume ? resumeArgs(kind, last.session_id) : [],
-            prompt,
-            eventType: "agent_revived",
-            actor,
-            data: { resumed: canResume },
-        })
+        let launched
+        try {
+            launched = await launch(id, task, {
+                kind,
+                name,
+                args: canResume ? resumeArgs(kind, last.session_id) : [],
+                prompt,
+                eventType: "agent_revived",
+                actor,
+                data: { resumed: canResume },
+            })
+        } catch (err) {
+            await restoreReview(id, left)
+            throw err
+        }
+        const { session, delivery } = launched
         return {
             session,
             revived: true,
@@ -901,6 +1005,7 @@ export function createWorkerService({
             if (state !== session.state) {
                 await sessions.update(session.id, { state })
                 emitState(id, state)
+                if (state === "working") await leaveReview(id)
             }
             if (state === "blocked") {
                 await markBlocked(id, session)
@@ -1031,6 +1136,7 @@ export function createWorkerService({
             await clearNowIf(id, BLOCKED_REASON)
         }
         if (status === "working") limited.delete(s.id)
+        if (status === "working" && prev !== "working") await leaveReview(id)
         if (status === "blocked") await markBlocked(id, s)
         if (s.kind === "claude" && (status === "blocked" || status === "idle"))
             await checkUsage(id, s)

@@ -49,6 +49,10 @@ describe("transitions", () => {
         expect(canTransition("done", "inbox")).toBe(false)
         expect(canTransition("cancelled", "ready")).toBe(true)
         expect(canTransition("waiting", "active")).toBe(true)
+        // review with a claimed PR: back and forth with the PR statuses
+        expect(canTransition("review", "pr_feedback")).toBe(true)
+        expect(canTransition("pr_open", "review")).toBe(true)
+        expect(canTransition("pr_feedback", "review")).toBe(true)
         expect(canTransition("nope", "ready")).toBe(false)
     })
     test("assertTransition throws typed error", () => {

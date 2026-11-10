@@ -2088,6 +2088,79 @@ describe("review tasks and PRs from other branches", () => {
         expect(jobRunner.enqueue).toHaveBeenCalled()
     })
 
+    test("new feedback moves a review task to pr_feedback; resolving it settles to pr_open", async () => {
+        const { gh, watcher } = await setup({
+            status: "review",
+            deliverables: [deliv(REPO)],
+        })
+        gh.prs[`${REPO}#812`] = fullPr()
+        await watcher.claim(1, PR_URL, { manual: true })
+        gh.rcs[`${REPO}#812`] = [rc(1001)]
+        await watcher.pollTask(1)
+        let task = await getTask()
+        expect(task.status).toBe("pr_feedback")
+        expect(task.flags.now_reason).toBe("PR feedback: 1 new item(s)")
+
+        await resolve("gh-rc-1001", { status: "fixed", commit: "abc1234" })
+        await watcher.roundResolved(1)
+        task = await getTask()
+        expect(task.status).toBe("pr_open")
+        expect(task.flags).toMatchObject({ now: false, now_reason: null })
+        const ev = await eventsOf("feedback_addressed")
+        expect(ev).toHaveLength(1)
+        expect(ev[0].data).toEqual({ items: 1 })
+        // settled once: nothing to clear on the next poll
+        await watcher.roundResolved(1)
+        expect(await eventsOf("feedback_addressed")).toHaveLength(1)
+    })
+
+    test("resolved feedback clears its Now flag whatever the status", async () => {
+        const { gh, watcher } = await setup({
+            status: "review",
+            deliverables: [deliv(REPO)],
+        })
+        gh.prs[`${REPO}#812`] = fullPr()
+        await watcher.claim(1, PR_URL, { manual: true })
+        await store.appendFeedback(
+            1,
+            {
+                id: "gh-rc-1001",
+                pr: PR_URL,
+                round: 1,
+                kind: "review_comment",
+                url: `${PR_URL}#discussion_r1001`,
+                actionable: true,
+                status: "answered",
+                at: "2026-11-08T12:00:00.000Z",
+                verified: false,
+                verify_failures: 0,
+            },
+            "system"
+        )
+        await store.updateTask(
+            1,
+            { flags: { now: true, now_reason: "PR feedback: 1 new item(s)" } },
+            { actor: "system" }
+        )
+        await watcher.roundResolved(1)
+        const task = await getTask()
+        expect(task.status).toBe("review")
+        expect(task.flags).toMatchObject({ now: false, now_reason: null })
+        expect(await eventsOf("feedback_addressed")).toHaveLength(1)
+    })
+
+    test("another Now flag stays when feedback settles", async () => {
+        const { watcher } = await claimedSetup()
+        await store.updateTask(
+            1,
+            { flags: { now: true, now_reason: "Ready for review" } },
+            { actor: "system" }
+        )
+        await watcher.roundResolved(1)
+        expect((await getTask()).flags.now_reason).toBe("Ready for review")
+        expect(await eventsOf("feedback_addressed")).toHaveLength(0)
+    })
+
     test("pollAll includes review tasks; ones without a claimed PR are skipped", async () => {
         const { watcher } = await setup({
             status: "review",

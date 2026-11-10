@@ -5,7 +5,8 @@
 
 // Smaller task-page panels: schedules, activity and links.
 
-import { hrefFor } from "../lib/links.js"
+import { hrefFor, isAppPath } from "../lib/links.js"
+import Link from "./Link.jsx"
 import { useState } from "react"
 import { formatDue, relativeTime, snoozePresets } from "../lib/time.js"
 import TextBox from "./TextBox.jsx"
@@ -183,23 +184,41 @@ export function LinksList({ links }) {
     if (!list.length) return <p className="muted">No links yet.</p>
     return (
         <ul className="links">
-            {list.map((l, i) => (
-                <li key={l.id || `${l.url}-${i}`}>
-                    <a
-                        href={hrefFor(l.url) || undefined}
-                        title={l.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className={`link link-${l.type}`}
-                    >
+            {list.map((l, i) => {
+                const body = (
+                    <>
                         <span className="link-glyph" aria-hidden="true">
                             {LINK_GLYPH[l.type] || "↗"}
                         </span>
                         <span className="link-label">{l.label || l.url}</span>
                         <span className="link-type">{l.type}</span>
-                    </a>
-                </li>
-            ))}
+                    </>
+                )
+                return (
+                    <li key={l.id || `${l.url}-${i}`}>
+                        {isAppPath(l.url) ? (
+                            // another task: routes in this tab
+                            <Link
+                                to={l.url.trim()}
+                                title={l.url}
+                                className={`link link-${l.type}`}
+                            >
+                                {body}
+                            </Link>
+                        ) : (
+                            <a
+                                href={hrefFor(l.url) || undefined}
+                                title={l.url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className={`link link-${l.type}`}
+                            >
+                                {body}
+                            </a>
+                        )}
+                    </li>
+                )
+            })}
         </ul>
     )
 }

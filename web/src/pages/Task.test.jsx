@@ -86,7 +86,7 @@ function taskResponse(over = {}) {
                 parent_id: null,
                 anchor: null,
                 body: "done thing",
-                intent: "chat",
+                intent: "note",
                 author: "me",
                 at: "2026-11-07T07:00:00Z",
                 status: "resolved",
@@ -789,6 +789,156 @@ describe("Task page", () => {
         expect(screen.queryByText("provider_limit")).not.toBeInTheDocument()
     })
 
+    it("the chat reply shows above the input with the request, once", async () => {
+        const f = await setup({
+            "POST /api/tasks/12/comments": reply(201, {
+                comment: {
+                    id: "c12",
+                    parent_id: null,
+                    anchor: null,
+                    body: "tell the agent to create a pr",
+                    intent: "chat",
+                    author: "me",
+                    at: "2026-11-07T10:00:00Z",
+                },
+                job: { id: "j12", type: "assist", status: "queued" },
+            }),
+        })
+        const input = screen.getByLabelText("Message the center agent")
+        fireEvent.change(input, {
+            target: { value: "tell the agent to create a pr" },
+        })
+        fireEvent.submit(input.closest("form"))
+        await waitFor(() =>
+            expect(f.find("POST", "/api/tasks/12/comments")).toHaveLength(1)
+        )
+        const panel = await screen.findByRole("region", {
+            name: "Center agent reply",
+        })
+        expect(panel).toHaveTextContent("tell the agent to create a pr")
+        act(() =>
+            emit(stream, "job.updated", 12, {
+                job: {
+                    id: "j12",
+                    type: "assist",
+                    status: "done",
+                    summary: "Asking it now.\n\n→ Sent to the herdr agent.",
+                    ended_at: new Date().toISOString(),
+                },
+            })
+        )
+        expect(panel).toHaveTextContent("→ Sent to the herdr agent.")
+        expect(document.querySelectorAll('[data-job-id="j12"]')).toHaveLength(1)
+        fireEvent.click(screen.getByRole("button", { name: "Dismiss" }))
+        expect(
+            screen.queryByRole("region", { name: "Center agent reply" })
+        ).not.toBeInTheDocument()
+        expect(document.querySelector('[data-job-id="j12"]')).toBeNull()
+    })
+
+    it("the latest chat exchange shows again on return until closed", async () => {
+        window.localStorage.clear()
+        const base = taskResponse()
+        const res = {
+            ...base,
+            comments: [
+                ...base.comments,
+                {
+                    id: "c30",
+                    parent_id: null,
+                    anchor: null,
+                    body: "add a note on deletion",
+                    intent: "chat",
+                    author: "me",
+                    at: new Date(Date.now() - 3600e3).toISOString(),
+                    status: "resolved",
+                    replies: [],
+                },
+            ],
+            jobs: [
+                {
+                    id: "j30",
+                    task_id: 12,
+                    comment_id: "c30",
+                    type: "assist",
+                    status: "done",
+                    summary: "Added a note to Context.",
+                    ended_at: new Date().toISOString(),
+                },
+            ],
+        }
+        mockFetch({ "GET /api/tasks/12": res })
+        const first = renderWithApp(<TaskPage id={12} />)
+        const panel = await screen.findByRole("region", {
+            name: "Center agent reply",
+        })
+        expect(panel).toHaveTextContent("add a note on deletion")
+        expect(panel).toHaveTextContent("Added a note to Context.")
+        // "Full chat" opens the Chat tab with the whole conversation, which
+        // is not in Comments
+        fireEvent.click(screen.getByRole("button", { name: "Full chat" }))
+        const log = await screen.findByRole("list", {
+            name: "Chat with the center agent",
+        })
+        expect(log).toHaveTextContent("add a note on deletion")
+        expect(screen.getByRole("tab", { name: "Chat" })).toHaveAttribute(
+            "aria-selected",
+            "true"
+        )
+        fireEvent.click(screen.getByRole("tab", { name: /Comments/ }))
+        expect(
+            document.querySelector('.side-body [data-thread-id="c30"]')
+        ).toBeNull()
+        fireEvent.click(screen.getByRole("button", { name: "Dismiss" }))
+        expect(
+            screen.queryByRole("region", { name: "Center agent reply" })
+        ).not.toBeInTheDocument()
+        first.unmount()
+
+        // closed here: it stays closed next time
+        renderWithApp(<TaskPage id={12} />)
+        await screen.findByRole("heading", { name: "Fix lambda timeout" })
+        expect(
+            screen.queryByRole("region", { name: "Center agent reply" })
+        ).not.toBeInTheDocument()
+        window.localStorage.clear()
+    })
+
+    it("a chat job replaced while running stays visible as a chip", async () => {
+        let n = 0
+        const f = await setup({
+            "POST /api/tasks/12/comments": () =>
+                reply(201, {
+                    comment: {
+                        id: `c2${++n}`,
+                        parent_id: null,
+                        anchor: null,
+                        body: "x",
+                        intent: "chat",
+                        author: "me",
+                        at: "2026-11-07T10:00:00Z",
+                    },
+                    job: { id: `j2${n}`, type: "assist", status: "queued" },
+                }),
+        })
+        const input = screen.getByLabelText("Message the center agent")
+        for (const text of ["first", "second"]) {
+            fireEvent.change(input, { target: { value: text } })
+            fireEvent.submit(input.closest("form"))
+            await waitFor(() => expect(input.value).toBe(""))
+        }
+        expect(f.find("POST", "/api/tasks/12/comments")).toHaveLength(2)
+        const panel = screen.getByRole("region", { name: "Center agent reply" })
+        expect(panel).toHaveTextContent("second")
+        act(() =>
+            emit(stream, "job.updated", 12, {
+                job: { id: "j21", type: "assist", status: "running" },
+            })
+        )
+        expect(document.querySelectorAll('[data-job-id="j21"]')).toHaveLength(1)
+        expect(panel.querySelector('[data-job-id="j21"]')).toBeNull()
+    })
+
     it("replies, resolves and reopens threads", async () => {
         const f = await setup({
             "POST /api/tasks/12/comments": reply(201, {
@@ -1376,6 +1526,15 @@ describe("Task page: worker flow (phase 2)", () => {
 
     const tab = (name) =>
         screen.getByRole("tab", { name: new RegExp(`^${name}`) })
+
+    it("the document's PR feedback section lists the feedback", async () => {
+        await setupWorker()
+        const doc = article()
+        expect(doc).toHaveTextContent("Round 1 · 2 items · 1 open, 1 no action")
+        expect(doc).toHaveTextContent("open · inline · @ron")
+        expect(doc).toHaveTextContent("1 reply that needed no action")
+        expect(doc.querySelector('a[href="https://gh/c1"]')).not.toBeNull()
+    })
 
     it("shows the worker tabs and panels", async () => {
         await setupWorker()

@@ -81,6 +81,8 @@ function fakeProvider(name, calls) {
                 return {
                     output: {
                         reply: "Updated the summary.",
+                        title: null,
+                        message_agent: false,
                         edits: [
                             {
                                 section: "Summary",

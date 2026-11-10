@@ -18,6 +18,8 @@
 //   their apply() inside store.withTaskLock(task_id). On StaleRevisionError,
 //   apply() runs once more with ctx.attempt = 2; modules re-read what they
 //   depend on (see artifactEdits.js for the section rebase rule).
+//   An optional afterApply(ctx, output, context) runs once after apply(),
+//   outside the lock; its result (if any) replaces apply()'s.
 // - Output is validated with the module's zod outputSchema.
 // - LimitError + center.auto_fallback -> one retry on the fallback provider.
 // - Job failures never throw out to callers; they end in status "failed".
@@ -141,6 +143,11 @@ export function publicJob(job) {
         error: job.error,
         summary: job.summary,
         fallback_from: job.fallback_from || null,
+        // the chat / comment thread an assist job answers (the task page
+        // reopens the latest chat reply from it)
+        ...(job.input && job.input.comment_id
+            ? { comment_id: job.input.comment_id }
+            : {}),
         created_at: job.created_at,
         started_at: job.started_at,
         ended_at: job.ended_at,
@@ -445,10 +452,20 @@ export function createJobRunner({
             entry.applying = true
             const applyFn = () =>
                 applyWithRetry(mod, job, signal, parsed.data, context)
-            const result =
+            let result =
                 mod.lock && job.task_id != null
                     ? await store.withTaskLock(job.task_id, applyFn)
                     : await applyFn()
+            // afterApply: the part of a job that must not run under the
+            // task lock (e.g. talking to the worker service, which takes
+            // its own queue first and the task lock after)
+            if (typeof mod.afterApply === "function")
+                result =
+                    (await mod.afterApply(
+                        makeCtx(job, signal),
+                        parsed.data,
+                        context
+                    )) || result
             save(job, {
                 status: "done",
                 output: parsed.data,

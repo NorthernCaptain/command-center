@@ -8,12 +8,46 @@ import TaskRow from "./TaskRow.jsx"
 import { EmptyState } from "./Skeleton.jsx"
 import { LANE_LABELS } from "../lib/constants.js"
 
-// Pill order. "ready" (shaped, not started: set by hand, or a reopened
-// task) only gets a pill while it has tasks.
-const OTHER_LANES = ["inbox", "ready", "active", "prs", "waiting", "done"]
+// Pill order. "all" is Inbox, Active and PRs in one list (in that order,
+// a small header per lane). "ready" (shaped, not started: set by hand, or a
+// reopened task) only gets a pill while it has tasks.
+const OTHER_LANES = [
+    "all",
+    "inbox",
+    "ready",
+    "active",
+    "prs",
+    "waiting",
+    "done",
+]
 const HIDDEN_WHEN_EMPTY = new Set(["ready"])
+export const ALL_LANES = ["inbox", "active", "prs"]
+// the chosen pill, remembered per device
+const TAB_KEY = "cc.board.tab"
+
+function savedTab() {
+    try {
+        return window.localStorage.getItem(TAB_KEY)
+    } catch {
+        return null
+    }
+}
+
+function saveTab(tab) {
+    try {
+        window.localStorage.setItem(TAB_KEY, tab)
+    } catch {
+        // storage blocked: the default pill next time
+    }
+}
+
+const laneTasks = (lanes, lane) =>
+    lane === "all"
+        ? ALL_LANES.flatMap((l) => lanes[l] || [])
+        : lanes[lane] || []
 
 const LANE_EMPTY = {
+    all: "Nothing open.",
     active: "Nothing in flight.",
     prs: "No open PRs.",
     ready: "Nothing queued up.",
@@ -31,17 +65,42 @@ function laneNote(lane, tasks) {
     return null
 }
 
-function Lane({
-    lane,
-    tasks,
-    agents,
-    isOwner,
-    onDone,
-    onSnooze,
-    onStart,
-    onFocus,
-    current,
-}) {
+function Rows({ tasks, lane, rowProps }) {
+    return (
+        <ul className="rows">
+            {tasks.map((t) => (
+                <TaskRow
+                    key={t.id}
+                    task={t}
+                    lane={lane}
+                    agent={rowProps.agents[t.id]}
+                    isOwner={rowProps.isOwner}
+                    onDone={rowProps.onDone}
+                    onSnooze={rowProps.onSnooze}
+                    onStart={rowProps.onStart}
+                    onFocus={rowProps.onFocus}
+                />
+            ))}
+        </ul>
+    )
+}
+
+/** The "All" list: Inbox, Active and PRs, each under a small header. */
+function AllGroups({ lanes, rowProps }) {
+    return ALL_LANES.filter((l) => (lanes[l] || []).length).map((l) => (
+        <div key={l} className="lane-group">
+            <h3 className="lane-sep">
+                <span className={`lane-dot lane-dot-${l}`} aria-hidden="true" />
+                {LANE_LABELS[l]}
+                <span className="lane-sep-count">{lanes[l].length}</span>
+            </h3>
+            <Rows tasks={lanes[l]} lane={l} rowProps={rowProps} />
+        </div>
+    ))
+}
+
+function Lane({ lane, lanes, rowProps, current }) {
+    const tasks = laneTasks(lanes, lane)
     const note = laneNote(lane, tasks)
     return (
         <section
@@ -58,28 +117,16 @@ function Lane({
                 </h2>
                 {note ? <span className="lane-note">{note}</span> : null}
             </header>
-            {tasks.length ? (
-                <ul className="rows">
-                    {tasks.map((t) => (
-                        <TaskRow
-                            key={t.id}
-                            task={t}
-                            lane={lane}
-                            isOwner={isOwner}
-                            agent={agents[t.id]}
-                            onDone={onDone}
-                            onSnooze={onSnooze}
-                            onStart={onStart}
-                            onFocus={onFocus}
-                        />
-                    ))}
-                </ul>
-            ) : lane === "now" ? (
+            {!tasks.length ? (
                 <p className="lane-quiet">
-                    All clear. Nothing needs you right now.
+                    {lane === "now"
+                        ? "All clear. Nothing needs you right now."
+                        : LANE_EMPTY[lane]}
                 </p>
+            ) : lane === "all" ? (
+                <AllGroups lanes={lanes} rowProps={rowProps} />
             ) : (
-                <p className="lane-quiet">{LANE_EMPTY[lane]}</p>
+                <Rows tasks={tasks} lane={lane} rowProps={rowProps} />
             )}
         </section>
     )
@@ -102,13 +149,21 @@ export default function Board({
     const shown = OTHER_LANES.filter(
         (l) => !HIDDEN_WHEN_EMPTY.has(l) || (lanes[l] || []).length
     )
-    const firstNonEmpty = shown.find((l) => (lanes[l] || []).length) || "inbox"
-    const [tab, setTab] = useState(null)
+    // the default pill: the first lane with tasks ("all" only when picked)
+    const firstNonEmpty =
+        shown.find((l) => l !== "all" && (lanes[l] || []).length) || "inbox"
+    const [tab, setTab] = useState(savedTab)
     const current = tab && shown.includes(tab) ? tab : firstNonEmpty
     const total = Object.values(lanes).reduce(
         (n, l) => n + (l ? l.length : 0),
         0
     )
+    const rowProps = { agents, isOwner, onDone, onSnooze, onStart, onFocus }
+
+    function pick(l) {
+        setTab(l)
+        saveTab(l)
+    }
 
     if (!total) {
         return (
@@ -122,17 +177,7 @@ export default function Board({
 
     return (
         <div className="board">
-            <Lane
-                lane="now"
-                tasks={lanes.now || []}
-                agents={agents}
-                isOwner={isOwner}
-                onDone={onDone}
-                onSnooze={onSnooze}
-                onStart={onStart}
-                onFocus={onFocus}
-                current
-            />
+            <Lane lane="now" lanes={lanes} rowProps={rowProps} current />
             <div className="lane-tabs" role="tablist" aria-label="Lanes">
                 {shown.map((l) => (
                     <button
@@ -142,30 +187,29 @@ export default function Board({
                         aria-selected={current === l}
                         aria-controls={`lane-${l}`}
                         className={`lane-tab${current === l ? " is-current" : ""}`}
-                        onClick={() => setTab(l)}
+                        onClick={() => pick(l)}
                     >
                         {LANE_LABELS[l]}
                         <span className="lane-count">
-                            {(lanes[l] || []).length}
+                            {laneTasks(lanes, l).length}
                         </span>
                     </button>
                 ))}
             </div>
             <div className="lanes-grid">
-                {shown.map((l) => (
-                    <Lane
-                        key={l}
-                        lane={l}
-                        tasks={lanes[l] || []}
-                        agents={agents}
-                        isOwner={isOwner}
-                        onDone={onDone}
-                        onSnooze={onSnooze}
-                        onStart={onStart}
-                        onFocus={onFocus}
-                        current={current === l}
-                    />
-                ))}
+                {/* "all" repeats rows of other lanes: rendered only while
+                    it is the one shown */}
+                {shown
+                    .filter((l) => l !== "all" || current === "all")
+                    .map((l) => (
+                        <Lane
+                            key={l}
+                            lane={l}
+                            lanes={lanes}
+                            rowProps={rowProps}
+                            current={current === l}
+                        />
+                    ))}
             </div>
         </div>
     )

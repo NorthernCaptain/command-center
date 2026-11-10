@@ -7,6 +7,11 @@
 // any) and move the task to done. Triggered only by Leo (button) or merge
 // detection, never by content.
 //
+// A Result section that is already written (by Leo or the worker agent's
+// report) is kept as is; the LLM only fills an empty one. The Asana comment
+// is the conclusion for teammates: an outcome, the key points (root cause,
+// what changed, PRs with links) and what is still open, posted as rich text.
+//
 // Preconditions (checked in prepare and again in apply, before any side
 // effect): the status can move to done, and every deliverable is merged or
 // marked no_change, and a SOC2-area task has a complete "Change record
@@ -26,13 +31,25 @@ import {
     assertTaskChangeRecord,
 } from "../../phase3/soc2.js"
 import { applySectionEdits } from "../artifactEdits.js"
+import { buildConclusion } from "../../integrations/asana/asanaNotes.js"
 import { artifactBlock, systemPrompt, taskLine } from "../prompts.js"
+import { sectionBody } from "../sections.js"
 import { asanaOf } from "./util.js"
 
 const outputSchema = z.object({
-    result_md: z.string().min(1),
-    asana_comment: z.string(),
+    result_md: z.string(),
+    asana_conclusion: z.object({
+        outcome: z.string(),
+        points: z.array(z.string()),
+        open_items: z.array(z.string()),
+    }),
 })
+
+/** Is the Result section written (not missing, empty or the placeholder)? */
+export function hasResult(content) {
+    const body = sectionBody(content, "Result")
+    return Boolean(body && body.replace(/<!--[\s\S]*?-->/g, "").trim())
+}
 
 export const EV_COMMENTED = "asana_close_commented"
 export const EV_COMPLETED = "asana_completed"
@@ -97,10 +114,13 @@ async function hasEvent(ctx, type, gid) {
     )
 }
 
-async function closeAsana(ctx, svc, gid, text, context) {
-    if (text && !context.asanaCommented) {
+async function closeAsana(ctx, svc, gid, conclusion, context) {
+    if (conclusion.text && !context.asanaCommented) {
         if (!(await hasEvent(ctx, EV_COMMENTED, gid))) {
-            await svc.comment(gid, text)
+            // rich text when the service has it, else the plain version
+            if (typeof svc.commentHtml === "function")
+                await svc.commentHtml(gid, conclusion.html)
+            else await svc.comment(gid, conclusion.text)
             await ctx.store.appendEvent(
                 ctx.task_id,
                 { type: EV_COMMENTED, data: { gid } },
@@ -138,7 +158,13 @@ export default {
         assertClosable(task)
         const artifact = await ctx.store.getArtifact(ctx.task_id)
         assertChangeRecord(task, artifact)
-        return { context: { task, artifact } }
+        return {
+            context: {
+                task,
+                artifact,
+                keepResult: hasResult(artifact.content),
+            },
+        }
     },
 
     buildPrompt(ctx, context) {
@@ -147,6 +173,9 @@ export default {
             prompt: [
                 taskLine(context.task),
                 `Title: ${JSON.stringify(context.task.title)}`,
+                context.keepResult
+                    ? 'The Result section is already written: keep it (result_md: "") and base asana_conclusion on it.'
+                    : "The Result section is empty: write result_md.",
                 artifactBlock(context.artifact.content),
             ].join("\n\n"),
         }
@@ -158,12 +187,22 @@ export default {
         assertClosable(current)
         await assertTaskChangeRecord(ctx.store, current)
 
-        const res = await applySectionEdits(ctx, context, [
-            { section: "Result", op: "replace", content: output.result_md },
-        ])
         const notes = []
-        if (res.conflicts.length)
-            notes.push("Result section changed meanwhile, kept yours")
+        const resultMd = output.result_md.trim()
+        if (context.keepResult) {
+            notes.push("kept the written Result")
+        } else {
+            if (!resultMd)
+                throw new AppError(
+                    "invalid_output",
+                    "close-out wrote no Result section"
+                )
+            const res = await applySectionEdits(ctx, context, [
+                { section: "Result", op: "replace", content: resultMd },
+            ])
+            if (res.conflicts.length)
+                notes.push("Result section changed meanwhile, kept yours")
+        }
 
         const { task } = await ctx.store.getTask(ctx.task_id)
         const gid = task.asana && task.asana.gid
@@ -173,7 +212,7 @@ export default {
                 ctx,
                 svc,
                 gid,
-                output.asana_comment.trim(),
+                buildConclusion(output.asana_conclusion),
                 context
             )
             notes.push("Asana completed")

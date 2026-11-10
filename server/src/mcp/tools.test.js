@@ -1035,6 +1035,26 @@ describe("cc_report", () => {
         ...over,
     })
 
+    test("review again from pr_open (more work after review, PR still open)", async () => {
+        const t1 = await seedTask({
+            status: "pr_open",
+            deliverables: [
+                dlv("aws-lambda", "pr", {
+                    pr: "https://github.com/acme/aws-lambda/pull/9",
+                }),
+            ],
+        })
+        const r = await tools.cc_report({
+            task_id: t1,
+            status: "review",
+            summary: "answered the follow-up",
+        })
+        expect(r).toMatchObject({ ok: true, status: "review" })
+        expect((await store.getTask(t1)).task.flags.now_reason).toBe(
+            "Ready for review"
+        )
+    })
+
     test("review with no_change_repos marks those deliverables no_change", async () => {
         const t1 = await seedTask({ deliverables: [dlv("aws-lambda")] })
         const r = await tools.cc_report({

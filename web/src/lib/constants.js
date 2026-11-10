@@ -63,12 +63,31 @@ export const SETTINGS_DEFAULTS = {
 
 export const LANE_LABELS = {
     now: "Now",
+    all: "All",
     active: "Active",
     prs: "PRs",
     ready: "Ready",
     inbox: "Inbox",
     waiting: "Waiting",
     done: "Done",
+}
+
+// The board lane a status belongs to (without the Now overlay); the server
+// uses the same mapping (contracts/lifecycle.js laneOf).
+const STATUS_LANES = {
+    inbox: "inbox",
+    ready: "ready",
+    waiting: "waiting",
+    active: "active",
+    ready_for_pr: "prs",
+    pr_open: "prs",
+    pr_feedback: "prs",
+    review: "prs",
+}
+
+/** "inbox" | "ready" | "active" | "prs" | "waiting" | "done" */
+export function statusLane(status) {
+    return STATUS_LANES[status] || "done"
 }
 
 export const STATUS_LABELS = {

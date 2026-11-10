@@ -7,6 +7,7 @@ import {
     allLinks,
     fileUrl,
     hrefFor,
+    isAppPath,
     linksMarkdown,
     sourceLink,
     withLinksSection,
@@ -89,6 +90,25 @@ describe("hrefFor / fileUrl", () => {
         expect(hrefFor("relative/path")).toBeNull()
         expect(hrefFor(undefined)).toBeNull()
         expect(fileUrl("/a/b")).toBe("file:///a/b")
+    })
+
+    it("app task pages stay app links, not file:// (spin-off back link)", () => {
+        expect(hrefFor("/t/2")).toBe("/t/2")
+        expect(hrefFor("/t/T-12/")).toBe("/t/T-12/")
+        expect(isAppPath(" /t/2 ")).toBe(true)
+        expect(isAppPath("/t/2/x")).toBe(false)
+        expect(isAppPath("/t")).toBe(false)
+        expect(isAppPath(null)).toBe(false)
+        // a folder that merely starts with /t/ is still a folder
+        expect(hrefFor("/t/tmp")).toBe("file:///t/tmp")
+        const html = renderMarkdown(
+            linksMarkdown([
+                { type: "doc", url: "/t/2", label: "spun off from T-2" },
+            ])
+        )
+        expect(html).toContain('href="/t/2"')
+        expect(html).not.toContain("file://")
+        expect(html).not.toContain("target=")
     })
 })
 

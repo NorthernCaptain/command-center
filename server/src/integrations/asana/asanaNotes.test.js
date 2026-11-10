@@ -6,8 +6,10 @@
 import {
     asanaStatusKey,
     branchUrl,
+    buildConclusion,
     buildDescriptionHtml,
     buildTrackingBlockHtml,
+    inlineHtml,
     collectRefs,
     safeDecode,
     escapeHtml,
@@ -501,5 +503,50 @@ describe("trackingFingerprint: org changes", () => {
         expect(acme).not.toBe(none)
         expect(trackingFingerprint(t, null, "other")).not.toBe(acme)
         expect(trackingFingerprint(t, null, "acme")).toBe(acme)
+    })
+})
+
+describe("inlineHtml", () => {
+    test("code, bold, Markdown links and bare URLs; the rest escaped", () => {
+        expect(
+            inlineHtml(
+                "Run `nmcli r wifi <on>` **now**; see [PR #59](https://github.com/acme/fw/pull/59) and https://x.example.com/a?b=1&c=2."
+            )
+        ).toBe(
+            'Run <code>nmcli r wifi &lt;on&gt;</code> <strong>now</strong>; see <a href="https://github.com/acme/fw/pull/59">PR #59</a> and <a href="https://x.example.com/a?b=1&amp;c=2">https://x.example.com/a?b=1&amp;c=2</a>.'
+        )
+        // a URL inside code stays code
+        expect(inlineHtml("`https://a.example.com`")).toBe(
+            "<code>https://a.example.com</code>"
+        )
+        expect(inlineHtml(null)).toBe("")
+        expect(inlineHtml('<b onclick="x">')).toBe(
+            "&lt;b onclick=&quot;x&quot;&gt;"
+        )
+    })
+})
+
+describe("buildConclusion", () => {
+    test("outcome, details and open items as rich and plain text", () => {
+        const c = buildConclusion({
+            outcome: " Found it. ",
+            points: ["Cause: `radio off`", " ", null],
+            open_items: ["Run it on X39311"],
+        })
+        expect(c.html).toBe(
+            "<body><strong>Done</strong>\nFound it.\n\n<strong>Details</strong>\n<ul><li>Cause: <code>radio off</code></li></ul>\n\n<strong>Still open</strong>\n<ul><li>Run it on X39311</li></ul></body>"
+        )
+        expect(c.text).toBe(
+            "Done\nFound it.\n\nDetails\n- Cause: `radio off`\n\nStill open\n- Run it on X39311"
+        )
+    })
+
+    test("points without an outcome; nothing to say -> empty", () => {
+        expect(buildConclusion({ points: ["a"] }).text).toBe("Details\n- a")
+        expect(buildConclusion({ outcome: "", open_items: ["x"] })).toEqual({
+            html: "",
+            text: "",
+        })
+        expect(buildConclusion()).toEqual({ html: "", text: "" })
     })
 })

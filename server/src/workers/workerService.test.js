@@ -15,6 +15,7 @@ import {
     createWorkerService,
     isServerError,
     isTransportError,
+    START_FAILED_REASON,
     UNAVAILABLE_REASON,
     UNCERTAIN_REASON,
 } from "./workerService.js"
@@ -883,6 +884,205 @@ describe("deliver / flush", () => {
         const r2 = await env2.svc.deliver(1, "x")
         expect(r2.status).toBe("queued")
         expect(env2.outbox.pending(1)).toHaveLength(1)
+    })
+})
+
+describe("review while the agent works again", () => {
+    // the agent reported review (task review, Now "Ready for review")
+    async function inReview(env, now_reason = "Ready for review") {
+        await started(env)
+        await env.svc.start()
+        env.events.emit("status", { paneId: "p1", status: "idle" })
+        await env.svc.idle()
+        env.store.tasks.get(1).status = "review"
+        env.store.tasks.get(1).flags = {
+            ...env.store.task(1).flags,
+            now: true,
+            now_reason,
+        }
+    }
+
+    test("idle -> working on a review task goes back to active", async () => {
+        const env = setup()
+        await inReview(env)
+        env.events.emit("status", { paneId: "p1", status: "working" })
+        await env.svc.idle()
+        expect(env.store.task(1).status).toBe("active")
+        expect(env.store.task(1).flags).toMatchObject({
+            now: false,
+            now_reason: null,
+        })
+        expect(env.store.eventTypes()).toContain("agent_resumed_work")
+    })
+
+    test("another Now reason stays; staying working or going idle changes nothing", async () => {
+        const env = setup()
+        await inReview(env, "Agent needs you")
+        env.events.emit("status", { paneId: "p1", status: "working" })
+        await env.svc.idle()
+        expect(env.store.task(1).status).toBe("active")
+        expect(env.store.task(1).flags.now_reason).toBe("Agent needs you")
+
+        // report review while already working: no transition, stays review
+        env.store.tasks.get(1).status = "review"
+        env.events.emit("status", { paneId: "p1", status: "working" })
+        env.events.emit("status", { paneId: "p1", status: "idle" })
+        await env.svc.idle()
+        expect(env.store.task(1).status).toBe("review")
+    })
+
+    test("only review moves: ready_for_pr stays while the agent opens the PR", async () => {
+        const env = setup()
+        await inReview(env)
+        env.store.tasks.get(1).status = "ready_for_pr"
+        env.events.emit("status", { paneId: "p1", status: "working" })
+        await env.svc.idle()
+        expect(env.store.task(1).status).toBe("ready_for_pr")
+        expect(env.store.eventTypes()).not.toContain("agent_resumed_work")
+    })
+
+    test("the resync / flush path also leaves review", async () => {
+        const env = setup()
+        await inReview(env)
+        env.herdr.setStatus(NAME, "working")
+        await env.svc.resync()
+        await env.svc.idle()
+        expect(env.store.task(1).status).toBe("active")
+    })
+
+    test("reviving an exited agent with more work leaves review", async () => {
+        const env = setup()
+        await inReview(env)
+        await env.svc.action(1, "stop")
+        env.herdr.agents.delete(NAME)
+        const r = await env.svc.revive(1, { action: "address the comments" })
+        expect(r).toMatchObject({ revived: true })
+        expect(r.adopted).toBeUndefined()
+        expect(env.store.task(1).status).toBe("active")
+        expect(env.store.task(1).flags.now).toBe(false)
+        const types = env.store.eventTypes()
+        expect(types.indexOf("agent_resumed_work")).toBeLessThan(
+            types.lastIndexOf("agent_revived")
+        )
+    })
+
+    test("a failed relaunch puts the task back in review", async () => {
+        const env = setup()
+        await inReview(env)
+        await env.svc.action(1, "stop")
+        env.herdr.agents.delete(NAME)
+        env.herdr.agentStart.mockRejectedValueOnce(herdrErr("agent_not_ready"))
+        await expect(
+            env.svc.revive(1, { action: "more" })
+        ).rejects.toMatchObject({ code: "agent_not_ready" })
+        // back in review; the launch failure's own Now flag stays on top
+        expect(env.store.task(1).status).toBe("review")
+        expect(env.store.task(1).flags.now_reason).toBe(START_FAILED_REASON)
+    })
+
+    test("with an open claimed PR it goes to pr_open (still watched), back to review on a failed relaunch", async () => {
+        const env = setup()
+        await inReview(env)
+        const pr = "https://github.com/acme/app/pull/7"
+        env.store.tasks.get(1).deliverables = [
+            { repo: "app", disposition: "pr", pr, merged_at: null },
+        ]
+        env.events.emit("status", { paneId: "p1", status: "working" })
+        await env.svc.idle()
+        expect(env.store.task(1).status).toBe("pr_open")
+
+        // a merged PR does not count: active
+        env.store.tasks.get(1).status = "review"
+        env.store.tasks.get(1).deliverables[0].merged_at =
+            "2026-11-08T12:00:00.000Z"
+        env.events.emit("status", { paneId: "p1", status: "idle" })
+        env.events.emit("status", { paneId: "p1", status: "working" })
+        await env.svc.idle()
+        expect(env.store.task(1).status).toBe("active")
+
+        env.events.emit("status", { paneId: "p1", status: "idle" })
+        await env.svc.idle()
+        env.store.tasks.get(1).status = "review"
+        env.store.tasks.get(1).deliverables[0].merged_at = null
+        await env.svc.action(1, "stop")
+        env.herdr.agents.delete(NAME)
+        env.herdr.agentStart.mockRejectedValueOnce(herdrErr("agent_not_ready"))
+        await expect(
+            env.svc.revive(1, { action: "more" })
+        ).rejects.toMatchObject({ code: "agent_not_ready" })
+        expect(env.store.task(1).status).toBe("review")
+    })
+
+    test("a failed relaunch before the workspace restores the review flag too", async () => {
+        const env = setup()
+        await inReview(env)
+        await env.svc.action(1, "stop")
+        env.herdr.agents.delete(NAME)
+        // every agent name is taken: fails before launch, no flag of its own
+        for (let n = 2; n < 10; n++)
+            env.herdr.agents.set(`${NAME}-${n}`, { kind: "codex" })
+        env.herdr.agents.set(NAME, { kind: "codex" })
+        await expect(
+            env.svc.revive(1, { action: "more" })
+        ).rejects.toMatchObject({ code: "agent_name_taken" })
+        expect(env.store.task(1).status).toBe("review")
+        expect(env.store.task(1).flags).toMatchObject({
+            now: true,
+            now_reason: "Ready for review",
+        })
+    })
+
+    test("a failed relaunch leaves a task that moved on alone; a store error is logged", async () => {
+        const warn = jest.fn()
+        const env = setup({ log: { warn, info() {}, error() {}, debug() {} } })
+        await inReview(env)
+        await env.svc.action(1, "stop")
+        env.herdr.agents.delete(NAME)
+        env.herdr.agentStart.mockImplementationOnce(async () => {
+            env.store.tasks.get(1).status = "waiting"
+            throw herdrErr("x")
+        })
+        await expect(env.svc.revive(1, { action: "more" })).rejects.toThrow()
+        expect(env.store.task(1).status).toBe("waiting")
+
+        env.store.tasks.get(1).status = "review"
+        const lock = env.store.withTaskLock
+        let calls = 0
+        env.store.withTaskLock = async (id, fn) => {
+            if (++calls > 1) throw new Error("disk")
+            return lock(id, fn)
+        }
+        env.herdr.agentStart.mockRejectedValueOnce(herdrErr("x"))
+        await expect(env.svc.revive(1, { action: "more" })).rejects.toThrow()
+        expect(env.store.task(1).status).toBe("active")
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ task: 1 }),
+            "review not restored"
+        )
+    })
+
+    test("adopting with an action leaves review; adopting without one does not", async () => {
+        const env = setup()
+        await inReview(env)
+        await env.svc.action(1, "stop")
+        await env.svc.revive(1)
+        expect(env.store.task(1).status).toBe("review")
+        await env.svc.action(1, "stop")
+        const r = await env.svc.revive(1, { action: "continue" })
+        expect(r).toMatchObject({ adopted: true })
+        expect(env.store.task(1).status).toBe("active")
+    })
+
+    test("a store failure is logged, the status event still applies", async () => {
+        const env = setup()
+        await inReview(env)
+        env.store.withTaskLock = async () => {
+            throw new Error("disk")
+        }
+        env.events.emit("status", { paneId: "p1", status: "working" })
+        await env.svc.idle()
+        expect(env.sessions.current(1).state).toBe("working")
+        expect(env.store.task(1).status).toBe("review")
     })
 })
 

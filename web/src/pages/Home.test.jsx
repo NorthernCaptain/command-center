@@ -72,6 +72,7 @@ const board = {
 let stream
 beforeEach(() => {
     stream = freshStream()
+    window.localStorage.clear()
 })
 
 function setup(routes = {}, opts) {
@@ -81,6 +82,72 @@ function setup(routes = {}, opts) {
 }
 
 describe("Home", () => {
+    it("All: Inbox, Active and PRs in one list under lane headers, remembered", async () => {
+        const lanes = {
+            ...board.lanes,
+            prs: [sampleTask({ id: 6, title: "Upload PR", status: "pr_open" })],
+        }
+        mockFetch({ "GET /api/board": { lanes } })
+        const first = renderWithApp(<Home />)
+        await screen.findByText("Upload PR")
+        const tab = screen.getByRole("tab", { name: /All/ })
+        expect(tab).toHaveTextContent("3")
+        // not the default: the first lane with tasks is
+        expect(tab).toHaveAttribute("aria-selected", "false")
+        expect(document.getElementById("lane-all")).toBeNull()
+        fireEvent.click(tab)
+        const all = document.getElementById("lane-all")
+        expect(all).toHaveClass("is-current")
+        expect(
+            within(all)
+                .getAllByRole("heading", { level: 3 })
+                .map((h) => h.textContent)
+        ).toEqual(["Inbox1", "Active1", "PRs1"])
+        const rows = [...all.querySelectorAll(".row")]
+        expect(rows.map((r) => r.dataset.taskId)).toEqual(["3", "2", "6"])
+        expect(rows.map((r) => r.querySelector(".lane-dot").className)).toEqual(
+            [
+                "lane-dot lane-dot-inbox",
+                "lane-dot lane-dot-active",
+                "lane-dot lane-dot-prs",
+            ]
+        )
+        // Now rows get the dot of their own lane (a waiting reminder)
+        const now = document.getElementById("lane-now")
+        expect(now.querySelector(".lane-dot")).toHaveClass("lane-dot-waiting")
+        expect(now.querySelector(".lane-dot")).toHaveAttribute(
+            "title",
+            "Waiting · Reminder"
+        )
+        first.unmount()
+
+        // the pill is remembered on this device
+        mockFetch({ "GET /api/board": { lanes } })
+        renderWithApp(<Home />)
+        await screen.findAllByText("Upload PR")
+        expect(screen.getByRole("tab", { name: /All/ })).toHaveAttribute(
+            "aria-selected",
+            "true"
+        )
+    })
+
+    it("All says so when Inbox, Active and PRs are empty; storage errors are ignored", async () => {
+        jest.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+            throw new Error("blocked")
+        })
+        jest.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+            throw new Error("blocked")
+        })
+        mockFetch({
+            "GET /api/board": { lanes: { done: board.lanes.done } },
+        })
+        renderWithApp(<Home />)
+        await screen.findByText("Shipped")
+        fireEvent.click(screen.getByRole("tab", { name: /All/ }))
+        expect(screen.getByText("Nothing open.")).toBeInTheDocument()
+        jest.restoreAllMocks()
+    })
+
     it("renders lanes with Now first", async () => {
         setup()
         expect(
@@ -99,7 +166,7 @@ describe("Home", () => {
             screen
                 .getAllByRole("tab")
                 .map((t) => t.textContent.replace(/\d+$/, ""))
-        ).toEqual(["Inbox", "Active", "PRs", "Waiting", "Done"])
+        ).toEqual(["All", "Inbox", "Active", "PRs", "Waiting", "Done"])
         // the first non-empty lane is open
         expect(screen.getByRole("tab", { name: /Inbox/ })).toHaveAttribute(
             "aria-selected",
@@ -758,7 +825,7 @@ describe("Home layout", () => {
             screen
                 .getAllByRole("tab")
                 .map((t) => t.textContent.replace(/\d+$/, ""))
-        ).toEqual(["Inbox", "Ready", "Active", "PRs", "Waiting", "Done"])
+        ).toEqual(["All", "Inbox", "Ready", "Active", "PRs", "Waiting", "Done"])
         expect(screen.getByRole("tab", { name: /Ready/ })).toHaveAttribute(
             "aria-selected",
             "true"

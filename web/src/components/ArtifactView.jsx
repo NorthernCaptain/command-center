@@ -5,6 +5,8 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef } from "react"
 import { applyHighlights } from "../lib/anchoring.js"
+import { isAppPath } from "../lib/links.js"
+import { navigate } from "../lib/router.js"
 import { renderMarkdown } from "../lib/markdown.js"
 
 /** Threads whose anchors should be highlighted. */
@@ -77,6 +79,21 @@ export default function ArtifactView({
     }, [activeId, focusKey, html, items, rootRef])
 
     function onClick(e) {
+        // an app page link ("/t/2") routes in place on a plain click
+        const a = e.target.closest && e.target.closest("a[href]")
+        if (a && isAppPath(a.getAttribute("href"))) {
+            const plain =
+                e.button === 0 &&
+                !e.metaKey &&
+                !e.ctrlKey &&
+                !e.shiftKey &&
+                !e.altKey
+            if (plain) {
+                e.preventDefault()
+                navigate(a.getAttribute("href"))
+            }
+            return
+        }
         const mark =
             e.target.closest && e.target.closest("mark[data-comment-id]")
         if (mark && onMarkClick) {

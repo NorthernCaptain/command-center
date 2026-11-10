@@ -35,6 +35,7 @@ describe("visibleTabs", () => {
     it("shows worker tabs when the task has data for them", () => {
         const data = {
             task: { slug: "k7q2", deliverables: [{ repo: "a" }] },
+            comments: [{ id: "c", intent: "chat", author: "me" }],
             feedback: [{ id: "f" }],
             reviews: [{ folder: "x" }],
         }

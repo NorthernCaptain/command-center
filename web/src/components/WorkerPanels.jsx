@@ -9,7 +9,16 @@
 import { useState } from "react"
 import AgentChip from "./AgentChip.jsx"
 import { relativeTime } from "../lib/time.js"
+import {
+    FB_KIND_LABELS,
+    FB_STATUS_LABELS,
+    feedbackState,
+    groupRounds,
+    roundSummary,
+} from "../lib/feedback.js"
 import { deliverableState, watchFor } from "../lib/worker.js"
+
+export { groupRounds, roundSummary }
 
 const KIND_NAMES = { claude: "Claude", codex: "Codex" }
 
@@ -386,50 +395,6 @@ export function DeliverablesPanel({
 
 // --- Feedback --------------------------------------------------------------
 
-const FB_KIND_LABELS = {
-    review_comment: "inline",
-    review: "review",
-    issue_comment: "comment",
-    ci_failure: "CI",
-}
-
-const FB_STATUS_LABELS = {
-    open: "open",
-    fixed: "fixed",
-    answered: "answered",
-    declined: "declined",
-    no_action: "no action",
-}
-
-/** Feedback items grouped by round, newest round first. */
-export function groupRounds(items) {
-    const byRound = new Map()
-    for (const it of items || []) {
-        const r = it.round || 1
-        if (!byRound.has(r)) byRound.set(r, [])
-        byRound.get(r).push(it)
-    }
-    return [...byRound.entries()]
-        .sort((a, b) => b[0] - a[0])
-        .map(([round, list]) => ({
-            round,
-            items: [...list].sort((a, b) =>
-                String(a.at || "").localeCompare(String(b.at || ""))
-            ),
-        }))
-}
-
-/** "3 items · 2 fixed, 1 answered" */
-export function roundSummary(items) {
-    const counts = {}
-    for (const it of items) counts[it.status] = (counts[it.status] || 0) + 1
-    const parts = Object.keys(FB_STATUS_LABELS)
-        .filter((s) => counts[s])
-        .map((s) => `${counts[s]} ${FB_STATUS_LABELS[s]}`)
-    const n = items.length
-    return `${n} item${n === 1 ? "" : "s"}${parts.length ? ` · ${parts.join(", ")}` : ""}`
-}
-
 function FeedbackItem({ item, onReopen, busy }) {
     const resolved = ["fixed", "answered", "declined"].includes(item.status)
     const where = item.path
@@ -507,8 +472,15 @@ export function FeedbackPanel({ feedback, onReopen }) {
         }
     }
 
+    const st = feedbackState(feedback)
     return (
         <div className="feedback">
+            {st ? (
+                <p className={`fb-state fb-state-${st.state}`} role="status">
+                    {st.state === "addressed" ? "✓ " : ""}
+                    {st.label}
+                </p>
+            ) : null}
             {rounds.map((r) => (
                 <section
                     key={r.round}

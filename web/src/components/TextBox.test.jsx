@@ -73,6 +73,36 @@ describe("TextBox", () => {
         }
     })
 
+    test("a scrolling box keeps the caret in view while typing", () => {
+        const spy = jest
+            .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+            .mockReturnValue(500)
+        try {
+            const props = {
+                "aria-label": "box",
+                maxRows: 3,
+                onChange: () => {},
+            }
+            const { rerender } = render(<TextBox {...props} value="a\nb" />)
+            const box = screen.getByLabelText("box")
+            // typing at the end: follows the end
+            box.setSelectionRange(3, 3)
+            rerender(<TextBox {...props} value="a\nb\nc" />)
+            expect(box.scrollTop).toBe(500)
+            // editing earlier in the text: the scroll position stays (jsdom
+            // moves the caret to the end on a new value: pin it at the start)
+            const caret = jest
+                .spyOn(HTMLTextAreaElement.prototype, "selectionEnd", "get")
+                .mockReturnValue(0)
+            box.scrollTop = 40
+            rerender(<TextBox {...props} value="x\na\nb\nc" />)
+            expect(box.scrollTop).toBe(40)
+            caret.mockRestore()
+        } finally {
+            spy.mockRestore()
+        }
+    })
+
     test("isSubmitKey ignores IME composition", () => {
         expect(
             isSubmitKey({

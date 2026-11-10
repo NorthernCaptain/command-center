@@ -6,11 +6,13 @@
 // Task-page helpers for the phase 2 worker flow (tabs, action toasts).
 
 import { errorMessage } from "./api.js"
+import { isChatThread } from "./chat.js"
 
 export const TABS = [
     { id: "links", label: "Links" },
     { id: "deliverables", label: "Deliverables" },
     { id: "comments", label: "Comments" },
+    { id: "chat", label: "Chat" },
     { id: "reviews", label: "Reviews" },
     { id: "agent", label: "Agent" },
     { id: "feedback", label: "Feedback" },
@@ -23,6 +25,7 @@ const len = (a) => (Array.isArray(a) ? a.length : 0)
 /**
  * Worker tabs only show when the server has the feature (`features` from
  * /api/me) and, except Deliverables, when the task has something for them.
+ * Chat shows once the task has a chat with the center agent.
  */
 export function visibleTabs(data, features = {}) {
     const task = data.task || {}
@@ -36,6 +39,7 @@ export function visibleTabs(data, features = {}) {
         deliverables: Boolean(features.github),
         feedback: Boolean(features.github) && len(data.feedback) > 0,
         reviews: Boolean(features.github) && len(data.reviews) > 0,
+        chat: (data.comments || []).some(isChatThread),
     }
     return TABS.filter((t) => show[t.id] !== false)
 }

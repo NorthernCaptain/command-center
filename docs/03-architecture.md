@@ -176,8 +176,8 @@ its PR(s) are merged**, the same rule as the Asana task.
 | `active` | herdr agent (or I) working | Start |
 | `ready_for_pr` | agent finished: tests pass, review orchestrator GOOD_TO_GO, changes staged. Waiting for my **Create PR** | agent `cc_report` |
 | `pr_open` | PR(s) open, watcher polling comments / CI / merge | PR discovered |
-| `pr_feedback` | new actionable review comments or red CI. The agent is prompted automatically to fix, test, commit, push and reply on GitHub. Returns to `pr_open` when every feedback item is resolved. | PR watcher / agent `cc_feedback` |
-| `review` | non-code deliverable done, waiting for my accept | agent `cc_report` |
+| `pr_feedback` | new actionable review comments or red CI. The agent is prompted automatically to fix, test, commit, push and reply on GitHub. Returns to `pr_open` when every feedback item is resolved. The "PR feedback" Now flag clears then, in any status, and a `feedback_addressed` event is logged. | PR watcher / agent `cc_feedback` |
+| `review` | non-code deliverable done, waiting for my accept. With a claimed PR: new feedback moves it to `pr_feedback`; the agent working again moves it to `active` (`pr_open` while a claimed PR is open, so the watcher keeps polling), and its next `review` report brings it back | agent `cc_report` |
 | `done` | every deliverable resolved (merged PR or confirmed no-change), or accepted | PR watcher / me |
 | `cancelled` | dropped | me |
 
@@ -269,9 +269,10 @@ its PR(s) are merged**, the same rule as the Asana task.
    verified.
 6. **Closing** is evaluated against **deliverables**, not "whatever PRs
    we've seen so far" (see below). When every deliverable is resolved:
-   `done` and the `close_out` job writes the artifact Result, comments on
-   Asana with the result and PR links, completes the Asana task, and
-   commits. Then **Clean folders** is offered (prompt the agent to run tree
+   `done` and the `close_out` job writes the artifact Result (only when it
+   is still empty: a written Result is kept), posts the conclusion on the
+   Asana task (rich text: outcome, details with PR / doc links, what is
+   still open), completes the Asana task, and commits. Then **Clean folders** is offered (prompt the agent to run tree
    AGENTS.md §6). Default is to leave the folders.
 
 ### PR feedback items

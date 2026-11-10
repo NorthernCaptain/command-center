@@ -488,7 +488,7 @@ export function createPrWatcher({
                 if (
                     status &&
                     task.status !== status &&
-                    POLLED_STATUSES.includes(task.status) &&
+                    isWatched(task) &&
                     canTransition(task.status, status)
                 )
                     patch.status = status
@@ -993,27 +993,45 @@ export function createPrWatcher({
     }
 
     /**
-     * pr_feedback -> pr_open once no actionable item is open on a PR that
-     * can still change (a merged / closed PR's leftovers can't be addressed).
+     * Once no actionable item is open on a PR that can still change (a
+     * merged / closed PR's leftovers can't be addressed): pr_feedback ->
+     * pr_open, and the "PR feedback" Now flag goes whatever the status is
+     * (a task in review keeps its status). A "feedback_addressed" event
+     * marks the moment.
      */
     async function settleStatus(taskId) {
         const items = await liveFeedback(taskId)
         if (items.some((i) => i.actionable && i.status === "open")) return
+        let settled = false
         await mutateTask(
             taskId,
             (task) => {
-                if (task.status !== "pr_feedback") return null
-                const patch = { status: "pr_open" }
+                const patch = {}
+                if (task.status === "pr_feedback") patch.status = "pr_open"
                 if (
+                    task.flags.now &&
                     String(task.flags.now_reason || "").startsWith(
                         FEEDBACK_REASON
                     )
                 )
                     patch.flags = { now: false, now_reason: null }
+                if (!patch.status && !patch.flags) return null
+                settled = true
                 return patch
             },
             { reason: "feedback resolved" }
         )
+        if (settled)
+            await store.appendEvent(
+                taskId,
+                {
+                    type: "feedback_addressed",
+                    data: {
+                        items: items.filter((i) => i.actionable).length,
+                    },
+                },
+                ACTOR
+            )
     }
 
     // ---- per PR --------------------------------------------------------
