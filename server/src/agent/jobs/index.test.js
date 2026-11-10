@@ -23,6 +23,9 @@ describe("job registry", () => {
     test("every output schema converts to a strict JSON schema", () => {
         const walk = (node) => {
             if (!node || typeof node !== "object") return
+            // keywords strict validators reject
+            for (const k of ["default", "format", "pattern", "$schema"])
+                expect(node).not.toHaveProperty([k])
             if (node.type === "object") {
                 expect(node.additionalProperties).toBe(false)
                 expect(node.required.sort()).toEqual(

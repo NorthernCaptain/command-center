@@ -8,11 +8,12 @@
 // additionalProperties:false and all keys required (zod already does that for
 // plain objects; optional fields must be modeled as nullable). We drop
 // constructs strict validators reject or that add noise: $schema, format,
-// pattern and the ±MAX_SAFE_INTEGER bounds zod adds to .int().
+// pattern, default (zod still applies it when parsing) and the
+// ±MAX_SAFE_INTEGER bounds zod adds to .int().
 
 import { z } from "zod"
 
-const DROP_KEYS = new Set(["$schema", "format", "pattern"])
+const DROP_KEYS = new Set(["$schema", "format", "pattern", "default"])
 
 function clean(node) {
     if (Array.isArray(node)) return node.map(clean)
