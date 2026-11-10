@@ -550,8 +550,8 @@ describe("detectPublicBaseUrl", () => {
     test("builds the tailnet URL from the Tailscale DNS name", async () => {
         const calls = []
         const url = await detectPublicBaseUrl({
-            exec: async (cmd, args) => {
-                calls.push([cmd, ...args])
+            exec: async (cmd, args, opts) => {
+                calls.push({ argv: [cmd, ...args], opts })
                 return {
                     stdout: JSON.stringify({
                         Self: { DNSName: "My-Mac.tail0000.ts.net." },
@@ -560,7 +560,26 @@ describe("detectPublicBaseUrl", () => {
             },
         })
         expect(url).toBe("https://my-mac.tail0000.ts.net:8443")
-        expect(calls[0].slice(1)).toEqual(["status", "--json"])
+        expect(calls[0].argv.slice(1)).toEqual(["status", "--json"])
+        expect(calls[0].opts.env.TERM).toBe(process.env.TERM || "dumb")
+    })
+
+    test("passes TERM even when the service has none (launchd)", async () => {
+        const saved = process.env.TERM
+        delete process.env.TERM
+        try {
+            let env = null
+            await detectPublicBaseUrl({
+                exec: async (cmd, args, opts) => {
+                    env = opts.env
+                    return { stdout: "{}" }
+                },
+            })
+            expect(env.TERM).toBe("dumb")
+            expect(env.HOME).toBe(process.env.HOME)
+        } finally {
+            if (saved !== undefined) process.env.TERM = saved
+        }
     })
     test("returns null when tailscale is missing or output is odd", async () => {
         const warn = []

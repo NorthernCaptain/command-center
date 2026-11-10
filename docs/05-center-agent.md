@@ -130,7 +130,7 @@ center agent to Codex at any time, for example when Claude credits run out.
 | `asana_create` | background | **Create in Asana** / Start | asana | gid + link (mostly deterministic code; LLM only drafts the notes) |
 | `pr_feedback` | background | PR watcher found new comments/reviews/CI failures (phase 2) | gh read | per item: actionable?, one-line summary (written to `feedback.jsonl`) |
 | `asana_sync` | background | branch assigned, PR claimed, feedback round resolved, status change | asana | Asana description block + attachments refreshed (deterministic; LLM only rewrites prose) |
-| `close_out` | background | PRs merged / accepted | asana, artifact | Result section (if empty), Asana conclusion comment + complete |
+| `close_out` | background | PRs merged / accepted, or **Close out** | gh read (PR watcher poll), asana, artifact | Unmerged PRs re-checked on GitHub first (merges recorded, status settled); then Result section (if empty), Asana conclusion comment + complete |
 | `followup` | background | `center_job` schedule | gh read, herdr read, task tools | surface / prompt agent / reschedule |
 
 ## Tools exposed to the center agent

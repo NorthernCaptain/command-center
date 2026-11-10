@@ -82,6 +82,9 @@ export const TAILSCALE_CLI =
  * Derive the tailnet URL (https://<mac>.<tailnet>.ts.net:<port>) from
  * `tailscale status --json` when config.publicBaseUrl is not set. Returns
  * null when Tailscale is unavailable; the tailnet listener then answers 503.
+ * The app's binary acts as the CLI only when TERM is set; without it (e.g.
+ * under launchd) it tries to start the GUI and prints "The Tailscale GUI
+ * failed to start", so TERM is always passed.
  */
 export async function detectPublicBaseUrl({
     exec = defaultExec,
@@ -92,6 +95,7 @@ export async function detectPublicBaseUrl({
     try {
         const { stdout } = await exec(cli, ["status", "--json"], {
             timeout: 5000,
+            env: { ...process.env, TERM: process.env.TERM || "dumb" },
         })
         const name = JSON.parse(stdout)?.Self?.DNSName
         if (typeof name !== "string" || !/^[a-z0-9.-]+\.?$/i.test(name))
@@ -257,6 +261,12 @@ export function createSystem({ config, overrides = {} }) {
             dateParser,
             // command: "done" on an Asana-linked task enqueues close_out.
             jobRunner: runnerProxy,
+            // close_out re-checks unmerged PRs on GitHub first (the watcher
+            // is created further down)
+            prWatcher: {
+                pollTask: (id) =>
+                    github.prWatcher ? github.prWatcher.pollTask(id) : null,
+            },
             // assist: pass Leo's message on to the task's herdr agent
             // (the worker service is created further down)
             workers: {

@@ -71,11 +71,44 @@ export function assertClosable(task) {
         throw new AppError(
             "deliverables_open",
             `T-${task.id} has deliverables that are not merged or no_change: ${open
-                .map((d) => `${d.repo}@${d.branch}`)
+                .map(
+                    (d) =>
+                        `${d.repo}@${d.branch}${d.pr ? ` (${d.pr} is not merged)` : ""}`
+                )
                 .join(", ")}`,
             { status: 409 }
         )
     }
+}
+
+/**
+ * Re-check the task's unmerged PRs on GitHub before judging close-out: a PR
+ * merged since the last poll must not block it. Runs the PR watcher's poll
+ * for the task (deps.prWatcher.pollTask), which records merges and settles
+ * the status. Returns true when it polled. A failed poll is logged and the
+ * check goes on with what is recorded.
+ */
+export async function refreshPrs(ctx, task) {
+    const watcher = ctx.deps && ctx.deps.prWatcher
+    if (!watcher || typeof watcher.pollTask !== "function") return false
+    const unmerged = openDeliverables(task).some(
+        (d) => d.disposition === "pr" && d.pr
+    )
+    if (!unmerged) return false
+    try {
+        const res = await watcher.pollTask(task.id)
+        if (res && (res.error || (res.errors && res.errors.length)))
+            ctx.log.warn(
+                { task_id: task.id, err: res.error || res.errors.join("; ") },
+                "close_out: PR re-check incomplete"
+            )
+    } catch (err) {
+        ctx.log.warn(
+            { task_id: task.id, err: err.message },
+            "close_out: PR re-check failed"
+        )
+    }
+    return true
 }
 
 const PENDING_JOB = ["queued", "running", "parked"]
@@ -154,7 +187,9 @@ export default {
     outputSchema,
 
     async prepare(ctx) {
-        const { task } = await ctx.store.getTask(ctx.task_id)
+        let { task } = await ctx.store.getTask(ctx.task_id)
+        if (await refreshPrs(ctx, task))
+            task = (await ctx.store.getTask(ctx.task_id)).task
         assertClosable(task)
         const artifact = await ctx.store.getArtifact(ctx.task_id)
         assertChangeRecord(task, artifact)

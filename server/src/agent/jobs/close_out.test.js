@@ -211,6 +211,110 @@ describe("close_out", () => {
         expect(asanaService.complete).not.toHaveBeenCalled()
     })
 
+    test("an unmerged PR is re-checked on GitHub first: merged meanwhile -> closes", async () => {
+        const store0 = createFakeStore({
+            tasks: [
+                makeTask({
+                    id: 1,
+                    status: "pr_open",
+                    asana: ASANA,
+                    deliverables: [dl({})],
+                }),
+            ],
+        })
+        const prWatcher = {
+            pollTask: jest.fn(async (id) => {
+                // the watcher finds the merge and records it
+                const { task } = await store0.getTask(id)
+                await store0.updateTask(id, {
+                    deliverables: task.deliverables.map((d) => ({
+                        ...d,
+                        merged_at: "2026-11-07T11:00:00.000Z",
+                    })),
+                })
+                return { errors: [] }
+            }),
+        }
+        const ctx = makeCtx({ store: store0, deps: { prWatcher } })
+        const { context } = await job.prepare(ctx)
+        expect(prWatcher.pollTask).toHaveBeenCalledWith(1)
+        expect(context.task.deliverables[0].merged_at).toBeTruthy()
+    })
+
+    test("PR still open on GitHub -> blocked, naming the PR", async () => {
+        const warn = jest.fn()
+        const prWatcher = {
+            pollTask: jest.fn(async () => ({ errors: ["gh: rate limited"] })),
+        }
+        const { ctx } = setup(
+            { status: "pr_open", deliverables: [dl({})] },
+            { prWatcher }
+        )
+        ctx.log.warn = warn
+        await expect(job.prepare(ctx)).rejects.toMatchObject({
+            code: "deliverables_open",
+            message: expect.stringContaining(
+                "aws-lambda@t1-x (https://github.com/acme/aws-lambda/pull/1 is not merged)"
+            ),
+        })
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ err: "gh: rate limited" }),
+            "close_out: PR re-check incomplete"
+        )
+    })
+
+    test("a failing re-check is logged and the recorded state decides", async () => {
+        const warn = jest.fn()
+        const prWatcher = {
+            pollTask: jest.fn(async () => {
+                throw new Error("boom")
+            }),
+        }
+        const { ctx } = setup(
+            { status: "pr_open", deliverables: [dl({})] },
+            { prWatcher }
+        )
+        ctx.log.warn = warn
+        await expect(job.prepare(ctx)).rejects.toMatchObject({
+            code: "deliverables_open",
+        })
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ err: "boom" }),
+            "close_out: PR re-check failed"
+        )
+        // poll summary with a top-level error
+        prWatcher.pollTask.mockResolvedValueOnce({ error: "no task" })
+        await expect(job.prepare(ctx)).rejects.toMatchObject({
+            code: "deliverables_open",
+        })
+        expect(warn).toHaveBeenLastCalledWith(
+            expect.objectContaining({ err: "no task" }),
+            "close_out: PR re-check incomplete"
+        )
+    })
+
+    test("no re-check without an unmerged PR (or without the watcher)", async () => {
+        const prWatcher = { pollTask: jest.fn(async () => ({})) }
+        const merged = setup(
+            {
+                deliverables: [
+                    dl({ merged_at: "2026-11-05T00:00:00.000Z" }),
+                    dl({ repo: "web", disposition: "pending", pr: null }),
+                ],
+            },
+            { prWatcher }
+        )
+        await expect(job.prepare(merged.ctx)).rejects.toMatchObject({
+            code: "deliverables_open",
+            message: expect.not.stringContaining("is not merged"),
+        })
+        expect(prWatcher.pollTask).not.toHaveBeenCalled()
+        const none = setup({ deliverables: [dl({})] }, { prWatcher: {} })
+        await expect(job.prepare(none.ctx)).rejects.toMatchObject({
+            code: "deliverables_open",
+        })
+    })
+
     test("state re-checked in apply: changed meanwhile -> no side effects", async () => {
         const { ctx, asanaService, store } = setup({ asana: ASANA })
         const { context } = await job.prepare(ctx)
