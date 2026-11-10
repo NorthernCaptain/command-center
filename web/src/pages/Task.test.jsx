@@ -1993,3 +1993,119 @@ describe("Task page: worker flow (phase 2)", () => {
         )
     })
 })
+
+describe("Task page: Slack thread notice", () => {
+    const THREAD = "https://acme.slack.com/archives/C1/p1"
+    const notice = (over) => ({
+        thread: THREAD,
+        gid: "9",
+        attempts: 1,
+        brain_job: "j_1",
+        answer: "I couldn't post: the tool adds a mention.",
+        error: null,
+        at: "2026-11-09T10:00:00Z",
+        status: "not_posted",
+        ...over,
+    })
+    const response = (n, flags = {}) => {
+        const base = taskResponse()
+        return {
+            ...base,
+            task: {
+                ...base.task,
+                flags: { ...base.task.flags, ...flags },
+            },
+            slack_notice: n,
+        }
+    }
+
+    it("warns in the header, hides the duplicate Now line and posts again", async () => {
+        const f = mockFetch({
+            "GET /api/tasks/12": response(notice(), {
+                now: true,
+                now_reason: "Slack thread not told about the Asana task",
+            }),
+            "POST /api/tasks/12/slack-notice": {
+                result: { started: true, brain_job: "j_2" },
+                slack_notice: notice({
+                    status: "pending",
+                    brain_job: "j_2",
+                    attempts: 2,
+                }),
+            },
+        })
+        renderWithApp(<TaskPage id={12} />)
+        const alert = await screen.findByRole("alert")
+        expect(alert).toHaveTextContent(
+            "Brain did not post the Asana link to the Slack thread."
+        )
+        expect(alert).toHaveTextContent("Brain: I couldn't post")
+        expect(document.querySelector(".task-now")).toBeNull()
+        fireEvent.click(screen.getByRole("button", { name: "Try again" }))
+        expect(
+            await screen.findByText("Asked Brain to post in the Slack thread")
+        ).toBeInTheDocument()
+        expect(f.find("POST", "/api/tasks/12/slack-notice")).toHaveLength(1)
+    })
+
+    it("check now, skipped and failed posts are reported", async () => {
+        let current = notice({ status: "pending" })
+        let posts = 0
+        const f = mockFetch({
+            "GET /api/tasks/12": () => response(current),
+            "POST /api/tasks/12/slack-notice/check": () => {
+                current = notice({ status: "missing" })
+                return { slack_notice: current }
+            },
+            "POST /api/tasks/12/slack-notice": () => {
+                posts += 1
+                if (posts === 1)
+                    return {
+                        result: { skipped: "pending" },
+                        slack_notice: null,
+                    }
+                if (posts === 2)
+                    return { result: { started: false, error: "down" } }
+                if (posts === 3) return { result: { skipped: "odd" } }
+                if (posts === 4) return {}
+                return reply(500, { message: "server down" })
+            },
+        })
+        renderWithApp(<TaskPage id={12} />)
+        fireEvent.click(
+            await screen.findByRole("button", { name: "Check now" })
+        )
+        await waitFor(() =>
+            expect(
+                f.find("POST", "/api/tasks/12/slack-notice/check")
+            ).toHaveLength(1)
+        )
+        const post = await screen.findByRole("button", {
+            name: "Post to Slack",
+        })
+        const click = async (text) => {
+            await waitFor(() => expect(post).not.toBeDisabled())
+            fireEvent.click(post)
+            if (text) expect(await screen.findByText(text)).toBeInTheDocument()
+        }
+        await click("Brain is still on it")
+        await click("Brain: down")
+        await click("odd")
+        await click(null)
+        await waitFor(() => expect(posts).toBe(4))
+        await click("server down")
+    })
+
+    it("no notice for viewers or tasks without one; the Now line stays", async () => {
+        mockFetch({
+            "GET /api/tasks/12": response(null, {
+                now: true,
+                now_reason: "Slack thread not told about the Asana task",
+            }),
+        })
+        renderWithApp(<TaskPage id={12} />)
+        await screen.findByRole("heading", { name: "Fix lambda timeout" })
+        expect(screen.queryByRole("alert")).toBeNull()
+        expect(document.querySelector(".task-now")).not.toBeNull()
+    })
+})

@@ -194,8 +194,18 @@ center agent to Codex at any time, for example when Claude credits run out.
   creating its Asana task also asks Brain (`brain_do`) to reply in that
   thread with "Tracking this in Asana: <url>". Once per Asana task (event
   `slack_asana_link` with the Brain job id; Brain idempotency key
-  `cc-T<id>-slack-asana-<gid>`). A failure to start the Brain job is logged
-  and recorded (`slack_asana_link_failed`); the Asana task stays created.
+  `cc-T<id>-slack-asana-<gid>`, `-2`, `-3` for later tries). A failure to
+  start the Brain job is logged and recorded (`slack_asana_link_failed`);
+  the Asana task stays created. The notifier then follows the Brain job and
+  records its answer (`slack_asana_link_result`: posted, not_posted,
+  failed or unknown; Brain ends with a `RESULT: POSTED` / `RESULT: NOT
+  POSTED - <reason>` line, and only `RESULT: POSTED` counts as posted). The task header shows the notice: a quiet line
+  once posted, a warning with Brain's answer and **Try again** (or **Post
+  to Slack** for a task that never tried) otherwise, and the task goes to
+  Now ("Slack thread not told about the Asana task") until it is posted:
+  when another reason held Now and was cleared, a sweep (every 10 minutes,
+  and on each task page view) raises it again, unless I cleared the flags
+  myself after the notice went wrong.
 - **Status field:** the project's **Status** custom field follows the task
   status, set on creation and on every sync (only when it differs):
   inbox/ready → **Initial**, active (agent started) → **In progress**,

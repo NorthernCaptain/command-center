@@ -7,6 +7,7 @@ import { useEffect, useState } from "react"
 import AgentChip, { isLiveAgent } from "./AgentChip.jsx"
 import { ConfirmButton } from "./ConfirmDialog.jsx"
 import RepoPicker from "./RepoPicker.jsx"
+import SlackNotice, { noticeNeedsAttention } from "./SlackNotice.jsx"
 import SnoozeMenu from "./SnoozeMenu.jsx"
 import StartAgent from "./StartAgent.jsx"
 import {
@@ -24,9 +25,16 @@ import { taskPrs } from "../lib/links.js"
 export { taskPrs }
 
 const START_STATUSES = ["inbox", "ready", "active"]
+// the Now reason the server sets when the Slack thread notice did not land
+const NOTICE_REASON = "Slack thread not told about the Asana task"
 // the agent may be closed only in these states (the server checks too)
 const IDLE_AGENT_STATES = ["idle", "done"]
 const PR_STATUSES = ["ready_for_pr", "pr_open", "pr_feedback"]
+const isOpenTask = (task) => isOpenStatus(task.status)
+const hasOpenPr = (task) =>
+    (task.deliverables || []).some(
+        (d) => d.disposition === "pr" && d.pr && !d.merged_at
+    )
 
 /**
  * Worker actions offered in the header for this task + agent state, gated
@@ -53,7 +61,12 @@ export function workerActions(task, agent, features = {}) {
             workers &&
             !["done", "cancelled"].includes(task.status) &&
             error.startsWith("Claude unavailable"),
-        checkPrs: Boolean(features.github) && PR_STATUSES.includes(task.status),
+        // also any open task whose claimed PR is still open (the watcher
+        // follows it there too, e.g. back in active for review fixes)
+        checkPrs:
+            Boolean(features.github) &&
+            (PR_STATUSES.includes(task.status) ||
+                (isOpenTask(task) && hasOpenPr(task))),
         clean: workers && task.status === "done" && hasFolders,
         // shown with a live agent; enabled only while it is idle
         closeAgent: workers && live,
@@ -114,6 +127,9 @@ export default function TaskHeader({
     onCloseOut,
     onSnooze,
     onHistory,
+    slackNotice = null,
+    onSlackPost,
+    onSlackCheck,
     api,
 }) {
     const asanaUrl = task.asana && task.asana.url
@@ -139,7 +155,22 @@ export default function TaskHeader({
                 </span>
             </div>
             <h1 className="task-title">{task.title}</h1>
-            {task.flags && task.flags.now && task.flags.now_reason ? (
+            {isOwner ? (
+                <SlackNotice
+                    notice={slackNotice}
+                    onPost={onSlackPost}
+                    onCheck={onSlackCheck}
+                />
+            ) : null}
+            {task.flags &&
+            task.flags.now &&
+            task.flags.now_reason &&
+            // the notice above says it, with the details
+            !(
+                task.flags.now_reason === NOTICE_REASON &&
+                isOwner &&
+                noticeNeedsAttention(slackNotice)
+            ) ? (
                 <p className="task-now">
                     <span className="lane-lamp" aria-hidden="true" />{" "}
                     {task.flags.now_reason}

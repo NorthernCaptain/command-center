@@ -376,7 +376,13 @@ export function useTask(id, { api = defaultApi, debounceMs = 300 } = {}) {
         setData((prev) => applyTaskEvent(prev, evt))
         // task.updated: the revision is not in it; agent.updated: the
         // outbox and session details are not in it.
-        if (evt.type === "task.updated" || evt.type === "agent.updated")
+        // the Slack thread notice (slack_notice) is computed from these
+        const ev = evt.type === "event.added" && d.event && d.event.type
+        if (
+            evt.type === "task.updated" ||
+            evt.type === "agent.updated" ||
+            String(ev || "").startsWith("slack_asana_link")
+        )
             refresh()
     })
 

@@ -14,9 +14,28 @@ const ANY_OPEN = STATUSES.filter((s) => s !== "done" && s !== "cancelled")
  *  from any open status; done/cancelled can be reopened to "ready". */
 const TRANSITIONS = {
     inbox: ["ready", "active", "waiting", "done", "cancelled"],
-    ready: ["inbox", "active", "waiting", "done", "cancelled"],
+    // pr_open / pr_feedback: ready and active tasks with an open claimed PR
+    // are watched too; new review feedback moves them to pr_feedback
+    ready: [
+        "inbox",
+        "active",
+        "pr_open",
+        "pr_feedback",
+        "waiting",
+        "done",
+        "cancelled",
+    ],
     waiting: [...ANY_OPEN.filter((s) => s !== "waiting"), "done", "cancelled"],
-    active: ["ready", "ready_for_pr", "review", "waiting", "done", "cancelled"],
+    active: [
+        "ready",
+        "ready_for_pr",
+        "pr_open",
+        "pr_feedback",
+        "review",
+        "waiting",
+        "done",
+        "cancelled",
+    ],
     ready_for_pr: ["active", "pr_open", "waiting", "done", "cancelled"],
     // review: the agent reports a result again after more work on a task
     // with an open PR (still watched in review)

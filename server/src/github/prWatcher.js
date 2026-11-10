@@ -35,14 +35,38 @@ export const POLLED_STATUSES = ["ready_for_pr", "pr_open", "pr_feedback"]
  * the next poll, like for a pr_open task.
  */
 export const REVIEW_STATUS = "review"
+/**
+ * Also watched: these open statuses while a claimed PR is still open (the
+ * agent went back to work on the first reviewer's comments, the task was
+ * snoozed or moved): review comments on an open PR are never missed. And
+ * while a deliverable still waits for its PR, so a PR the agent opens
+ * mid-work is discovered and claimed. Merge close-out stays limited to the
+ * PR statuses and review (checkClose).
+ */
+export const OPEN_PR_STATUSES = ["ready", "active", "waiting"]
 
-/** Is the task polled now? PR statuses, or review with a claimed PR. */
+const hasOpenClaimedPr = (task) =>
+    (task.deliverables || []).some(
+        (d) => d.disposition === "pr" && d.pr && !d.merged_at
+    )
+const awaitsPr = (task) =>
+    (task.deliverables || []).some((d) => d.disposition === "pending")
+
+/**
+ * Is the task polled now? PR statuses; review with a claimed PR (merged
+ * too); active / ready / waiting with an open claimed PR or a deliverable
+ * still waiting for its PR.
+ */
 export function isWatched(task) {
     if (!task) return false
     if (POLLED_STATUSES.includes(task.status)) return true
+    if (task.status === REVIEW_STATUS)
+        return (task.deliverables || []).some(
+            (d) => d.disposition === "pr" && d.pr
+        )
     return (
-        task.status === REVIEW_STATUS &&
-        (task.deliverables || []).some((d) => d.disposition === "pr" && d.pr)
+        OPEN_PR_STATUSES.includes(task.status) &&
+        (hasOpenClaimedPr(task) || awaitsPr(task))
     )
 }
 /** Now reason set by cc_report(ready_for_pr); cleared once the PRs exist. */
@@ -1478,10 +1502,14 @@ export function createPrWatcher({
             const results = []
             let tasks = []
             try {
-                // review tasks are polled only with a claimed PR
-                // (pollTask skips the others)
+                // review and other open tasks are polled only with a
+                // claimed PR (pollTask skips the others)
                 const res = await store.query({
-                    status: [...POLLED_STATUSES, REVIEW_STATUS],
+                    status: [
+                        ...POLLED_STATUSES,
+                        REVIEW_STATUS,
+                        ...OPEN_PR_STATUSES,
+                    ],
                     limit: 1000,
                 })
                 tasks = res.tasks || []
@@ -1494,6 +1522,8 @@ export function createPrWatcher({
                 if (stopping) break // shutting down: finish the current task only
                 try {
                     const r = await pollTask(t.id)
+                    // not watched (e.g. an active task without an open PR)
+                    if (r.skipped) continue
                     if (r.error || (r.errors && r.errors.length)) errors++
                     results.push(r)
                 } catch (err) {
@@ -1501,7 +1531,7 @@ export function createPrWatcher({
                     results.push({ task_id: t.id, error: err.message })
                 }
             }
-            return { polled: tasks.length, errors, results }
+            return { polled: results.length, errors, results }
         })().finally(() => {
             pollAllRun = null
         })

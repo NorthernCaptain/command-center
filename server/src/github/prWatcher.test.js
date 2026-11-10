@@ -969,6 +969,54 @@ async function claimedSetup(extra = {}) {
 }
 
 describe("feedback rounds", () => {
+    test("a PR the agent opens while active is discovered and claimed", async () => {
+        const { gh, watcher } = await setup({
+            status: "active",
+            deliverables: [deliv(REPO)],
+        })
+        gh.lists[REPO] = [listPr()]
+        const summary = await watcher.pollTask(1)
+        expect(summary.skipped).toBeUndefined()
+        expect(summary.claimed).toEqual([PR_URL])
+        const task = await getTask()
+        // still working: the status stays, the PR is now tracked
+        expect(task.status).toBe("active")
+        expect(task.deliverables[0]).toMatchObject({
+            disposition: "pr",
+            pr: PR_URL,
+        })
+    })
+
+    test("an active task with an open claimed PR is still watched (T-2)", async () => {
+        // the agent went back to work (review -> active), finished and went
+        // idle without reporting: the reviewer's change request must still
+        // reach it
+        const { gh, watcher, workerService } = await claimedSetup({
+            status: "active",
+        })
+        gh.prs[`${REPO}#812`] = fullPr({
+            reviews: [
+                {
+                    id: 70,
+                    author: { login: "lucas" },
+                    state: "CHANGES_REQUESTED",
+                    body: "please rename this",
+                    submittedAt: "2026-11-07T11:40:00Z",
+                },
+            ],
+        })
+        const summary = await watcher.pollTask(1)
+        expect(summary.skipped).toBeUndefined()
+        expect(summary).toMatchObject({ actionable: 1, delivered_round: 1 })
+        const task = await getTask()
+        expect(task.status).toBe("pr_feedback")
+        expect(task.flags.now_reason).toBe("PR feedback: 1 new item(s)")
+        expect(workerService.deliver).toHaveBeenCalled()
+        // the scheduled poll picks it up too
+        const all = await watcher.pollAll()
+        expect(all.results.map((r) => r.task_id)).toEqual([1])
+    })
+
     test("new items: classification, round 1 delivery, status and flags", async () => {
         const { gh, watcher, workerService, notifier, feedbackPrompt } =
             await claimedSetup()
@@ -1991,9 +2039,28 @@ describe("review tasks and PRs from other branches", () => {
             isWatched({ status: "review", deliverables: [deliv(REPO)] })
         ).toBe(false)
         expect(isWatched({ status: "review" })).toBe(false)
-        expect(isWatched({ status: "active", deliverables: [live] })).toBe(
-            false
-        )
+        // other open statuses: only while a claimed PR is open
+        for (const status of ["active", "ready", "waiting"])
+            expect(isWatched({ status, deliverables: [live] })).toBe(true)
+        expect(isWatched({ status: "inbox", deliverables: [live] })).toBe(false)
+        expect(
+            isWatched({
+                status: "active",
+                deliverables: [{ ...live, merged_at: "2026-11-08T00:00:00Z" }],
+            })
+        ).toBe(false)
+        // a deliverable still waiting for its PR: watched to discover it
+        expect(
+            isWatched({ status: "active", deliverables: [deliv(REPO)] })
+        ).toBe(true)
+        expect(
+            isWatched({
+                status: "active",
+                deliverables: [deliv(REPO, { disposition: "no_change" })],
+            })
+        ).toBe(false)
+        expect(isWatched({ status: "active" })).toBe(false)
+        expect(isWatched({ status: "done", deliverables: [live] })).toBe(false)
     })
 
     test("manually claiming an already merged PR from another branch makes the task closable", async () => {
@@ -2173,8 +2240,13 @@ describe("review tasks and PRs from other branches", () => {
             "pr_open",
             "pr_feedback",
             "review",
+            "ready",
+            "active",
+            "waiting",
         ])
-        expect(r.results[0].skipped).toBe("status review")
+        // skipped (no claimed PR): not counted as polled
+        expect(r.results).toEqual([])
+        expect(r.polled).toBe(0)
         spy.mockRestore()
     })
 })
@@ -2525,7 +2597,7 @@ describe("PR closed and reopened (real outbox)", () => {
 
 describe("errors, scheduling and pollAll", () => {
     test("skips other statuses and unknown tasks", async () => {
-        const { watcher } = await setup({ status: "active" })
+        const { watcher } = await setup({ status: "active", deliverables: [] })
         expect((await watcher.pollTask(1)).skipped).toBe("status active")
         const missing = await watcher.pollTask(42)
         expect(missing.error).toMatch(/not found/)

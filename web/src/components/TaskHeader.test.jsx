@@ -53,6 +53,31 @@ describe("workerActions", () => {
         ])
         expect(on(sampleTask({ status: "pr_open" }))).toEqual(["checkPrs"])
         expect(on(sampleTask({ status: "review" }))).toEqual(["accept"])
+        // an open claimed PR outside the PR statuses: still checkable
+        const pr = { disposition: "pr", pr: "https://github.com/o/r/pull/1" }
+        expect(
+            workerActions(sampleTask({ deliverables: [pr] }), null, {
+                github: true,
+            }).checkPrs
+        ).toBe(true)
+        expect(
+            workerActions(
+                sampleTask({
+                    deliverables: [
+                        { ...pr, merged_at: "2026-11-08T00:00:00Z" },
+                    ],
+                }),
+                null,
+                { github: true }
+            ).checkPrs
+        ).toBe(false)
+        expect(
+            workerActions(
+                sampleTask({ status: "done", deliverables: [pr] }),
+                null,
+                { github: true }
+            ).checkPrs
+        ).toBe(false)
     })
 
     it("offers Relaunch on Codex and Clean folders", () => {

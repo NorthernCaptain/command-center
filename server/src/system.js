@@ -7,7 +7,11 @@
 // the two HTTP listeners. Everything external (exec, fetch, keychain, SDK
 // query, spawn) can be overridden for tests.
 
-import { createThreadNotifier } from "./agent/threadNotify.js"
+import {
+    createThreadNotifier,
+    mountThreadNotice,
+    noticeTaskExtras,
+} from "./agent/threadNotify.js"
 import fs from "node:fs"
 import path from "node:path"
 import { execFile } from "node:child_process"
@@ -231,6 +235,9 @@ export function createSystem({ config, overrides = {} }) {
         log,
         tickMs: config.scheduler.tickMs,
     })
+    // Asana link -> the task's Slack thread (via Brain); its state and the
+    // retry live on the task page
+    const threadNotifier = createThreadNotifier({ store, brain, log })
     const center = createCenterAgent({
         jobsRepo,
         settingsRepo,
@@ -244,7 +251,7 @@ export function createSystem({ config, overrides = {} }) {
             brain,
             areaRepos: config.center.areaRepos || {},
             // Asana link -> the task's Slack thread (via Brain)
-            threadNotifier: createThreadNotifier({ store, brain, log }),
+            threadNotifier,
             scheduler,
             repoTable,
             dateParser,
@@ -419,8 +426,13 @@ export function createSystem({ config, overrides = {} }) {
             github.mount,
             (api, h) => mountAgentTools(api, h, { tools: agentTools }),
             phase3.mount,
+            (api, h) => mountThreadNotice(api, h, { notifier: threadNotifier }),
         ],
-        taskExtras: [workerTaskExtras(workerService), github.taskExtras],
+        taskExtras: [
+            workerTaskExtras(workerService),
+            github.taskExtras,
+            noticeTaskExtras(threadNotifier),
+        ],
         boardExtras: [workerBoardExtras(workerService)],
         onDeviceRevoked: [(id) => phase3.push.removeForDevice(id)],
     }
@@ -484,6 +496,8 @@ export function createSystem({ config, overrides = {} }) {
             await asanaSync.start()
             await phase3.start()
             github.prWatcher.start()
+            // unresolved Slack thread notices keep their tasks in Now
+            threadNotifier.start()
             if (listen) {
                 listeners = await startListeners({
                     appLocal,
@@ -509,6 +523,7 @@ export function createSystem({ config, overrides = {} }) {
             if (listeners) await listeners.close()
             // PR watcher first: it calls the worker service while it runs
             await github.prWatcher.stop()
+            await threadNotifier.stop()
             await workerService.stop()
             await phase3.stop()
             await scheduler.stop()

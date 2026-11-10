@@ -187,6 +187,9 @@ export function createApi({ fetch: fetchImpl, base = "" } = {}) {
 
         // --- phase 2: PR watcher ----------------------------------------
         pollPrs: (id) => request("POST", `${t(id)}/prs/poll`),
+        postSlackNotice: (id) => request("POST", `${t(id)}/slack-notice`),
+        checkSlackNotice: (id) =>
+            request("POST", `${t(id)}/slack-notice/check`),
         claimPr: (id, url) => request("POST", `${t(id)}/prs/claim`, { url }),
         setDeliverable: (id, repo, disposition = "no_change") =>
             request("POST", `${t(id)}/deliverables/${enc(repo)}`, {

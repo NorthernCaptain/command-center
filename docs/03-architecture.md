@@ -173,7 +173,7 @@ its PR(s) are merged**, the same rule as the Asana task.
 | `inbox` | captured; enrichment may still run (badge) | capture |
 | `ready` | shaped, ready to start | me / center agent proposal |
 | `waiting` | parked until a time or a person; reminders live here | me, schedules |
-| `active` | herdr agent (or I) working | Start |
+| `active` | herdr agent (or I) working. The watcher keeps polling it (so `ready` and `waiting`) while a claimed PR is open or a deliverable still waits for its PR: a PR opened mid-work is claimed, and new review feedback moves the task to `pr_feedback` | Start |
 | `ready_for_pr` | agent finished: tests pass, review orchestrator GOOD_TO_GO, changes staged. Waiting for my **Create PR** | agent `cc_report` |
 | `pr_open` | PR(s) open, watcher polling comments / CI / merge | PR discovered |
 | `pr_feedback` | new actionable review comments or red CI. The agent is prompted automatically to fix, test, commit, push and reply on GitHub. Returns to `pr_open` when every feedback item is resolved. The "PR feedback" Now flag clears then, in any status, and a `feedback_addressed` event is logged. | PR watcher / agent `cc_feedback` |

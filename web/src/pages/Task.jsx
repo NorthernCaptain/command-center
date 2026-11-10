@@ -59,6 +59,14 @@ import {
 } from "../lib/worker.js"
 import { formatDue } from "../lib/time.js"
 
+const SKIPPED_NOTICE = {
+    pending: "Brain is still on it",
+    already_posted: "Already posted",
+    no_brain: "Brain is not configured",
+    no_slack: "This task has no Slack thread",
+    no_asana: "This task has no Asana task yet",
+}
+
 function sameIds(a, b) {
     return (
         a.length === b.length && a.every((x, i) => String(x) === String(b[i]))
@@ -304,6 +312,30 @@ export default function TaskPage({ id }) {
             reload()
         } catch (err) {
             toast.error(err)
+        }
+    }
+
+    // the Asana link in the task's Slack thread: post (again) / ask Brain now
+    async function slackNotice(action) {
+        try {
+            const res =
+                action === "check"
+                    ? await api.checkSlackNotice(id)
+                    : await api.postSlackNotice(id)
+            if (res && res.slack_notice !== undefined)
+                setData((prev) => ({ ...prev, slack_notice: res.slack_notice }))
+            const r = (res && res.result) || {}
+            if (action === "post") {
+                if (r.started)
+                    toast.success("Asked Brain to post in the Slack thread")
+                else if (r.error) toast.error(`Brain: ${r.error}`)
+                else if (r.skipped)
+                    toast.info(SKIPPED_NOTICE[r.skipped] || r.skipped)
+            }
+            reload()
+        } catch (err) {
+            toast.error(err)
+            throw err
         }
     }
 
@@ -635,6 +667,9 @@ export default function TaskPage({ id }) {
                 onEnrich={() => runJob(api.enrich, "Re-enriching…")}
                 onCloseOut={() => runJob(api.closeOut, "Closing out…")}
                 onHistory={() => setHistoryOpen(true)}
+                slackNotice={data.slack_notice || null}
+                onSlackPost={() => slackNotice("post")}
+                onSlackCheck={() => slackNotice("check")}
             />
 
             <div className="task-body">

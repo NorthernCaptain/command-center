@@ -677,9 +677,15 @@ describe("worker agent overlay (phase 2)", () => {
         await waitFor(() => expect(api.getTask).toHaveBeenCalledTimes(3))
         emit(s, "feedback.updated", 5, {})
         await waitFor(() => expect(api.getTask).toHaveBeenCalledTimes(4))
+        // the Slack thread notice is computed from its events: reload
+        emit(s, "event.added", 5, {
+            event: { type: "slack_asana_link_result", at: "t9" },
+        })
+        await waitFor(() => expect(api.getTask).toHaveBeenCalledTimes(5))
+        emit(s, "event.added", 5, { event: { type: "updated", at: "t10" } })
         emit(s, "pr.updated", 6, {}) // other task
         await new Promise((r) => setTimeout(r, 10))
-        expect(api.getTask).toHaveBeenCalledTimes(4)
+        expect(api.getTask).toHaveBeenCalledTimes(5)
     })
 
     it("applyTaskEvent ignores agent.updated without an agent or a state", () => {

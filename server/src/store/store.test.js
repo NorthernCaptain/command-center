@@ -448,13 +448,13 @@ describe("updateTask", () => {
 
     test("illegal transitions -> 409 illegal_transition", async () => {
         const err = await store
-            .updateTask(1, { status: "pr_open" }, { actor: "me" })
+            .updateTask(1, { status: "review" }, { actor: "me" })
             .catch((e) => e)
         expect(err).toBeInstanceOf(AppError)
         expect(err).toMatchObject({
             code: "illegal_transition",
             status: 409,
-            details: { from: "ready", to: "pr_open" },
+            details: { from: "ready", to: "review" },
         })
     })
 
