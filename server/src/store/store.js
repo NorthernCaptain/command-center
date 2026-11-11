@@ -68,7 +68,7 @@ const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 const JSONL_FILES = ["comments.jsonl", "feedback.jsonl", "events.jsonl"]
 
 /** Link types whose labels viewers can see (matches viewerTask()). */
-const PUBLIC_LINK_TYPES = new Set(["pr", "branch", "asana", "doc"])
+const PUBLIC_LINK_TYPES = new Set(["pr", "branch", "asana", "doc", "file"])
 
 /** FTS columns a viewer may search (shared_only queries). */
 const PUBLIC_FTS_COLUMNS = "{title public_body}"

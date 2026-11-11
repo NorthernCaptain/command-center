@@ -151,7 +151,7 @@ describe("helpers", () => {
     })
 
     test("a schema per tool", () => {
-        expect(TOOL_NAMES).toHaveLength(8)
+        expect(TOOL_NAMES).toHaveLength(9)
         for (const n of TOOL_NAMES) expect(TOOL_SCHEMAS[n]).toBeTruthy()
         expect(Object.keys(tools).sort()).toEqual([...TOOL_NAMES].sort())
     })
@@ -1745,5 +1745,61 @@ describe("cc_create_task", () => {
             404
         )
         await expectError(tools.cc_create_task({}), "validation", 400)
+    })
+})
+
+describe("cc_attach_file", () => {
+    test("copies an allowed file into the task and lists it in the brief", async () => {
+        const { createTaskFiles } = await import("../files/taskFiles.js")
+        const tree = path.join(root, "tree")
+        fs.mkdirSync(tree, { recursive: true })
+        const shot = path.join(tree, "shot.png")
+        fs.writeFileSync(shot, "png")
+        const taskFiles = createTaskFiles({
+            tasksDir: path.join(root, "tasks"),
+            store,
+            allowedRoots: [tree],
+            clock,
+        })
+        const withFiles = createAgentTools({ ...deps, taskFiles })
+        const r = await withFiles.cc_attach_file({
+            task_id: id,
+            path: shot,
+            label: "Login screen",
+        })
+        expect(r).toMatchObject({
+            ok: true,
+            file: { name: "shot.png", label: "Login screen", kind: "image" },
+        })
+        expect(await section("Attachments")).toBe(
+            "- ![Login screen](files/shot.png)"
+        )
+        const brief = await withFiles.cc_get_task({ task_id: id })
+        expect(brief.files).toHaveLength(1)
+        expect(brief.files[0].path).toBe(
+            path.join(root, "tasks", "T-0001", "files", "shot.png")
+        )
+        await expectError(
+            withFiles.cc_attach_file({ task_id: id, path: "/etc/hosts" }),
+            "path_not_allowed",
+            403
+        )
+    })
+
+    test("without taskFiles: 503, and the brief has no files", async () => {
+        await expectError(
+            tools.cc_attach_file({ task_id: id, path: "/tmp/x" }),
+            "unavailable",
+            503
+        )
+        expect((await tools.cc_get_task({ task_id: id })).files).toEqual([])
+    })
+
+    test("cc_add_link does not take type file", async () => {
+        await expectError(
+            tools.cc_add_link({ task_id: id, type: "file", url: "files/x" }),
+            "validation",
+            400
+        )
     })
 })

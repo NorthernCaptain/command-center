@@ -141,7 +141,9 @@ export function viewerTask(task) {
         branch: task.branch,
         asana: { url: task.asana ? task.asana.url : null },
         links: (task.links || [])
-            .filter((l) => ["pr", "branch", "asana", "doc"].includes(l.type))
+            .filter((l) =>
+                ["pr", "branch", "asana", "doc", "file"].includes(l.type)
+            )
             .map((l) => ({ type: l.type, url: l.url, label: l.label })),
         created_at: task.created_at,
         updated_at: task.updated_at,

@@ -13,6 +13,7 @@ import {
     noticeTaskExtras,
 } from "./agent/threadNotify.js"
 import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { execFile } from "node:child_process"
 import { promisify } from "node:util"
@@ -67,6 +68,7 @@ import {
 import { createGithub } from "./github/index.js"
 import { createPhase3 } from "./phase3/index.js"
 import { startListeners } from "./http/server.js"
+import { createTaskFiles } from "./files/taskFiles.js"
 
 const execFileP = promisify(execFile)
 
@@ -384,7 +386,16 @@ export function createSystem({ config, overrides = {} }) {
     })
     // "Address feedback" goes through the watcher's round queue
     workerService.setFeedbackDelivery(github.prWatcher)
+    // task attachments; workers attach from the tree folder or temp folders
+    const taskFiles = createTaskFiles({
+        tasksDir: config.tasksDir,
+        store,
+        allowedRoots: [config.treeDir, os.tmpdir(), "/tmp"],
+        clock,
+        log,
+    })
     const agentTools = createAgentTools({
+        taskFiles,
         store,
         scheduler,
         dateParser,
@@ -414,6 +425,7 @@ export function createSystem({ config, overrides = {} }) {
     const appDeps = {
         store,
         repoTable,
+        taskFiles,
         bus,
         jobRunner: runner,
         scheduler,

@@ -304,3 +304,35 @@ describe("sectionNames", () => {
         ])
     })
 })
+
+describe("renderMarkdown attachments", () => {
+    const base = { filesBase: "/api/tasks/2/files/" }
+
+    it("points files/ images and links at the task's files", () => {
+        const html = renderMarkdown(
+            "![Shot](files/a.png) [Spec](files/s.md) [x](files/../etc)",
+            base
+        )
+        expect(html).toContain(
+            '<img src="/api/tasks/2/files/a.png" alt="Shot" data-file="a.png">'
+        )
+        expect(html).toContain(
+            '<a href="/api/tasks/2/files/s.md" data-file="s.md"'
+        )
+        expect(html).toContain('href="files/../etc"')
+        expect(html).not.toContain('data-file="..')
+    })
+
+    it("renders a video as a player", () => {
+        const html = renderMarkdown("![Demo <1>](files/d.mp4)", base)
+        expect(html).toContain(
+            '<video class="md-video" controls preload="metadata" src="/api/tasks/2/files/d.mp4" data-file="d.mp4" aria-label="Demo &lt;1&gt;"></video>'
+        )
+    })
+
+    it("leaves files/ alone without a base", () => {
+        const html = renderMarkdown("![Shot](files/a.png)")
+        expect(html).toContain('src="files/a.png"')
+        expect(html).not.toContain("data-file")
+    })
+})

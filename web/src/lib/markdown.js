@@ -13,6 +13,7 @@
 // data through an image URL): they render as links instead.
 
 import MarkdownIt from "markdown-it"
+import { fileKind, fileNameOfUrl } from "./files.js"
 import { isAppPath } from "./links.js"
 
 const TASK_RE = /^\[([ xX])\]\s+/
@@ -104,6 +105,16 @@ export function isLocalImageSrc(src) {
     }
 }
 
+/**
+ * A task attachment reference ("files/<name>") with env.filesBase set: the
+ * URL the server serves it at, else null.
+ */
+function attachment(url, env) {
+    const name = fileNameOfUrl(url)
+    if (!name || !env || !env.filesBase) return null
+    return { name, src: env.filesBase + encodeURIComponent(name) }
+}
+
 /** Shared rules: safe links, images as links, sections and task items. */
 function configure(md) {
     const esc = md.utils.escapeHtml
@@ -119,6 +130,13 @@ function configure(md) {
             self.renderToken(tokens, idx, options))
     md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
         const token = tokens[idx]
+        // an attachment: served by the task's files route, opened in the
+        // page's viewer on a plain click (data-file)
+        const file = attachment(token.attrGet("href"), env)
+        if (file) {
+            token.attrSet("href", file.src)
+            token.attrSet("data-file", file.name)
+        }
         // app pages ("/t/2") open in this tab; everything else in a new one
         if (!isAppPath(token.attrGet("href"))) {
             token.attrSet("target", "_blank")
@@ -130,6 +148,23 @@ function configure(md) {
     const defaultImage = md.renderer.rules.image
     md.renderer.rules.image = (tokens, idx, options, env, self) => {
         const token = tokens[idx]
+        const file = attachment(token.attrGet("src"), env)
+        if (file) {
+            const alt = self.renderInlineAsText(
+                token.children || [],
+                options,
+                env
+            )
+            if (fileKind(file.name) === "video")
+                return (
+                    `<video class="md-video" controls preload="metadata" ` +
+                    `src="${esc(file.src)}" data-file="${esc(file.name)}" ` +
+                    `aria-label="${esc(alt || file.name)}"></video>`
+                )
+            token.attrSet("src", file.src)
+            token.attrSet("data-file", file.name)
+            return defaultImage(tokens, idx, options, env, self)
+        }
         const src = token.attrGet("src") || ""
         if (isLocalImageSrc(src))
             return defaultImage(tokens, idx, options, env, self)
@@ -171,9 +206,14 @@ md.renderer.rules.html_block = (tokens, idx, options, env) => {
     return plain.renderer.render(meta.ccTokens, plain.options, env)
 }
 
-/** Markdown -> HTML string with section attributes. */
-export function renderMarkdown(src) {
-    return md.render(String(src || ""))
+/**
+ * Markdown -> HTML string with section attributes.
+ * @param {{ filesBase?: string }} [opts] filesBase: URL prefix of the
+ *   task's attachments ("/api/tasks/2/files/"); "files/<name>" links and
+ *   images point there (videos render as players)
+ */
+export function renderMarkdown(src, { filesBase } = {}) {
+    return md.render(String(src || ""), { filesBase })
 }
 
 /** "## " section names in document order. */

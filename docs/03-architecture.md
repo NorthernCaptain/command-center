@@ -82,8 +82,24 @@ tasks/
     comments.jsonl   # one JSON object per comment/reply/resolution (append-only)
     feedback.jsonl   # PR feedback items and their resolution (append-only)
     events.jsonl     # activity log (append-only): status changes, agent reports, PR events
-    files/           # attachments (screenshots, exports)
+    files/           # attachments (screenshots, videos, .md docs, PDFs, logs)
 ```
+
+Attachments (`server/src/files/taskFiles.js`): a file uploaded on the task
+page (button, drop, pasted screenshot) or attached by a worker
+(`cc_attach_file`) is copied to `T-0123/files/<name>`. The name is made
+safe (`[A-Za-z0-9._-]`) and unique. The file is committed with the
+folder (at most 250 MB each, and history keeps a deleted file). Each one is a
+`file` link (`url: "files/<name>"`, label = the original name, size,
+MIME type) and a line in the artifact's "Attachments" section: images and
+videos as `![label](files/<name>)`, other files as `[label](files/<name>)`.
+The UI renders `files/` references from `GET /api/tasks/:id/files/<name>`.
+That route serves images, video, audio, PDF and text inline (with Range
+requests) and everything else, HTML included, as a download. Every file
+gets `nosniff` and a sandboxing CSP, so an attached HTML or SVG can't
+run script on the app's origin. Viewers may fetch the files of shared tasks
+only. Workers can attach only from the tree folder or a temp folder (real
+path checked), so they can't copy other files of mine into a task.
 
 Commit policy:
 - The service is the only writer. Agents and the UI go through the API.

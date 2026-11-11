@@ -7,6 +7,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { isLiveAgent } from "../components/AgentChip.jsx"
 import ArtifactEditor from "../components/ArtifactEditor.jsx"
 import ArtifactView from "../components/ArtifactView.jsx"
+import FileViewer from "../components/FileViewer.jsx"
+import FilesPanel from "../components/FilesPanel.jsx"
+import { fileEntry, pastedFile } from "../lib/files.js"
 import { allLinks, withLinksSection } from "../lib/links.js"
 import { withFeedbackSection } from "../lib/feedback.js"
 import {
@@ -89,6 +92,37 @@ export default function TaskPage({ id }) {
     const [historyOpen, setHistoryOpen] = useState(false)
     const [editing, setEditing] = useState(null)
     const [orphans, setOrphans] = useState([])
+    // attachments: the file shown in the viewer, uploads in flight, and a
+    // drag with files over the page
+    const [viewing, setViewing] = useState(null)
+    const [uploading, setUploading] = useState(0)
+    const [dropping, setDropping] = useState(false)
+    const uploadRef = useRef(null)
+    // a pasted screenshot (or copied file) outside text fields is attached
+    useEffect(() => {
+        if (!isOwner) return undefined
+        const onPaste = (e) => {
+            const t = e.target
+            if (
+                t &&
+                t.closest &&
+                t.closest("input, textarea, [contenteditable='true']")
+            )
+                return
+            const list = [...((e.clipboardData && e.clipboardData.files) || [])]
+            if (!list.length || !uploadRef.current) return
+            e.preventDefault()
+            uploadRef.current(
+                list.map((f) =>
+                    !f.name || /^image\.[a-z0-9]+$/i.test(f.name)
+                        ? pastedFile(f)
+                        : f
+                )
+            )
+        }
+        document.addEventListener("paste", onPaste)
+        return () => document.removeEventListener("paste", onPaste)
+    }, [isOwner])
     // Focused thread; n bumps on every explicit focus so the artifact
     // scrolls to it again even when it is already the active one.
     const [focus, setFocus] = useState({ id: null, n: 0 })
@@ -210,10 +244,72 @@ export default function TaskPage({ id }) {
         comments: openCount,
         feedback: openFeedback,
         // deliverables that keep the task from Done
+        files: (data.files || []).length,
         deliverables:
             blockingDeliverables(task, data.prs).length +
             (changeRecordBlocker(data.change_record) ? 1 : 0),
     }
+
+    async function uploadFiles(list) {
+        setUploading((n) => n + list.length)
+        let ok = 0
+        for (const f of list) {
+            try {
+                await api.uploadFile(id, f)
+                ok++
+            } catch (err) {
+                toast.error(err)
+            } finally {
+                setUploading((n) => n - 1)
+            }
+        }
+        if (ok) {
+            toast.success(
+                list.length === 1
+                    ? `Attached ${list[0].name}`
+                    : `Attached ${ok} of ${list.length} files`
+            )
+            reload()
+        }
+    }
+    uploadRef.current = uploadFiles
+
+    async function deleteFile(f) {
+        try {
+            await api.deleteFile(id, f.name)
+            toast.success(`Deleted ${f.label || f.name}`)
+            reload()
+        } catch (err) {
+            toast.error(err)
+            throw err
+        }
+    }
+
+    const filesBase = `/api/tasks/${encodeURIComponent(id)}/files/`
+    const openFile = (name) => setViewing(fileEntry(data.files, name))
+    const dragHasFiles = (e) =>
+        [...((e.dataTransfer && e.dataTransfer.types) || [])].includes("Files")
+    const dropProps = isOwner
+        ? {
+              onDragOver: (e) => {
+                  if (!dragHasFiles(e)) return
+                  e.preventDefault()
+                  if (!dropping) setDropping(true)
+              },
+              onDragLeave: (e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget))
+                      setDropping(false)
+              },
+              onDrop: (e) => {
+                  setDropping(false)
+                  // the Files tab's drop zone already took it
+                  if (e.defaultPrevented || !dragHasFiles(e)) return
+                  e.preventDefault()
+                  const dropped = [...e.dataTransfer.files]
+                  if (dropped.length) uploadFiles(dropped)
+              },
+          }
+        : {}
 
     function addJob(job) {
         if (job)
@@ -648,12 +744,25 @@ export default function TaskPage({ id }) {
                     }
                 }}
             />
+        ) : currentTab === "files" ? (
+            <FilesPanel
+                taskId={id}
+                files={data.files}
+                uploading={uploading}
+                canEdit={isOwner}
+                onUpload={uploadFiles}
+                onOpen={(f) => setViewing(f)}
+                onDelete={deleteFile}
+            />
         ) : (
-            <LinksList links={links} />
+            <LinksList links={links} taskId={id} onOpenFile={openFile} />
         )
 
     return (
-        <div className={`page task${isOwner ? " is-owner" : " is-viewer"}`}>
+        <div
+            className={`page task${isOwner ? " is-owner" : " is-viewer"}${dropping ? " is-dropping" : ""}`}
+            {...dropProps}
+        >
             <nav className="crumbs">
                 <Link to="/">← Board</Link>
             </nav>
@@ -714,9 +823,15 @@ export default function TaskPage({ id }) {
                         <ArtifactView
                             rootRef={artifactRef}
                             content={withFeedbackSection(
-                                withLinksSection(artifact.content, links),
+                                // attachments have their own section
+                                withLinksSection(
+                                    artifact.content,
+                                    links.filter((l) => l.type !== "file")
+                                ),
                                 data.feedback
                             )}
+                            filesBase={filesBase}
+                            onOpenFile={openFile}
                             threads={isOwner ? threads : []}
                             activeId={activeId}
                             focusKey={focus.n}
@@ -846,6 +961,18 @@ export default function TaskPage({ id }) {
                     aria-label="Close panel"
                     onClick={() => setSheetOpen(false)}
                 />
+            ) : null}
+            {viewing ? (
+                <FileViewer
+                    taskId={id}
+                    file={viewing}
+                    onClose={() => setViewing(null)}
+                />
+            ) : null}
+            {dropping ? (
+                <div className="drop-hint" aria-hidden="true">
+                    Drop to attach to {taskKey(id)}
+                </div>
             ) : null}
         </div>
     )

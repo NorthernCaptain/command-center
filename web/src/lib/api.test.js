@@ -387,3 +387,40 @@ describe("isTailnetConfigError", () => {
         expect(isTailnetConfigError(null)).toBe(false)
     })
 })
+
+describe("attachments", () => {
+    it("uploads the file as the raw body with its name", async () => {
+        const calls = []
+        const client = createApi({
+            fetch: async (url, init) => {
+                calls.push({ url, init })
+                return {
+                    ok: true,
+                    status: 201,
+                    statusText: "",
+                    text: async () =>
+                        JSON.stringify({ file: { name: "a.png" } }),
+                }
+            },
+        })
+        const file = new File(["x"], "My Shot.png", { type: "image/png" })
+        const res = await client.uploadFile(5, file, { label: "Shot" })
+        expect(res).toEqual({ file: { name: "a.png" } })
+        expect(calls[0].url).toBe(
+            "/api/tasks/5/files?name=My%20Shot.png&label=Shot"
+        )
+        expect(calls[0].init.method).toBe("POST")
+        expect(calls[0].init.body).toBe(file)
+        expect(calls[0].init.headers["Content-Type"]).toBe(
+            "application/octet-stream"
+        )
+    })
+
+    it("deletes a file", async () => {
+        const f = mockFetch({
+            "DELETE /api/tasks/5/files/a.png": { removed: "a.png" },
+        })
+        expect(await api.deleteFile(5, "a.png")).toEqual({ removed: "a.png" })
+        expect(f.calls[0].method).toBe("DELETE")
+    })
+})

@@ -6,6 +6,7 @@
 // Smaller task-page panels: schedules, activity and links.
 
 import { hrefFor, isAppPath } from "../lib/links.js"
+import { fileHref, fileNameOfUrl } from "../lib/files.js"
 import Link from "./Link.jsx"
 import { useState } from "react"
 import { formatDue, relativeTime, snoozePresets } from "../lib/time.js"
@@ -176,10 +177,15 @@ const LINK_GLYPH = {
     folder: "▤",
     doc: "▧",
     review: "✓",
+    file: "⎘",
     other: "↗",
 }
 
-export function LinksList({ links }) {
+/**
+ * links: allLinks(task). Attachments ("file" links) open in the task
+ * page's viewer (onOpenFile(name)) on a plain click.
+ */
+export function LinksList({ links, taskId, onOpenFile }) {
     const list = links || []
     if (!list.length) return <p className="muted">No links yet.</p>
     return (
@@ -194,9 +200,33 @@ export function LinksList({ links }) {
                         <span className="link-type">{l.type}</span>
                     </>
                 )
+                const file = l.type === "file" ? fileNameOfUrl(l.url) : null
                 return (
                     <li key={l.id || `${l.url}-${i}`}>
-                        {isAppPath(l.url) ? (
+                        {file && taskId != null ? (
+                            <a
+                                href={fileHref(taskId, file)}
+                                title={l.label || file}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="link link-file"
+                                onClick={(e) => {
+                                    if (
+                                        !onOpenFile ||
+                                        e.button !== 0 ||
+                                        e.metaKey ||
+                                        e.ctrlKey ||
+                                        e.shiftKey ||
+                                        e.altKey
+                                    )
+                                        return
+                                    e.preventDefault()
+                                    onOpenFile(file)
+                                }}
+                            >
+                                {body}
+                            </a>
+                        ) : isAppPath(l.url) ? (
                             // another task: routes in this tab
                             <Link
                                 to={l.url.trim()}

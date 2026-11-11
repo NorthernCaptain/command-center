@@ -19,6 +19,7 @@ import {
     isTransportError,
     START_FAILED_REASON,
     UNAVAILABLE_REASON,
+    USAGE_LIMIT_RE,
     UNCERTAIN_REASON,
 } from "./workerService.js"
 
@@ -1194,6 +1195,44 @@ describe("herdr events", () => {
         await env.svc.stop()
     })
 
+    test("USAGE_LIMIT_RE matches Claude's banners, not prose about rate limits", () => {
+        for (const line of [
+            "  You've hit your usage limit · resets 5pm",
+            "⎿  You’ve hit your limit · resets 5pm (Europe/Berlin)",
+            "5-hour limit reached ∙ resets 3pm",
+            "Opus weekly limit reached ∙ resets Mon 9am",
+            "Claude AI usage limit reached|1794330000",
+            "You're out of extra usage · resets 5pm",
+            "Credit balance is too low",
+            '⎿  API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}',
+        ])
+            expect(USAGE_LIMIT_RE.test(line)).toBe(true)
+        for (const line of [
+            "     public per-IP rate limits (the gateway still rejects them without the key).",
+            "⏺ Checking how the Lambda's traffic would hit the gateway's per-IP limits.",
+            "  Add a usage limit check to the uploader",
+            "│ the credit balance endpoint returns cents",
+        ])
+            expect(USAGE_LIMIT_RE.test(line)).toBe(false)
+    })
+
+    test("a question mentioning rate limits is not a usage limit", async () => {
+        const env = setup()
+        await started(env)
+        await env.svc.start()
+        env.herdr.agentRead.mockResolvedValue(
+            "  2. Public ALB + carve-out\n" +
+                "     public per-IP rate limits (the gateway still rejects them without the key).\n" +
+                "Enter to select"
+        )
+        env.events.emit("status", { paneId: "p1", status: "blocked" })
+        await env.svc.idle()
+        expect((await env.svc.agentState(1)).limited).toBe(false)
+        expect(env.store.task(1).flags.now_reason).not.toBe(UNAVAILABLE_REASON)
+        expect(env.store.eventTypes()).not.toContain("agent_unavailable")
+        await env.svc.stop()
+    })
+
     test("codex agents are not checked for usage limits", async () => {
         const env = setup()
         await started(env, { worker_kind: "codex" })
@@ -1829,6 +1868,16 @@ describe("actions", () => {
             await status(env, "working")
             await status(env, "idle")
             expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            // a second Clean and close removes them: closed, flag cleared
+            await env.svc.action(1, "close-agent", { clean: true })
+            await status(env, "working")
+            env.identity.scanFolders.mockImplementation(() => [])
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
+            expect(env.store.tasks.get(1).flags).toMatchObject({
+                now: false,
+                now_reason: null,
+            })
             await env.svc.stop()
         })
 

@@ -69,7 +69,8 @@ export const TOOL_SCHEMAS = {
     }),
     cc_add_link: z.object({
         task_id: TaskIdSchema,
-        type: z.enum(LINK_TYPES),
+        // files are attached with cc_attach_file (copied into the task)
+        type: z.enum(LINK_TYPES.filter((t) => t !== "file")),
         url: text(2000).describe(
             "URL; the branch name for type=branch; the folder path for type=folder"
         ),
@@ -126,13 +127,20 @@ export const TOOL_SCHEMAS = {
         details: z.string().max(20000).optional(),
         parent_id: TaskIdSchema.optional(),
     }),
+    cc_attach_file: z.object({
+        task_id: TaskIdSchema,
+        path: text(4000).describe(
+            "Absolute path of a file in your task folders (or a temp folder)"
+        ),
+        label: z.string().trim().min(1).max(200).optional(),
+    }),
 }
 
 export const TOOL_NAMES = Object.keys(TOOL_SCHEMAS)
 
 export const TOOL_DESCRIPTIONS = {
     cc_get_task:
-        "Task brief: task (repos, branch, slug, status), artifact + revision, open comments, links, deliverables, open PR feedback items, Asana URL.",
+        "Task brief: task (repos, branch, slug, status), artifact + revision, open comments, links, deliverables, open PR feedback items, Asana URL, attached files (with their local path).",
     cc_update_artifact:
         "Replace or append one artifact section. replace requires base_revision (stale_revision returns the current revision and content); append may omit it.",
     cc_log_decision:
@@ -146,6 +154,8 @@ export const TOOL_DESCRIPTIONS = {
     cc_schedule:
         "Ask to be woken later: surface (back to Leo's Now), prompt_agent (prompt sent to you), center_job (the center agent answers prompt on the task).",
     cc_create_task: "Create a spin-off task in Leo's inbox.",
+    cc_attach_file:
+        "Attach a file (screenshot, video, report .md, PDF, log) to the task: it is copied next to the artifact, listed in its Attachments section (images and videos shown inline) and in the task's Files tab. Only files under the tree folder or a temp folder. Max 250 MB.",
 }
 
 function validate(schema, value) {
@@ -201,6 +211,7 @@ export function agentActor(name) {
  * @param {object} [deps.workerService] agentState()
  * @param {object} [deps.notifier]     notify()
  * @param {object} [deps.bus]          emit(); feedback.updated after cc_feedback
+ * @param {object} [deps.taskFiles]  task attachments (cc_attach_file)
  * @param {object} [deps.clock]
  * @param {object} [deps.log]
  */
@@ -213,6 +224,7 @@ export function createAgentTools({
     workerService = null,
     notifier = null,
     bus = null,
+    taskFiles = null,
     clock = systemClock,
     log = nullLogger,
 }) {
@@ -353,7 +365,25 @@ export function createAgentTools({
             deliverables: task.deliverables || [],
             feedback_open: (feedback || []).filter((f) => f.status === "open"),
             asana_url: (task.asana && task.asana.url) || null,
+            files: taskFiles ? await taskFiles.list(taskId, task) : [],
         }
+    }
+
+    async function cc_attach_file(args, ctx = {}) {
+        const { a, taskId, actor } = await begin("cc_attach_file", args, ctx)
+        if (!taskFiles)
+            throw new AppError(
+                "unavailable",
+                "file attachments are not set up",
+                {
+                    status: 503,
+                }
+            )
+        const file = await taskFiles.addFromPath(taskId, a.path, {
+            actor,
+            label: a.label,
+        })
+        return { ok: true, file }
     }
 
     async function cc_update_artifact(args, ctx = {}) {
@@ -1043,6 +1073,7 @@ export function createAgentTools({
         cc_feedback,
         cc_schedule,
         cc_create_task,
+        cc_attach_file,
     }
 }
 

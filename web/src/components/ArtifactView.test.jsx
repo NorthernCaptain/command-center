@@ -132,3 +132,25 @@ describe("ArtifactView", () => {
         expect(currentPath()).toBe("/t/2")
     })
 })
+
+describe("ArtifactView attachments", () => {
+    it("opens attachments in the viewer; videos and modified clicks stay", () => {
+        const onOpenFile = jest.fn()
+        const { container } = render(
+            <ArtifactView
+                content={
+                    "## Attachments\n- ![Shot](files/a.png)\n- ![Clip](files/c.mp4)\n- [Spec](files/s.md)\n"
+                }
+                threads={[]}
+                filesBase="/api/tasks/2/files/"
+                onOpenFile={onOpenFile}
+            />
+        )
+        fireEvent.click(container.querySelector('img[data-file="a.png"]'))
+        fireEvent.click(container.querySelector('video[data-file="c.mp4"]'))
+        const spec = container.querySelector('a[data-file="s.md"]')
+        fireEvent.click(spec, { ctrlKey: true })
+        fireEvent.click(spec)
+        expect(onOpenFile.mock.calls).toEqual([["a.png"], ["s.md"]])
+    })
+})

@@ -100,3 +100,42 @@ describe("LinksList", () => {
         expect(screen.getByText("No links yet.")).toBeInTheDocument()
     })
 })
+
+describe("LinksList attachments", () => {
+    it("opens a file link in the viewer on a plain click", () => {
+        const onOpenFile = jest.fn()
+        render(
+            <LinksList
+                taskId={4}
+                onOpenFile={onOpenFile}
+                links={[
+                    {
+                        id: "f",
+                        type: "file",
+                        url: "files/a.png",
+                        label: "Shot",
+                    },
+                ]}
+            />
+        )
+        const link = screen.getByRole("link", { name: /Shot/ })
+        expect(link).toHaveAttribute("href", "/api/tasks/4/files/a.png")
+        fireEvent.click(link, { metaKey: true })
+        expect(onOpenFile).not.toHaveBeenCalled()
+        fireEvent.click(link)
+        expect(onOpenFile).toHaveBeenCalledWith("a.png")
+    })
+
+    it("without a viewer the link just opens the file", () => {
+        render(
+            <LinksList
+                taskId={4}
+                links={[
+                    { id: "f", type: "file", url: "files/a.md", label: "A" },
+                ]}
+            />
+        )
+        const link = screen.getByRole("link", { name: /A/ })
+        expect(fireEvent.click(link)).toBe(true)
+    })
+})

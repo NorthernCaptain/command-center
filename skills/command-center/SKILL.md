@@ -61,6 +61,12 @@ other task is rejected with `wrong_task`.
   that content and retry. Never blindly overwrite Leo's edits. `append` needs
   no revision.
 - Docs and other references: `cc_add_link(type="doc", url, label)`.
+- Screenshots, recordings, reports (.md), PDFs, logs Leo should see:
+  `cc_attach_file(path, label?)` (from your task folder or a temp folder).
+  The file is copied into the task and shown in the artifact's
+  Attachments section and the Files tab. `cc_get_task` lists the task's
+  files with their local `path`, including the ones Leo attached: read
+  them there.
 - Spin-off work **unrelated** to this task (something else you noticed):
   `cc_create_task(title, details, parent_id=<your task>)`. Do not do it
   here. The fix for what you investigated is never a spin-off.

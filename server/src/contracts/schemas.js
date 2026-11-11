@@ -49,6 +49,7 @@ export const LINK_TYPES = [
     "folder",
     "doc",
     "review",
+    "file",
     "other",
 ]
 export const VISIBILITY = ["auto", "shared", "private"]
@@ -69,6 +70,9 @@ export const LinkSchema = z.object({
     url: z.string().min(1),
     label: z.string().nullable().default(null),
     role: z.enum(["main", "ref", "work"]).nullable().default(null),
+    // type "file" (task attachments, url "files/<name>"): size and MIME type
+    size: z.number().int().nonnegative().optional(),
+    mime: z.string().max(200).optional(),
     added_by: ActorSchema,
     at: isoDate,
 })

@@ -31,11 +31,16 @@ export default function ArtifactView({
     focusKey = 0,
     onOrphans,
     onMarkClick,
+    onOpenFile,
+    filesBase,
     rootRef: externalRef,
 }) {
     const localRef = useRef(null)
     const rootRef = externalRef || localRef
-    const html = useMemo(() => renderMarkdown(content || ""), [content])
+    const html = useMemo(
+        () => renderMarkdown(content || "", { filesBase }),
+        [content, filesBase]
+    )
     const items = useMemo(
         () =>
             highlightable(threads).map((t) => ({ id: t.id, anchor: t.anchor })),
@@ -78,7 +83,18 @@ export default function ArtifactView({
             first.scrollIntoView({ block: "center", behavior: "smooth" })
     }, [activeId, focusKey, html, items, rootRef])
 
+    const plainClick = (e) =>
+        e.button === 0 && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey
+
     function onClick(e) {
+        // an attachment (image or file link) opens in the page's viewer;
+        // a video plays in place
+        const file = e.target.closest && e.target.closest("[data-file]")
+        if (file && onOpenFile && file.tagName !== "VIDEO" && plainClick(e)) {
+            e.preventDefault()
+            onOpenFile(file.getAttribute("data-file"))
+            return
+        }
         // an app page link ("/t/2") routes in place on a plain click
         const a = e.target.closest && e.target.closest("a[href]")
         if (a && isAppPath(a.getAttribute("href"))) {

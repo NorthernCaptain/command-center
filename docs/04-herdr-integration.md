@@ -222,7 +222,7 @@ installed for both.
 
 | Tool | Purpose |
 |---|---|
-| `cc_get_task(task_id)` | Brief: title, artifact, repos/branch/slug, open comments, links, Asana link |
+| `cc_get_task(task_id)` | Brief: title, artifact, repos/branch/slug, open comments, links, Asana link, attached files (with local paths) |
 | `cc_update_artifact(task_id, section, op, content, base_revision)` | `replace` (and any read-modify-write op) **requires** `base_revision`. It is rejected with `stale_revision` plus the current revision and content if the artifact moved on. Only `append` may omit it, because it is atomic against the latest revision. `base_revision` is the artifact content hash returned by `cc_get_task` and by every write ([03 — Storage](03-architecture.md#2-sqlite-dataccdb-gitignored-index-and-runtime-state)). |
 | `cc_log_decision(task_id, decision, rationale)` | Appends to "Decisions" with timestamp and author |
 | `cc_add_link(task_id, type, url, label?, role?)` | folder / branch / PR / doc. For folders, `role` = `ref` or `work`. A `work` folder adds a deliverable (see [03 — Deliverables](03-architecture.md#deliverables-multi-repo-tasks)). |
@@ -230,6 +230,7 @@ installed for both.
 | `cc_feedback(task_id, item_id, status, commit?, reply_url?, note?)` | Resolves one PR feedback item: `fixed` / `answered` / `declined` (the agent never sets `no_action`). Required fields depend on the item kind: `commit` for every `fixed`; `reply_url` for every comment/review item; for `ci_failure` + `fixed` no reply, the check must pass on the new head. The watcher verifies exactly those on its next poll ([03 — PR feedback items](03-architecture.md#pr-feedback-items)). |
 | `cc_schedule(task_id, at, action, prompt?)` | Agent asks to be woken later ("re-check CI in 30m") |
 | `cc_create_task(title, details, parent_id?)` | Spin-off work lands in my inbox |
+| `cc_attach_file(task_id, path, label?)` | Copies a screenshot, video, report or log into the task ([03 — attachments](03-architecture.md)). Only from the tree folder or a temp folder. |
 
 Every tool takes an explicit `task_id`. The server cross-checks it against
 the calling agent where possible (`CC_TASK_ID` / agent name) to catch

@@ -10,6 +10,7 @@ import { isChatThread } from "./chat.js"
 
 export const TABS = [
     { id: "links", label: "Links" },
+    { id: "files", label: "Files" },
     { id: "deliverables", label: "Deliverables" },
     { id: "comments", label: "Comments" },
     { id: "chat", label: "Chat" },
@@ -40,6 +41,8 @@ export function visibleTabs(data, features = {}) {
         feedback: Boolean(features.github) && len(data.feedback) > 0,
         reviews: Boolean(features.github) && len(data.reviews) > 0,
         chat: (data.comments || []).some(isChatThread),
+        // the owner's payload lists attachments; viewers have no Files tab
+        files: Array.isArray(data.files),
     }
     return TABS.filter((t) => show[t.id] !== false)
 }

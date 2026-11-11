@@ -60,14 +60,18 @@ function buildQuery(params) {
 export function createApi({ fetch: fetchImpl, base = "" } = {}) {
     const doFetch = (...args) => (fetchImpl || globalThis.fetch)(...args)
 
-    async function request(method, path, body, { signal } = {}) {
+    /** raw: a Blob/File sent as the body (application/octet-stream). */
+    async function request(method, path, body, { signal, raw } = {}) {
         const init = {
             method,
             credentials: "same-origin",
             headers: { Accept: "application/json" },
         }
         if (signal) init.signal = signal
-        if (body !== undefined) {
+        if (raw !== undefined) {
+            init.headers["Content-Type"] = "application/octet-stream"
+            init.body = raw
+        } else if (body !== undefined) {
             init.headers["Content-Type"] = "application/json"
             init.body = JSON.stringify(body)
         }
@@ -161,6 +165,16 @@ export function createApi({ fetch: fetchImpl, base = "" } = {}) {
             request("DELETE", `/api/schedules/${enc(sid)}`),
         createAsana: (id) => request("POST", `${t(id)}/asana`),
         closeOut: (id) => request("POST", `${t(id)}/close-out`),
+        // attachments: the file is the raw body, its name in ?name=
+        uploadFile: (id, file, { label } = {}) =>
+            request(
+                "POST",
+                `${t(id)}/files${buildQuery({ name: file.name, label })}`,
+                undefined,
+                { raw: file }
+            ),
+        deleteFile: (id, name) =>
+            request("DELETE", `${t(id)}/files/${enc(name)}`),
         enrich: (id) => request("POST", `${t(id)}/enrich`),
         command: (text) => request("POST", "/api/command", { text }),
         getJob: (jid) => request("GET", `/api/jobs/${enc(jid)}`),

@@ -28,7 +28,9 @@ export function mockFetch(routes = {}) {
     const fn = jest.fn(async (url, init = {}) => {
         const method = init.method || "GET"
         const path = url.split("?")[0]
-        const body = init.body ? JSON.parse(init.body) : undefined
+        // a raw body (an uploaded File) is passed through as is
+        const body =
+            typeof init.body === "string" ? JSON.parse(init.body) : init.body
         calls.push({ method, url, path, body, init })
         let handler = routes[`${method} ${url}`]
         if (handler === undefined) handler = routes[`${method} ${path}`]

@@ -40,8 +40,14 @@ import {
     sendToAgentPrompt,
 } from "./prompts.js"
 
+// Claude Code's own limit banners, at the start of a line (after box and
+// bullet glyphs): "You've hit your usage limit · resets 5pm", "5-hour limit
+// reached ∙ resets 3pm", "Claude AI usage limit reached|…", "Credit balance
+// is too low", "API Error: 429 … rate_limit_error". The agent's own prose
+// that mentions rate limits (e.g. a question about a gateway's per-IP rate
+// limits) is not a banner and must not match.
 export const USAGE_LIMIT_RE =
-    /usage limit|rate limit|out of (extra )?usage|credit balance/i
+    /^[^\p{L}\p{N}]*(?:you['’]ve hit your (?:usage )?limit\b|you['’]re out of (?:extra )?usage\b|(?:claude(?: ai)?|5-hour|session|weekly|opus weekly|sonnet weekly)(?: usage)? limit reached\b|credit balance is too low\b|api error:.*\b(?:429|rate_limit_error)\b)/iu
 export const BLOCKED_REASON = "Agent needs you (blocked)"
 export const UNAVAILABLE_REASON = "Claude unavailable"
 export const START_FAILED_REASON = "Agent failed to start"
@@ -1650,6 +1656,9 @@ export function createWorkerService({
             },
             actor
         )
+        // a closed workspace is no longer "kept open" (e.g. a second Clean
+        // and close that removed the folders the first one left)
+        await clearNowIf(id, CLEAN_LEFT_REASON)
         return { closed: true, workspace_id: cur.workspace_id }
     }
 

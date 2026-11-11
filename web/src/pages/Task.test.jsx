@@ -2126,3 +2126,163 @@ describe("Task page: Slack thread notice", () => {
         expect(document.querySelector(".task-now")).not.toBeNull()
     })
 })
+
+describe("Task page attachments", () => {
+    const FILES = [
+        {
+            name: "shot.png",
+            label: "Shot",
+            url: "files/shot.png",
+            size: 2048,
+            kind: "image",
+            added_by: "me",
+            at: "2026-11-07T09:00:00Z",
+            missing: false,
+        },
+        {
+            name: "notes.md",
+            label: "notes.md",
+            url: "files/notes.md",
+            size: 12,
+            kind: "markdown",
+            added_by: "agent:t12-x",
+            at: "2026-11-07T09:00:00Z",
+            missing: false,
+        },
+    ]
+    const withFiles = () =>
+        taskResponse({
+            files: FILES,
+            artifact: {
+                content: `${ARTIFACT}\n## Attachments\n- ![Shot](files/shot.png)\n- [notes.md](files/notes.md)\n`,
+                revision: "a1",
+            },
+        })
+
+    it("lists files, opens the viewer from the tab and the artifact", async () => {
+        const f = await setup({
+            "GET /api/tasks/12": withFiles(),
+            "GET /api/tasks/12/files/notes.md": () => "unused",
+        })
+        // the artifact embeds the image from the files route
+        const img = article().querySelector('img[data-file="shot.png"]')
+        expect(img.getAttribute("src")).toBe("/api/tasks/12/files/shot.png")
+        fireEvent.click(img)
+        let dialog = screen.getByRole("dialog", { name: "Shot" })
+        expect(dialog.querySelector("img.fv-image").getAttribute("src")).toBe(
+            "/api/tasks/12/files/shot.png"
+        )
+        fireEvent.click(within(dialog).getByRole("button", { name: "Close" }))
+        expect(screen.queryByRole("dialog")).toBeNull()
+
+        fireEvent.click(screen.getByRole("tab", { name: /Files/ }))
+        expect(screen.getByText(/^2\.0 KB · /)).toBeInTheDocument()
+        expect(screen.getByText(/· agent:t12-x$/)).toBeInTheDocument()
+        // markdown opens rendered
+        global.fetch = jest.fn(async () => ({
+            ok: true,
+            text: async () => "# Notes\n\n- one",
+        }))
+        fireEvent.click(screen.getByRole("button", { name: "notes.md" }))
+        dialog = screen.getByRole("dialog", { name: "notes.md" })
+        expect(
+            await within(dialog).findByRole("heading", { name: "Notes" })
+        ).toBeInTheDocument()
+        fireEvent.keyDown(document, { key: "Escape" })
+        expect(screen.queryByRole("dialog")).toBeNull()
+        expect(f).toBeTruthy()
+    })
+
+    it("uploads picked, dropped and pasted files and deletes one", async () => {
+        const f = await setup({
+            "GET /api/tasks/12": withFiles(),
+            "POST /api/tasks/12/files": { file: { name: "x" } },
+            "DELETE /api/tasks/12/files/shot.png": { removed: "shot.png" },
+        })
+        fireEvent.click(screen.getByRole("tab", { name: /Files/ }))
+        const pick = new File(["a"], "report.pdf", { type: "application/pdf" })
+        fireEvent.change(screen.getByTestId("file-input"), {
+            target: { files: [pick] },
+        })
+        await screen.findByText("Attached report.pdf")
+        expect(f.find("POST", "/api/tasks/12/files")[0].url).toBe(
+            "/api/tasks/12/files?name=report.pdf"
+        )
+        expect(f.find("POST", "/api/tasks/12/files")[0].body).toBe(pick)
+
+        // drop anywhere on the page
+        const page = document.querySelector(".page.task")
+        const drop = new File(["b"], "clip.mp4", { type: "video/mp4" })
+        const dataTransfer = { types: ["Files"], files: [drop] }
+        fireEvent.dragOver(page, { dataTransfer })
+        expect(page).toHaveClass("is-dropping")
+        expect(screen.getByText("Drop to attach to T-12")).toBeInTheDocument()
+        fireEvent.drop(page, { dataTransfer })
+        await waitFor(() =>
+            expect(f.find("POST", "/api/tasks/12/files")).toHaveLength(2)
+        )
+        expect(page).not.toHaveClass("is-dropping")
+
+        // a pasted screenshot gets a dated name
+        const shot = new File(["c"], "image.png", { type: "image/png" })
+        const paste = new Event("paste", { bubbles: true, cancelable: true })
+        paste.clipboardData = { files: [shot] }
+        act(() => {
+            document.body.dispatchEvent(paste)
+        })
+        await waitFor(() =>
+            expect(f.find("POST", "/api/tasks/12/files")).toHaveLength(3)
+        )
+        expect(f.find("POST", "/api/tasks/12/files")[2].url).toMatch(
+            /name=pasted-\d{8}-\d{6}\.png$/
+        )
+
+        // delete asks first
+        const row = screen.getByText("Shot").closest("li")
+        fireEvent.click(within(row).getByRole("button", { name: "Delete" }))
+        fireEvent.click(
+            within(screen.getByRole("alertdialog")).getByRole("button", {
+                name: "Delete",
+            })
+        )
+        await screen.findByText("Deleted Shot")
+        expect(f.find("DELETE", "/api/tasks/12/files/shot.png")).toHaveLength(1)
+    })
+
+    it("a failed upload shows the error", async () => {
+        await setup({
+            "GET /api/tasks/12": withFiles(),
+            "POST /api/tasks/12/files": reply(413, {
+                error: "file_too_large",
+                message: "file is larger than 250 MB",
+            }),
+        })
+        fireEvent.click(screen.getByRole("tab", { name: /Files/ }))
+        fireEvent.change(screen.getByTestId("file-input"), {
+            target: { files: [new File(["a"], "big.mov")] },
+        })
+        expect(
+            await screen.findByText("file is larger than 250 MB")
+        ).toBeInTheDocument()
+    })
+})
+
+describe("Task page attachments: drop zone", () => {
+    it("a drop on the Files tab zone uploads once and clears the page hint", async () => {
+        const f = await setup({
+            "GET /api/tasks/12": taskResponse({ files: [] }),
+            "POST /api/tasks/12/files": { file: { name: "x" } },
+        })
+        fireEvent.click(screen.getByRole("tab", { name: /Files/ }))
+        const zone = document.querySelector(".files-drop")
+        const page = document.querySelector(".page.task")
+        const file = new File(["a"], "a.txt")
+        const dataTransfer = { types: ["Files"], files: [file] }
+        fireEvent.dragOver(zone, { dataTransfer })
+        expect(page).toHaveClass("is-dropping")
+        fireEvent.drop(zone, { dataTransfer })
+        expect(page).not.toHaveClass("is-dropping")
+        await screen.findByText("Attached a.txt")
+        expect(f.find("POST", "/api/tasks/12/files")).toHaveLength(1)
+    })
+})

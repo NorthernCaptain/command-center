@@ -39,6 +39,7 @@ describe("visibleTabs", () => {
             comments: [{ id: "c", intent: "chat", author: "me" }],
             feedback: [{ id: "f" }],
             reviews: [{ folder: "x" }],
+            files: [],
         }
         expect(ids(visibleTabs(data, ALL))).toEqual(TABS.map((t) => t.id))
         expect(ids(visibleTabs({ task: {}, outbox: [{}] }, ALL))).toContain(

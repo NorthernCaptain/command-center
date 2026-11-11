@@ -14,7 +14,9 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "localhost"])
 function listen(app, { host, port }, name, log) {
     if (!LOOPBACK.has(host))
         throw new Error(`${name} listener must bind loopback, got ${host}`)
-    const server = http.createServer(app)
+    // large attachment uploads over the tailnet can take longer than the
+    // default 5-minute request timeout
+    const server = http.createServer({ requestTimeout: 30 * 60 * 1000 }, app)
     return new Promise((resolve, reject) => {
         server.once("error", reject)
         server.listen(port, host, () => {

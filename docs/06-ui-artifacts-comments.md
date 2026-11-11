@@ -193,6 +193,14 @@ events for shared tasks, with internal fields stripped.
   once every item that needed work is resolved (or how many are open);
   the PR feedback tab shows the same line. The file keeps only
   placeholders.
+- **Files**: attach screenshots, videos, .md docs, PDFs and other files
+  with the Files tab's button, by dropping them anywhere on the page, or
+  by pasting a screenshot (outside text fields). They are copied next to
+  the artifact, listed in its Attachments section (images and videos shown
+  inline, videos playable in place) and in the Links tab. Clicking one
+  opens a viewer: images, video, audio, rendered Markdown, PDFs in the
+  browser's viewer, text as text, anything else as a download. Delete asks
+  first.
 - **Revision history** drawer: every git commit of the task folder, with
   author (me / center / agent name, from the `Actor:` trailer) and a diff.
   This is the audit trail.

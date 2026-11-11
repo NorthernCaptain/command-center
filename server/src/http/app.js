@@ -65,8 +65,20 @@ const VIEWER_GETS = [
     /^\/board\/?$/,
     /^\/tasks\/?$/,
     /^\/tasks\/[^/]+\/?$/,
+    // a shared task's attachments (the artifact embeds them); the handler
+    // checks the task is shared
+    /^\/tasks\/[^/]+\/files\/[^/]+$/,
     /^\/events\/?$/,
 ]
+
+// Attachments the browser may show inline (with ?download=1 every file is
+// a download). HTML and unknown types are always downloads.
+const INLINE_KINDS = ["image", "video", "audio", "pdf", "markdown", "text"]
+// A file is never a page of this app: no scripts, no plugins, its own
+// sandbox (an SVG opened directly can't run script on this origin).
+const FILE_CSP =
+    "default-src 'none'; img-src 'self' data:; media-src 'self'; " +
+    "style-src 'unsafe-inline'; sandbox"
 
 /** Whitelisted runtime settings and their value schemas. */
 const ModelPairSchema = z
@@ -295,6 +307,8 @@ export function mapError(err) {
  *        after a device is revoked (e.g. drop its push subscriptions)
  * @param {object} [deps.repoTable] { list(), reset() }: known repos for
  *        GET /api/repos and PATCH repos validation
+ * @param {object} [deps.taskFiles] task attachments (files/taskFiles.js):
+ *        upload, list, serve and delete under /api/tasks/:id/files
  */
 /** Baseline enrich compares against to keep fields the user edited. */
 export function enrichSnapshot(task) {
@@ -324,6 +338,7 @@ export function createApp({
     features = {},
     onDeviceRevoked = [],
     repoTable = null,
+    taskFiles = null,
 }) {
     if (mode !== "local" && mode !== "tailnet")
         throw new Error(`invalid app mode: ${mode}`)
@@ -689,6 +704,7 @@ export function createApp({
             ])
         const extras = {}
         for (const fn of taskExtras) Object.assign(extras, await fn(id, task))
+        if (taskFiles) extras.files = await taskFiles.list(id, task)
         // SOC2 areas: what the change record still lacks (blocks Done)
         const changeRecord = changeRecordState(task, artifact)
         if (changeRecord) extras.change_record = changeRecord
@@ -877,6 +893,92 @@ export function createApp({
         })
         res.json({ revision })
     })
+
+    // attachments
+    if (taskFiles) {
+        const fileName = (raw) => {
+            const name = String(raw || "")
+            if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,150}$/.test(name))
+                throw new NotFoundError("file")
+            return name
+        }
+        api.get("/tasks/:id/files", async (req, res) => {
+            const id = parseTaskId(req.params.id)
+            res.json({ files: await taskFiles.list(id) })
+        })
+        // raw body (application/octet-stream), the original name in ?name=
+        api.post("/tasks/:id/files", async (req, res) => {
+            const id = parseTaskId(req.params.id)
+            if (!req.is("application/octet-stream"))
+                throw new AppError(
+                    "unsupported_media_type",
+                    "send the file as application/octet-stream",
+                    { status: 415 }
+                )
+            const { name, label } = parse(
+                z.object({
+                    name: z.string().trim().min(1).max(255),
+                    label: z.string().trim().min(1).max(200).optional(),
+                }),
+                req.query
+            )
+            const length = Number(req.headers["content-length"])
+            const file = await taskFiles.add(id, {
+                name,
+                label,
+                stream: req,
+                actor: ACTOR,
+                size: Number.isFinite(length) ? length : undefined,
+            })
+            res.status(201).json({ file })
+        })
+        api.get("/tasks/:id/files/:name", async (req, res) => {
+            const id = parseTaskId(req.params.id)
+            const name = fileName(req.params.name)
+            if (isViewer(req)) {
+                const { task } = await store.getTask(id)
+                if (!isShared(task)) throw new NotFoundError("file")
+            } else await store.getTask(id)
+            const file = await taskFiles.open(id, name)
+            const download =
+                req.query.download === "1" || !INLINE_KINDS.includes(file.kind)
+            const type =
+                file.kind === "markdown" || file.kind === "text"
+                    ? "text/plain; charset=utf-8"
+                    : file.mime
+            const headers = {
+                "Content-Type": type,
+                "Content-Disposition": `${download ? "attachment" : "inline"}; filename="${name}"`,
+                "Cache-Control": "private, no-cache",
+                "X-Content-Type-Options": "nosniff",
+            }
+            if (file.kind === "pdf" && !download) {
+                // the browser's PDF viewer, framed by the task page
+                headers["Content-Security-Policy"] = "frame-ancestors 'self'"
+                headers["X-Frame-Options"] = "SAMEORIGIN"
+            } else headers["Content-Security-Policy"] = FILE_CSP
+            await new Promise((resolve, reject) =>
+                // relative to the files folder: "dotfiles" then checks the
+                // stored name only, not the folders above tasksDir
+                res.sendFile(
+                    path.basename(file.path),
+                    {
+                        root: path.dirname(file.path),
+                        headers,
+                        dotfiles: "deny",
+                        lastModified: true,
+                    },
+                    (err) => (err && !res.headersSent ? reject(err) : resolve())
+                )
+            )
+        })
+        api.delete("/tasks/:id/files/:name", async (req, res) => {
+            const id = parseTaskId(req.params.id)
+            res.json(
+                await taskFiles.remove(id, fileName(req.params.name), ACTOR)
+            )
+        })
+    }
 
     // history
     const LimitQuery = z.object({
