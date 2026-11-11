@@ -145,6 +145,19 @@ test("feedbackPrompt lists ids, kinds, paths, urls only", () => {
     )
     expect(text).toContain("odd  otherkind  -  -")
     expect(text).toContain("cc_feedback(task_id=123")
+    // after the fixes: reviewers who requested changes are asked again
+    expect(text).toContain(
+        `gh api graphql -f query='query($u:URI!){resource(url:$u){... on PullRequest{latestOpinionatedReviews(first:50){nodes{state author{login}}}}}}' -f u=https://github.com/acme/aws-lambda/pull/812 --jq '.data.resource.latestOpinionatedReviews.nodes[] | select(.state == "CHANGES_REQUESTED") | .author.login'`
+    )
+    expect(text).toContain(
+        "gh pr edit https://github.com/acme/aws-lambda/pull/812 --add-reviewer <login>"
+    )
+    expect(text.indexOf("3. Reply")).toBeLessThan(
+        text.indexOf("4. Once the fixes")
+    )
+    expect(text).toMatch(
+        /never dismiss a review\.\n5\. For every item: cc_feedback/
+    )
     expect(text).not.toContain("IGNORE")
     expect(feedbackPrompt({ task, pr: "p", round: 1, branch: "b" })).toContain(
         "this PR's scope):\n\nFor each item"

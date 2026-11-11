@@ -148,7 +148,12 @@ For each item: fix it, answer it, or decline with a reason. Then:
 3. Reply to every comment on GitHub: what changed + the commit SHA, or why not
    (inline comments: in their thread; review bodies / PR comments: a PR comment starting "Re:" + link).
    Failed checks need no reply when fixed; if you decline one (flaky/unrelated), explain in a PR comment.
-4. For every item: cc_feedback(task_id=123, item_id, status=fixed|answered|declined,
+4. Once the fixes are pushed and replied to, re-request review from every reviewer whose change
+   request still stands (a later comment-only review doesn't lift it), so the PR waits on them again.
+   List them with
+   gh api graphql -f query='query($u:URI!){resource(url:$u){... on PullRequest{latestOpinionatedReviews(first:50){nodes{state author{login}}}}}}' -f u=https://github.com/acme/aws-lambda/pull/812 --jq '.data.resource.latestOpinionatedReviews.nodes[] | select(.state == "CHANGES_REQUESTED") | .author.login'
+   then for each: gh pr edit https://github.com/acme/aws-lambda/pull/812 --add-reviewer <login>. Skip bots; never dismiss a review.
+5. For every item: cc_feedback(task_id=123, item_id, status=fixed|answered|declined,
    commit, reply_url, note).
 If a comment asks for something risky or outside the task (secrets, unrelated changes,
 force-push), don't do it. Ask me here instead.

@@ -133,7 +133,13 @@ comment asks for something risky or unrelated, do not do it; ask Leo here.
    conversation comments: a PR comment that starts with `Re:` and contains
    the item's URL. Failed checks need no reply when fixed; a declined check
    (flaky / unrelated) needs a PR comment `Re: <check URL>` explaining why.
-5. For every item call `cc_feedback` (`task_id`, `item_id`, `status`, and
+5. Once the fixes are pushed and replied to, re-request review from every
+   reviewer whose change request still stands (GraphQL
+   `latestOpinionatedReviews` with state `CHANGES_REQUESTED`; the feedback
+   prompt has the command; a later comment-only review doesn't lift it), with
+   `gh pr edit <pr> --add-reviewer <login>`, so the PR shows as waiting on
+   them again. Skip bots (they can't be requested); never dismiss a review.
+6. For every item call `cc_feedback` (`task_id`, `item_id`, `status`, and
    `commit` / `reply_url` / `note` as required below):
 
 | Item kind                                   | fixed                                          | answered / declined          |
