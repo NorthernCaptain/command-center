@@ -93,6 +93,7 @@ export const SETTINGS_SCHEMAS = {
     "center.auto_fallback": z.boolean(),
     "center.models": z.partialRecord(z.enum(PROVIDERS), ModelPairSchema),
     "workers.default_kind": z.enum(WORKER_KINDS),
+    "workers.auto_clean_on_done": z.boolean(),
     // phase 2/3
     "github.poll_minutes": z.number().int().min(5).max(1440),
     "digest.enabled": z.boolean(),

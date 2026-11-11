@@ -10,7 +10,9 @@ import { createFakeClock } from "../util/clock.js"
 import { AppError, NotFoundError } from "../util/errors.js"
 import { openDb } from "../store/db.js"
 import { createOutboxRepo } from "../herdr/outboxRepo.js"
+import { createBus } from "../events/bus.js"
 import {
+    AUTO_CLEAN_SETTING,
     BLOCKED_REASON,
     CLEAN_LEFT_REASON,
     createWorkerService,
@@ -2467,8 +2469,9 @@ describe("closed tasks and interrupted sends", () => {
         await started(env)
         env.herdr.setStatus(NAME, "working")
         await env.svc.deliver(1, "late feedback", { reason: "pr_feedback" })
-        await env.svc.deliver(1, "clean up", { reason: "clean" })
+        // Clean is only queued on a done task
         env.store.task(1).status = "done"
+        await env.svc.deliver(1, "clean up", { reason: "clean" })
         env.herdr.setStatus(NAME, "idle")
         await env.svc.resync()
         await env.svc.idle()
@@ -2802,5 +2805,267 @@ describe("command-center MCP on worker launch", () => {
         expect(cfg.mcpServers["command-center"].headersHelper).toMatch(
             /\/install\/mcp-headers\.sh$/
         )
+    })
+})
+
+describe("auto clean and close after done", () => {
+    const FOLDER = { folder: "api--t1-fix--k7q2" }
+    async function withAgent(over = {}, taskOver = {}) {
+        const bus = createBus()
+        const env = setup({ bus, ...over })
+        await started(env)
+        await env.svc.start()
+        Object.assign(env.store.tasks.get(1), { slug: "k7q2", ...taskOver })
+        env.identity.scanFolders.mockImplementation(() => [FOLDER])
+        return env
+    }
+    const status = async (env, st) => {
+        env.events.emit("status", { paneId: "p1", status: st })
+        await env.svc.idle()
+    }
+    /** what the store emits when a task moves to done */
+    const toDone = async (env) => {
+        const task = env.store.tasks.get(1)
+        task.status = "done"
+        env.bus.emit("task.updated", {
+            task_id: 1,
+            data: { task: { ...task }, changed: ["status", "done_at"] },
+        })
+        await env.svc.idle()
+    }
+
+    test("done -> clean-up prompt, then the workspace closes", async () => {
+        const env = await withAgent()
+        await toDone(env)
+        expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(
+            "Clean: follow tree AGENTS.md §6 for slug k7q2."
+        )
+        const cur = await env.sessions.current(1)
+        expect(parseCloseAfter(cur.close_after)).toMatchObject({
+            working: false,
+        })
+        const req = env.store.events.find(
+            (e) => e.type === "agent_close_requested"
+        )
+        expect(req).toMatchObject({
+            actor: "system",
+            data: { after: "clean", auto: true },
+        })
+        await status(env, "working")
+        env.identity.scanFolders.mockImplementation(() => [])
+        await status(env, "idle")
+        expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
+        expect(await env.sessions.current(1)).toBeNull()
+        // the settings default is on
+        expect(env.settingsRepo.get).toHaveBeenCalledWith(
+            AUTO_CLEAN_SETTING,
+            true
+        )
+        await env.svc.stop()
+    })
+
+    test("a busy agent gets the prompt when it is idle; a blocked one keeps it", async () => {
+        const env = await withAgent()
+        env.herdr.setStatus(NAME, "working")
+        const kickoff = env.herdr.agentPrompt.mock.calls.length
+        await toDone(env)
+        expect(env.herdr.agentPrompt).toHaveBeenCalledTimes(kickoff)
+        const cur = await env.sessions.current(1)
+        expect(cur.close_after).toMatch(/^clean:\d+$/)
+        // blocked: not sent, the close stays pending
+        env.herdr.setStatus(NAME, "blocked")
+        await status(env, "blocked")
+        expect((await env.sessions.current(1)).close_after).toBe(
+            cur.close_after
+        )
+        env.herdr.setStatus(NAME, "idle")
+        await status(env, "idle")
+        expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toMatch(/^Clean:/)
+        await status(env, "working")
+        env.identity.scanFolders.mockImplementation(() => [])
+        await status(env, "idle")
+        expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
+        await env.svc.stop()
+    })
+
+    test("a blocked agent at done keeps the close pending", async () => {
+        const env = await withAgent()
+        env.herdr.setStatus(NAME, "blocked")
+        const r = await env.svc.autoCloseOnDone(
+            (env.store.tasks.get(1).status = "done") && 1
+        )
+        expect(r.delivery.status).toBe("blocked")
+        expect(r.close_after).toMatch(/^clean:\d+$/)
+        expect((await env.sessions.current(1)).close_after).toBe(r.close_after)
+        await env.svc.stop()
+    })
+
+    test("no folders: an idle agent is just closed, a busy one skipped", async () => {
+        const env = await withAgent({}, { slug: null })
+        await toDone(env)
+        expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
+        const closed = env.store.events.find((e) => e.type === "agent_closed")
+        expect(closed.data).toMatchObject({ after: "done" })
+
+        const env2 = await withAgent({}, { slug: null })
+        env2.herdr.setStatus(NAME, "working")
+        env2.store.tasks.get(1).status = "done"
+        expect(await env2.svc.autoCloseOnDone(1)).toEqual({
+            skipped: "agent_busy",
+        })
+        expect(env2.herdr.workspaceClose).not.toHaveBeenCalled()
+        const ev = env2.store.events.find(
+            (e) => e.type === "agent_auto_close_skipped"
+        )
+        expect(ev.data).toMatchObject({ name: NAME })
+        expect(ev.data.reason).toMatch(/working/)
+        await env.svc.stop()
+        await env2.svc.stop()
+    })
+
+    test("skips: setting off, not done, no agent, close pending", async () => {
+        const off = await withAgent({
+            settingsRepo: {
+                get: jest.fn((k, d) => (k === AUTO_CLEAN_SETTING ? false : d)),
+            },
+        })
+        const kickoff = off.herdr.agentPrompt.mock.calls.length
+        await toDone(off)
+        expect(off.herdr.agentPrompt).toHaveBeenCalledTimes(kickoff)
+        expect(await off.svc.autoCloseOnDone(1)).toEqual({
+            skipped: "disabled",
+        })
+
+        const env = await withAgent()
+        expect(await env.svc.autoCloseOnDone(1)).toEqual({ skipped: "status" })
+        env.store.tasks.get(1).status = "done"
+        const cur = await env.sessions.current(1)
+        await env.sessions.update(cur.id, { close_after: "clean:99" })
+        expect(await env.svc.autoCloseOnDone(1)).toEqual({
+            skipped: "close_pending",
+        })
+        await env.sessions.update(cur.id, { close_after: null })
+        env.herdr.agentGet.mockResolvedValueOnce(null)
+        expect(await env.svc.autoCloseOnDone(1)).toEqual({
+            skipped: "agent_not_found",
+        })
+        // a gone agent: no session any more
+        await env.svc.action(1, "close-agent")
+        expect(await env.svc.autoCloseOnDone(1)).toEqual({
+            skipped: "no_agent",
+        })
+        // without a settings repo the default (on) applies
+        const bare = await withAgent({ settingsRepo: null })
+        bare.store.tasks.get(1).status = "done"
+        expect((await bare.svc.autoCloseOnDone(1)).delivery.status).toBe("sent")
+        await off.svc.stop()
+        await env.svc.stop()
+        await bare.svc.stop()
+    })
+
+    test("reopened before the prompt went out: no clean-up, no close", async () => {
+        const env = await withAgent()
+        env.herdr.setStatus(NAME, "working")
+        const kickoff = env.herdr.agentPrompt.mock.calls.length
+        await toDone(env)
+        const cur = await env.sessions.current(1)
+        const rowId = parseCloseAfter(cur.close_after).rowId
+        // a mistaken Done, reopened
+        const task = env.store.tasks.get(1)
+        task.status = "active"
+        env.bus.emit("task.updated", {
+            task_id: 1,
+            data: { task: { ...task }, changed: ["status"] },
+        })
+        await env.svc.idle()
+        expect((await env.sessions.current(1)).close_after).toBeNull()
+        expect((await env.outbox.byId(rowId)).status).toBe("cancelled")
+        const ev = env.store.events.find(
+            (e) => e.type === "agent_close_cancelled"
+        )
+        expect(ev.data).toMatchObject({
+            reason: "task is active",
+            prompt: "cancelled",
+        })
+        env.herdr.setStatus(NAME, "idle")
+        await status(env, "idle")
+        env.identity.scanFolders.mockImplementation(() => [])
+        await status(env, "working")
+        await status(env, "idle")
+        expect(env.herdr.agentPrompt).toHaveBeenCalledTimes(kickoff)
+        expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+        await env.svc.stop()
+    })
+
+    test("backstops: a missed reopen event, a stray Clean row", async () => {
+        // the close was pending and the reopen event was missed: the next
+        // status report drops it
+        const env = await withAgent()
+        env.herdr.setStatus(NAME, "working")
+        await toDone(env)
+        const cur = await env.sessions.current(1)
+        env.store.tasks.get(1).status = "active"
+        await status(env, "idle")
+        expect((await env.sessions.current(1)).close_after).toBeNull()
+        expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+        expect(env.outbox.rows.find((r) => r.reason === "clean").status).toBe(
+            "cancelled"
+        )
+        // an unreadable task keeps the close
+        await env.sessions.update(cur.id, { close_after: "clean:99" })
+        env.store.getTask = jest.fn(async () => {
+            throw new Error("gone")
+        })
+        env.bus.emit("task.updated", {
+            task_id: 1,
+            data: { task: { status: "active" }, changed: ["status"] },
+        })
+        await env.svc.idle()
+        expect((await env.sessions.current(1)).close_after).toBe("clean:99")
+        await env.svc.stop()
+
+        // a Clean row queued on an open task is never sent
+        const env2 = await withAgent()
+        const kickoff = env2.herdr.agentPrompt.mock.calls.length
+        await env2.outbox.enqueue({
+            task_id: 1,
+            text: "Clean",
+            reason: "clean",
+        })
+        await env2.outbox.enqueue({ task_id: 1, text: "keep", reason: "send" })
+        await status(env2, "idle")
+        expect(env2.herdr.agentPrompt).toHaveBeenCalledTimes(kickoff + 1)
+        expect(env2.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe("keep")
+        const dropped = env2.store.events.find(
+            (e) => e.type === "agent_prompts_dropped"
+        )
+        expect(dropped.data).toMatchObject({ reasons: ["clean"] })
+        await env2.svc.stop()
+    })
+
+    test("other errors propagate; other bus events are ignored", async () => {
+        const env = await withAgent()
+        env.store.tasks.get(1).status = "done"
+        env.herdr.agentGet.mockRejectedValueOnce(new Error("herdr down"))
+        await expect(env.svc.autoCloseOnDone(1)).rejects.toThrow("herdr down")
+        const kickoff = env.herdr.agentPrompt.mock.calls.length
+        const task = { ...env.store.tasks.get(1) }
+        env.bus.emit("task.updated", {
+            task_id: 1,
+            data: { task, changed: ["title"] },
+        })
+        env.bus.emit("task.updated", {
+            task_id: 1,
+            data: { task: { ...task, status: "pr_open" }, changed: ["status"] },
+        })
+        env.bus.emit("task.updated", { task_id: 1 })
+        env.bus.emit("artifact.updated", { task_id: 1, data: { task } })
+        await env.svc.idle()
+        expect(env.herdr.agentPrompt).toHaveBeenCalledTimes(kickoff)
+        // stopped: no more listening
+        await env.svc.stop()
+        expect(env.bus.listenerCount()).toBe(0)
+        await toDone(env)
+        expect(env.herdr.agentPrompt).toHaveBeenCalledTimes(kickoff)
     })
 })

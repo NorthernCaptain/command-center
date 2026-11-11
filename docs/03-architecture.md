@@ -288,8 +288,15 @@ its PR(s) are merged**, the same rule as the Asana task.
    `done` and the `close_out` job writes the artifact Result (only when it
    is still empty: a written Result is kept), posts the conclusion on the
    Asana task (rich text: outcome, details with PR / doc links, what is
-   still open), completes the Asana task, and commits. Then **Clean folders** is offered (prompt the agent to run tree
-   AGENTS.md §6). Default is to leave the folders.
+   still open), completes the Asana task, and commits. The PR watcher starts it on its
+   own once the last PR merges; the **Close out** button starts the same job.
+   When the task reaches `done` (by close-out or a plain Done), the worker
+   service cleans up after it, unless the setting
+   `workers.auto_clean_on_done` (Settings, default on) is off: the agent
+   gets the Clean prompt (tree AGENTS.md §6) and its herdr workspace
+   closes once it is done, as with **Close agent** + **Clean folders**. A
+   busy agent gets the prompt when it is idle; a task without folders only
+   has its idle agent closed; no live agent: nothing happens.
 
 ### PR feedback items
 

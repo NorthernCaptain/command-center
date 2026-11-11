@@ -54,6 +54,7 @@ export const SETTINGS_DEFAULTS = {
     "center.auto_fallback": false,
     "center.models": {},
     "workers.default_kind": "claude",
+    "workers.auto_clean_on_done": true,
     "github.poll_minutes": 15,
     "digest.enabled": true,
     "digest.time": "08:30",

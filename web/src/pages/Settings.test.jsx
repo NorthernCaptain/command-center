@@ -590,6 +590,25 @@ describe("Settings: phase 2/3", () => {
         ])
     })
 
+    it("toggles auto clean and close after done (default on, needs workers)", async () => {
+        const f = setup({
+            "PATCH /api/settings": ({ body }) => ({
+                settings: { ...SETTINGS, ...body },
+            }),
+        })
+        renderWithApp(<Settings />, { features: { workers: true } })
+        await screen.findByDisplayValue("claude-sdk")
+        const box = screen.getByLabelText(
+            /When a task is done, clean its folders/
+        )
+        expect(box).toBeChecked()
+        fireEvent.click(box)
+        fireEvent.click(screen.getByRole("button", { name: "Save" }))
+        await screen.findByText("Settings saved")
+        const body = f.find("PATCH", "/api/settings")[0].body
+        expect(body).toEqual({ "workers.auto_clean_on_done": false })
+    })
+
     it("hides automation, push and SOC2 without the features", async () => {
         setup()
         renderWithApp(<Settings />)

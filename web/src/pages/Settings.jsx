@@ -21,6 +21,7 @@ export const SETTING_KEYS = [
     "center.auto_fallback",
     "center.models",
     "workers.default_kind",
+    "workers.auto_clean_on_done",
     "github.poll_minutes",
     "digest.enabled",
     "digest.time",
@@ -315,6 +316,27 @@ function CenterSettings() {
                         ))}
                     </select>
                 </label>
+                {features.workers ? (
+                    <label className="field field-check">
+                        <input
+                            type="checkbox"
+                            className="switch"
+                            checked={Boolean(
+                                form["workers.auto_clean_on_done"]
+                            )}
+                            onChange={(e) =>
+                                set(
+                                    "workers.auto_clean_on_done",
+                                    e.target.checked
+                                )
+                            }
+                        />
+                        <span>
+                            When a task is done, clean its folders and close the
+                            agent
+                        </span>
+                    </label>
+                ) : null}
             </div>
             {features.github || features.digest || features.push ? (
                 <>

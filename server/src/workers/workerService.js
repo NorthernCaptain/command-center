@@ -77,6 +77,9 @@ const SENDABLE = ["idle", "done"]
 // "clean:<id>", plus ":working" once the agent worked after it was sent.
 // The workspace closes when it is idle again and the folders are gone.
 export const CLEAN_LEFT_REASON = "Clean-up left folders; agent kept open"
+// runtime setting (default on): a task that moves to done gets its agent's
+// folders cleaned and its workspace closed (autoCloseOnDone)
+export const AUTO_CLEAN_SETTING = "workers.auto_clean_on_done"
 
 /** "clean:<id>[:working]" -> { rowId, working } or null. */
 export function parseCloseAfter(value) {
@@ -198,6 +201,7 @@ export function createWorkerService({
     const reviving = new Set() // task ids revived by reviveOrphans right now
     const background = new Set()
     let started = false
+    let unsubscribeBus = null
     // PR watcher ({ addressFeedback }), bound after both exist (system.js)
     let feedbackDelivery = null
     function setFeedbackDelivery(fd) {
@@ -974,9 +978,14 @@ export function createWorkerService({
         } catch {
             return pending
         }
-        if (task.status !== "cancelled" && task.status !== "done")
-            return pending
-        const keep = (r) => task.status === "done" && r.reason === "clean"
+        // the Clean prompt only fits a done task: one still queued when the
+        // task was reopened is dropped too
+        const open = task.status !== "cancelled" && task.status !== "done"
+        if (open && !pending.some((r) => r.reason === "clean")) return pending
+        const keep = (r) =>
+            open
+                ? r.reason !== "clean"
+                : task.status === "done" && r.reason === "clean"
         const dropped = pending.filter((r) => !keep(r))
         for (const r of dropped) await outbox.cancel(r.id)
         if (dropped.length)
@@ -1165,6 +1174,38 @@ export function createWorkerService({
     }
 
     /**
+     * A pending close (Close agent + Clean folders, or the automatic one
+     * after done) on a task that is no longer done (reopened, e.g. after a
+     * mistaken Done): cancel its clean-up prompt if still queued, clear the
+     * mark, log agent_close_cancelled. True when it dropped the close. A
+     * task that can't be read keeps it.
+     */
+    async function dropCloseIfReopened(id, s) {
+        if (!s || !s.close_after) return false
+        let task
+        try {
+            task = (await store.getTask(id)).task
+        } catch {
+            return false
+        }
+        if (task.status === "done") return false
+        const mark = parseCloseAfter(s.close_after)
+        const row = mark ? await outbox.byId(mark.rowId) : null
+        if (row && row.status === "pending") await outbox.cancel(row.id)
+        await sessions.update(s.id, { close_after: null })
+        await logEvent(id, "agent_close_cancelled", {
+            name: s.name,
+            reason: `task is ${task.status}`,
+            prompt: row
+                ? row.status === "pending"
+                    ? "cancelled"
+                    : row.status
+                : "missing",
+        })
+        return true
+    }
+
+    /**
      * Close after clean (on the task chain): "working" marks that the agent
      * took the clean-up turn; once it is idle again with the prompt
      * delivered, the workspace closes if the task's folders are gone. Folders
@@ -1173,6 +1214,8 @@ export function createWorkerService({
      * workspace was closed.
      */
     async function settleCloseAfter(id, s, status) {
+        // the task was reopened meanwhile: no clean-up, no close
+        if (await dropCloseIfReopened(id, s)) return false
         const mark = parseCloseAfter(s.close_after)
         const row = mark ? await outbox.byId(mark.rowId) : null
         // the clean-up prompt never reached the agent (failed, cancelled,
@@ -1427,6 +1470,8 @@ export function createWorkerService({
         started = true
         await recover()
         for (const [name, fn] of Object.entries(listeners)) events.on(name, fn)
+        if (bus && typeof bus.subscribe === "function")
+            unsubscribeBus = bus.subscribe(onBusEvent)
         await retrack()
         if (typeof events.start === "function") events.start()
         await bg(resync(), "startup resync")
@@ -1437,6 +1482,8 @@ export function createWorkerService({
         if (!started) return
         started = false
         for (const [name, fn] of Object.entries(listeners)) events.off(name, fn)
+        if (unsubscribeBus) unsubscribeBus()
+        unsubscribeBus = null
         if (timer !== null) clock.clearTimeout(timer)
         timer = null
         if (typeof events.stop === "function") events.stop()
@@ -1621,8 +1668,12 @@ export function createWorkerService({
         return row
     }
 
-    /** The task's live agent, checked to be ours and idle (on the chain). */
-    async function idleAgent(id) {
+    /**
+     * The task's live agent, checked to be ours and idle (on the chain).
+     * busyOk: any state will do (the automatic clean-up after done queues
+     * its prompt for when the agent is idle).
+     */
+    async function idleAgent(id, { busyOk = false } = {}) {
         const cur = await sessions.current(id)
         if (!cur) throw conflict("no_agent", `T-${id} has no live agent`)
         const info = await herdr.agentGet(cur.pane_id || cur.name)
@@ -1632,7 +1683,7 @@ export function createWorkerService({
                 "agent_not_found",
                 `${cur.name} is not running in its pane any more; close the workspace in herdr if you want it gone`
             )
-        if (!IDLE_STATES.includes(info.status))
+        if (!busyOk && !IDLE_STATES.includes(info.status))
             throw conflict(
                 "agent_busy",
                 `${cur.name} is ${info.status}; close it when it is idle`,
@@ -1667,15 +1718,18 @@ export function createWorkerService({
      * session close_after "clean:<outbox id>", then send it; settleCloseAfter
      * closes the workspace when that turn is over. A prompt that was not
      * delivered (failed / blocked, or later failed / cancelled) cancels it.
+     * auto (after done, autoCloseOnDone): the agent may be busy, and a
+     * blocked one keeps the prompt queued (sent, then closed, once it is
+     * idle); only a failed prompt cancels.
      */
-    async function closeAfterClean(id, task, actor) {
+    async function closeAfterClean(id, task, actor, { auto = false } = {}) {
         requireStatus(task, ["done"], "Clean folders")
         if (!task.slug)
             throw conflict("no_slug", `T-${id} has no folders to clean`)
         // Queue the prompt and record its row on the task chain: no flush
         // can send it before the session knows which row to wait for.
         const { cur, row, duplicate } = await serial(id, async () => {
-            const c = await idleAgent(id)
+            const c = await idleAgent(id, { busyOk: auto })
             const dup = ((await outbox.pending(id)) || []).find(
                 (r) => r.reason === "clean"
             )
@@ -1699,17 +1753,94 @@ export function createWorkerService({
         const delivery = duplicate
             ? { status: "queued", outbox_id: row.id, duplicate: true }
             : await sendQueued(id, row)
-        if (["failed", "blocked"].includes(delivery.status)) {
+        const cancels = auto ? ["failed"] : ["failed", "blocked"]
+        if (cancels.includes(delivery.status)) {
             await sessions.update(cur.id, { close_after: null })
             return { delivery, close_after: null }
         }
         await logEvent(
             id,
             "agent_close_requested",
-            { name: cur.name, after: "clean", outbox_id: delivery.outbox_id },
+            {
+                name: cur.name,
+                after: "clean",
+                outbox_id: delivery.outbox_id,
+                ...(auto ? { auto: true } : {}),
+            },
             actor
         )
         return { delivery, close_after: closeAfter }
+    }
+
+    const SKIP_CODES = ["no_agent", "agent_not_found", "agent_busy"]
+
+    /**
+     * The task moved to done (close-out by the PR watcher or the Close out
+     * button, or a plain Done): with the setting AUTO_CLEAN_SETTING (default
+     * on) its agent cleans its folders and its workspace closes, as with
+     * Close agent + Clean folders. A busy agent gets the clean-up prompt
+     * when it is idle. Without folders (no slug) an idle agent is just
+     * closed. No live agent, or a close already pending: nothing to do. An
+     * agent that can't be reached is skipped with an activity event.
+     * @returns {Promise<object>} what happened (tests, logs)
+     */
+    async function autoCloseOnDone(taskId) {
+        const id = toId(taskId)
+        if (
+            settingsRepo &&
+            (await settingsRepo.get(AUTO_CLEAN_SETTING, true)) === false
+        )
+            return { skipped: "disabled" }
+        const { task } = await store.getTask(id)
+        if (task.status !== "done") return { skipped: "status" }
+        const cur = await sessions.current(id)
+        if (!cur) return { skipped: "no_agent" }
+        if (cur.close_after) return { skipped: "close_pending" }
+        try {
+            if (task.slug)
+                return await closeAfterClean(id, task, "system", {
+                    auto: true,
+                })
+            return await serial(id, async () =>
+                closeWorkspace(id, await idleAgent(id), "system", {
+                    after: "done",
+                })
+            )
+        } catch (err) {
+            if (!SKIP_CODES.includes(err && err.code)) throw err
+            await logEvent(id, "agent_auto_close_skipped", {
+                name: cur.name,
+                reason: errMessage(err),
+            })
+            return { skipped: err.code }
+        }
+    }
+
+    /**
+     * A task that left done (reopened): drop a pending close and a Clean
+     * prompt still queued, so neither runs on the reopened task.
+     */
+    async function cancelCleanOnReopen(taskId) {
+        const id = toId(taskId)
+        await serial(id, async () => {
+            await dropCloseIfReopened(id, await sessions.current(id))
+            const pending = (await outbox.pending(id)) || []
+            if (pending.some((r) => r.reason === "clean"))
+                await dropClosedWork(id, pending)
+        })
+    }
+
+    /**
+     * bus listener for task status changes: to done -> autoCloseOnDone;
+     * to anything else -> cancelCleanOnReopen.
+     */
+    function onBusEvent(ev) {
+        if (!ev || ev.type !== "task.updated" || !ev.data) return
+        const { task, changed } = ev.data
+        if (!task || !(changed || []).includes("status")) return
+        if (task.status === "done")
+            bg(autoCloseOnDone(ev.task_id), "auto close after done")
+        else bg(cancelCleanOnReopen(ev.task_id), "cancel clean on reopen")
     }
 
     async function action(taskId, name, body, { actor = "system" } = {}) {
@@ -1936,6 +2067,7 @@ export function createWorkerService({
         deliver,
         revive,
         action,
+        autoCloseOnDone,
         agentState,
         queued,
         outboxView,
