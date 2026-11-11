@@ -29,6 +29,7 @@ import SelectionPopover from "../components/SelectionPopover.jsx"
 import { EmptyState, SkeletonDoc } from "../components/Skeleton.jsx"
 import TaskHeader from "../components/TaskHeader.jsx"
 import useDockHeight from "../lib/useDockHeight.js"
+import useKeyboardInset from "../lib/useKeyboardInset.js"
 import {
     ActivityList,
     LinksList,
@@ -146,6 +147,8 @@ export default function TaskPage({ id }) {
     // the dock grows with the chat reply: the page reserves its real height
     const dockRef = useRef(null)
     useDockHeight(dockRef, Boolean(isOwner && data && !hidden))
+    // phones: keep the dock (and the growing chat box) above the keyboard
+    useKeyboardInset(Boolean(isOwner && data && !hidden))
     // back on the page: the latest chat exchange (saved as a comment thread
     // and its assist job) shows again unless it was closed here
     const chatFor = useRef(null)
@@ -934,6 +937,8 @@ export default function TaskPage({ id }) {
                             ☰ <span className="lane-count">{openCount}</span>
                         </button>
                         <ChatBar
+                            key={loadedId}
+                            draftKey={loadedId}
                             onSend={async (body) => {
                                 const res = await postComment({
                                     body,

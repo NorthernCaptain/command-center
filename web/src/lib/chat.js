@@ -73,3 +73,25 @@ export function rememberClosedChat(taskId, jobId) {
         // storage blocked: it just shows again next time
     }
 }
+
+const DRAFT_KEY = (taskId) => `cc.chatDraft.${taskId}`
+
+/** The unsent chat text saved on this device for the task ("" if none). */
+export function chatDraft(taskId) {
+    try {
+        return window.localStorage.getItem(DRAFT_KEY(taskId)) || ""
+    } catch {
+        return ""
+    }
+}
+
+/** Save (or, when empty, forget) the unsent chat text (best effort). */
+export function saveChatDraft(taskId, text) {
+    try {
+        if (text && text.trim())
+            window.localStorage.setItem(DRAFT_KEY(taskId), text)
+        else window.localStorage.removeItem(DRAFT_KEY(taskId))
+    } catch {
+        // storage blocked: the draft lives only while the page is open
+    }
+}

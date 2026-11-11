@@ -3,7 +3,14 @@
  * MIT license.
  */
 
-import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
+import {
+    act,
+    cleanup,
+    fireEvent,
+    screen,
+    waitFor,
+    within,
+} from "@testing-library/react"
 import TaskPage from "./Task.jsx"
 import { mockFetch, reply, sampleTask } from "../../test/helpers.js"
 import {
@@ -901,6 +908,20 @@ describe("Task page", () => {
         expect(
             screen.queryByRole("region", { name: "Center agent reply" })
         ).not.toBeInTheDocument()
+        window.localStorage.clear()
+    })
+
+    it("an unsent chat message comes back when the page is opened again", async () => {
+        await setup()
+        fireEvent.change(screen.getByLabelText("Message the center agent"), {
+            target: { value: "remember to check staging" },
+        })
+        cleanup()
+        renderWithApp(<TaskPage id={12} />)
+        await screen.findByRole("heading", { name: "Fix lambda timeout" })
+        expect(screen.getByLabelText("Message the center agent").value).toBe(
+            "remember to check staging"
+        )
         window.localStorage.clear()
     })
 

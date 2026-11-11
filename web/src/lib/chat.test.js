@@ -5,11 +5,13 @@
 
 import {
     CHAT_RESTORE_MS,
+    chatDraft,
     chatThreads,
     closedChat,
     isChatThread,
     latestChat,
     rememberClosedChat,
+    saveChatDraft,
     splitChat,
 } from "./chat.js"
 
@@ -103,5 +105,32 @@ describe("splitChat", () => {
         const c = chat("c1", "2026-11-09T10:00:00Z")
         expect(splitChat([note, c])).toEqual({ comments: [note], chats: [c] })
         expect(splitChat(undefined)).toEqual({ comments: [], chats: [] })
+    })
+})
+
+describe("chat drafts", () => {
+    afterEach(() => {
+        jest.restoreAllMocks()
+        window.localStorage.clear()
+    })
+
+    it("saves per task; empty text forgets it", () => {
+        expect(chatDraft(2)).toBe("")
+        saveChatDraft(2, "half a thought")
+        expect(chatDraft(2)).toBe("half a thought")
+        expect(chatDraft(3)).toBe("")
+        saveChatDraft(2, "   ")
+        expect(chatDraft(2)).toBe("")
+        expect(window.localStorage.getItem("cc.chatDraft.2")).toBeNull()
+    })
+
+    it("storage errors are ignored", () => {
+        for (const m of ["getItem", "setItem", "removeItem"])
+            jest.spyOn(Storage.prototype, m).mockImplementation(() => {
+                throw new Error("blocked")
+            })
+        expect(() => saveChatDraft(2, "x")).not.toThrow()
+        expect(() => saveChatDraft(2, "")).not.toThrow()
+        expect(chatDraft(2)).toBe("")
     })
 })

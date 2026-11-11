@@ -5,13 +5,26 @@
 
 import { useState } from "react"
 import TextBox from "./TextBox.jsx"
+import { chatDraft, saveChatDraft } from "../lib/chat.js"
 
-/** Pinned chat input for the center agent. onSend(text) -> Promise. */
+/**
+ * Pinned chat input for the center agent. onSend(text) -> Promise.
+ * draftKey (the task id): unsent text is saved on this device and comes
+ * back when the page is opened again; a sent message clears it. Remount
+ * (key) for another task.
+ */
 export default function ChatBar({
     onSend,
+    draftKey = null,
     placeholder = "Tell the center agent…",
 }) {
-    const [text, setText] = useState("")
+    const [text, setText] = useState(() =>
+        draftKey == null ? "" : chatDraft(draftKey)
+    )
+    function edit(next) {
+        setText(next)
+        if (draftKey != null) saveChatDraft(draftKey, next)
+    }
     const [busy, setBusy] = useState(false)
 
     async function send(e) {
@@ -21,7 +34,7 @@ export default function ChatBar({
         setBusy(true)
         try {
             await onSend(body)
-            setText("")
+            edit("")
         } catch {
             // caller toasts; keep the draft
         } finally {
@@ -41,7 +54,7 @@ export default function ChatBar({
                 value={text}
                 disabled={busy}
                 maxRows={6}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => edit(e.target.value)}
                 onSubmit={() => send()}
             />
             <button
