@@ -19,6 +19,9 @@ import { systemPrompt } from "../prompts.js"
 import job, {
     baselineSnapshot,
     brainIdempotencyKey,
+    brainPrompt,
+    cannotRead,
+    threadOf,
     areaHintLine,
     enrichRepos,
     filterRepos,
@@ -27,6 +30,9 @@ import job, {
 } from "./enrich.js"
 
 const systemPromptText = () => systemPrompt("enrich")
+// Brain's reply with the thread between the markers enrich asks for
+const wrapped = (text) =>
+    `Here it is:\n=== THREAD ===\n${text}\n=== END THREAD ===`
 
 const REPOS = [
     { name: "aws-lambda", description: "lambdas" },
@@ -123,6 +129,103 @@ describe("enrich", () => {
             idempotencyKey: "cc-T1-enrich-j9",
         })
         expect(brainIdempotencyKey(5, "j_x")).toBe("cc-T5-enrich-j_x")
+        expect(brainIdempotencyKey(5, "j_x", 2)).toBe("cc-T5-enrich-j_x-a2")
+        const prompt = deps.brain.start.mock.calls[0][0].prompt
+        expect(prompt).toMatch(/=== THREAD ===.*=== END THREAD ===/)
+        expect(prompt).toMatch(/do not save it to a file or artifact/)
+        expect(prompt).not.toMatch(/previous reply/)
+        expect(brainPrompt("u", 2)).toMatch(/previous reply .* no transcript/)
+    })
+
+    test("threadOf / cannotRead read Brain's reply", () => {
+        expect(threadOf(wrapped("[10:01] Ron: hi\n[10:02] Ann: ok"))).toBe(
+            "[10:01] Ron: hi\n[10:02] Ann: ok"
+        )
+        // cut off before the end marker: the rest is the thread
+        expect(threadOf("=== THREAD ===\nRon: hi")).toBe("Ron: hi")
+        expect(threadOf("=== THREAD ===\n=== END THREAD ===")).toBeNull()
+        expect(
+            threadOf(
+                "Got all three messages — saving the verbatim transcript as an artifact."
+            )
+        ).toBeNull()
+        expect(threadOf(null)).toBeNull()
+        expect(cannotRead("CANNOT READ: not a member")).toBe("not a member")
+        expect(cannotRead("Sorry.\nCANNOT READ:")).toBe("no reason given")
+        expect(cannotRead("all good")).toBeNull()
+        expect(cannotRead(undefined)).toBeNull()
+    })
+
+    test("a reply without the transcript starts one more Brain job, then fails", async () => {
+        const { ctx, deps } = setup(slack)
+        const note =
+            "Got all three messages — saving the verbatim transcript as an artifact so nothing is lost."
+        const park = { kind: "brain", ref: "brain-1", snapshot: null }
+        deps.brain.start.mockResolvedValueOnce("brain-2")
+        deps.brain.result.mockResolvedValueOnce({
+            status: "done",
+            answer: note,
+        })
+        const retried = await job.resume(ctx, park)
+        expect(retried).toEqual({
+            park: {
+                kind: "brain",
+                ref: "brain-2",
+                snapshot: null,
+                artifact: null,
+                attempt: 2,
+            },
+        })
+        expect(deps.brain.start).toHaveBeenCalledWith({
+            prompt: expect.stringMatching(/previous reply/),
+            title: "cc T-1 enrich (retry)",
+            idempotencyKey: "cc-T1-enrich-j9-a2",
+        })
+        // still running: the attempt count stays with the park
+        deps.brain.result.mockResolvedValueOnce({ status: "running" })
+        expect((await job.resume(ctx, retried.park)).park.attempt).toBe(2)
+        // the retry answers properly
+        deps.brain.result.mockResolvedValueOnce({
+            status: "done",
+            answer: wrapped("Ron: uploads fail"),
+        })
+        const ok = await job.resume(ctx, retried.park)
+        expect(ok.context.slackThread).toBe("Ron: uploads fail")
+        // the retry also had no transcript: fail, no third job
+        deps.brain.result.mockResolvedValueOnce({
+            status: "done",
+            answer: note,
+        })
+        await expect(job.resume(ctx, retried.park)).rejects.toThrow(
+            /Slack thread could not be fetched: Brain's reply had no transcript in it \("Got all three/
+        )
+        expect(deps.brain.start).toHaveBeenCalledTimes(1)
+        // out of time: fail instead of retrying
+        deps.brain.result.mockResolvedValueOnce({
+            status: "done",
+            answer: note,
+        })
+        await expect(
+            job.resume(ctx, { ...park, expired: true })
+        ).rejects.toThrow(/had no transcript/)
+        // the retry cannot start
+        deps.brain.start.mockRejectedValueOnce(new Error("brain down"))
+        deps.brain.result.mockResolvedValueOnce({
+            status: "done",
+            answer: note,
+        })
+        await expect(job.resume(ctx, park)).rejects.toThrow(
+            /Slack thread could not be fetched: brain down/
+        )
+        // Brain says it cannot read the thread: no retry
+        deps.brain.result.mockResolvedValueOnce({
+            status: "done",
+            answer: "CANNOT READ: not in the channel",
+        })
+        await expect(job.resume(ctx, park)).rejects.toThrow(
+            /Brain could not read it \(not in the channel\)/
+        )
+        expect(deps.brain.start).toHaveBeenCalledTimes(2)
     })
 
     test("edits made while the job was queued are kept (baseline from enqueue)", async () => {
@@ -170,7 +273,7 @@ describe("enrich", () => {
         )
         deps.brain.result.mockResolvedValueOnce({
             status: "done",
-            answer: "Ron: uploads fail",
+            answer: wrapped("Ron: uploads fail"),
         })
         const { context } = await job.resume(ctx, park)
         expect(context.artifact).toEqual(park.artifact)
@@ -297,7 +400,7 @@ describe("enrich", () => {
         const { ctx, deps } = setup(slack)
         deps.brain.result.mockResolvedValueOnce({
             status: "done",
-            answer: "Ron: uploads fail",
+            answer: wrapped("Ron: uploads fail"),
         })
         const done = await job.resume(ctx, { kind: "brain", ref: "brain-1" })
         expect(deps.brain.result).toHaveBeenCalledWith("brain-1", {
@@ -623,7 +726,7 @@ describe("enrich", () => {
         const { store, deps } = setup(slack)
         deps.brain.result.mockResolvedValue({
             status: "done",
-            answer: "thread text",
+            answer: wrapped("thread text"),
         })
         const provider = fakeProvider("claude-sdk", (args) => {
             expect(args.prompt).toMatch(/thread text/)
@@ -663,7 +766,7 @@ describe("enrich", () => {
         await store.updateTask(1, { title: "My title", area: "security" })
         deps.brain.result.mockResolvedValueOnce({
             status: "done",
-            answer: "thread",
+            answer: wrapped("thread"),
         })
         const { context } = await job.resume(ctx, {
             ...parked.park,

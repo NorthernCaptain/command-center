@@ -189,6 +189,41 @@ describe("auth matrix: local listener", () => {
         expect(vme.body.features).toBeUndefined()
         const vb = await request(h2.tailnet).get("/api/board")
         expect(vb.body.agents).toBeUndefined()
+        expect(vb.body.agent_tasks).toBeUndefined()
+    })
+
+    test("board: tasks with an agent that the lanes leave out come as agent_tasks", async () => {
+        const h2 = createHarness({
+            deps: {
+                features: { workers: true },
+                boardExtras: [
+                    async () => ({
+                        agents: { 1: "working", 2: "idle", 77: "blocked" },
+                    }),
+                ],
+            },
+        })
+        seedTasks(h2.store)
+        const b = await bearer(request(h2.local).get("/api/board"))
+        // both on the board, 77 does not exist
+        expect(b.body.agent_tasks).toEqual([])
+        // task 2 finished long ago: out of the Done window
+        const board = h2.store.board.bind(h2.store)
+        h2.store.board = async (opts) => {
+            const lanes = await board(opts)
+            for (const l of Object.keys(lanes))
+                lanes[l] = lanes[l].filter((t) => t.id !== 2)
+            return lanes
+        }
+        const b2 = await bearer(request(h2.local).get("/api/board"))
+        expect(b2.body.agent_tasks.map((t) => t.id)).toEqual([2])
+        expect(b2.body.agent_tasks[0].title).toBe("Private")
+    })
+
+    test("board: no agent_tasks without an agents overlay", async () => {
+        seedTasks(h.store)
+        const b = await bearer(request(h.local).get("/api/board"))
+        expect(b.body.agent_tasks).toBeUndefined()
     })
 
     test("wrong bearer is 401", async () => {

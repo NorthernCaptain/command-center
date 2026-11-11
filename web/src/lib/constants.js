@@ -65,6 +65,7 @@ export const SETTINGS_DEFAULTS = {
 export const LANE_LABELS = {
     now: "Now",
     all: "All",
+    herdr: "herdr",
     active: "Active",
     prs: "PRs",
     ready: "Ready",

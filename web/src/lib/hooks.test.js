@@ -650,7 +650,7 @@ describe("worker agent overlay (phase 2)", () => {
         const s = stream()
         const api = {
             board: jest.fn().mockResolvedValue({
-                lanes: { active: [{ id: 1 }] },
+                lanes: { active: [{ id: 1 }], done: [{ id: 2 }] },
                 agents: { 1: "working" },
             }),
         }
@@ -676,6 +676,41 @@ describe("worker agent overlay (phase 2)", () => {
         const { result } = renderHook(() => useBoard({ api }))
         await waitFor(() => expect(result.current.loading).toBe(false))
         expect(result.current.agents).toEqual({})
+        expect(result.current.agentTasks).toEqual([])
+    })
+
+    it("useBoard keeps agent_tasks; an agent on a task without a row reloads", async () => {
+        const s = stream()
+        const api = {
+            board: jest
+                .fn()
+                .mockResolvedValueOnce({
+                    lanes: { active: [{ id: 1 }] },
+                    agents: { 1: "working", 5: "idle" },
+                    agent_tasks: [{ id: 5 }],
+                })
+                .mockResolvedValue({
+                    lanes: { active: [{ id: 1 }] },
+                    agents: { 1: "working", 5: "idle", 9: "working" },
+                    agent_tasks: [{ id: 5 }, { id: 9 }],
+                }),
+        }
+        const { result } = renderHook(() => useBoard({ api, debounceMs: 0 }))
+        await waitFor(() =>
+            expect(result.current.agentTasks).toEqual([{ id: 5 }])
+        )
+        // known rows (lanes or agent_tasks), or an agent going away: no reload
+        emit(s, "agent.updated", 5, { state: "blocked" })
+        emit(s, "agent.updated", 1, { state: "gone" })
+        emit(s, "agent.updated", 8, { state: "gone" })
+        await new Promise((r) => setTimeout(r, 20))
+        expect(api.board).toHaveBeenCalledTimes(1)
+        // a new agent on a task the board has no row for
+        emit(s, "agent.updated", 9, { state: "working" })
+        await waitFor(() =>
+            expect(result.current.agentTasks).toEqual([{ id: 5 }, { id: 9 }])
+        )
+        expect(api.board).toHaveBeenCalledTimes(2)
     })
 
     it("useTask applies agent.updated and refreshes on agent/pr/feedback events", async () => {

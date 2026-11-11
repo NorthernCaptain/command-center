@@ -108,6 +108,8 @@ export function useBoard({ api = defaultApi, debounceMs = 300 } = {}) {
     const [lanes, setLanes] = useState(null)
     // { [taskId]: "working" | "blocked" | "idle" | "done" | "gone" }
     const [agents, setAgents] = useState({})
+    // tasks with an agent that the lanes leave out (done long ago)
+    const [agentTasks, setAgentTasks] = useState([])
     const [error, setError] = useState(null)
     const [loading, setLoading] = useState(true)
     const alive = useRef(true)
@@ -123,6 +125,7 @@ export function useBoard({ api = defaultApi, debounceMs = 300 } = {}) {
             if (!latest()) return
             setLanes({ ...EMPTY_LANES, ...((res && res.lanes) || {}) })
             setAgents((res && res.agents) || {})
+            setAgentTasks((res && res.agent_tasks) || [])
             setError(null)
         } catch (err) {
             if (latest()) setError(err)
@@ -139,13 +142,26 @@ export function useBoard({ api = defaultApi, debounceMs = 300 } = {}) {
         }
     }, [reload])
 
+    // task ids the board has rows for (lanes + agentTasks)
+    const known = useRef(new Set())
+    known.current = new Set(
+        [...Object.values(lanes || {}).flat(), ...agentTasks].map((t) =>
+            String(t.id)
+        )
+    )
+
     const refresh = useDebounced(reload, debounceMs)
     useEvents(BOARD_EVENTS, (evt) => {
         if (evt.type === "agent.updated") {
             // Live overlay only: the agent state is not part of the lanes.
             const tid = eventTaskId(evt)
-            if (tid !== null)
-                setAgents((prev) => setAgentState(prev, tid, agentStateOf(evt)))
+            if (tid === null) return
+            const state = agentStateOf(evt)
+            setAgents((prev) => setAgentState(prev, tid, state))
+            // an agent on a task the board has no row for (done long ago):
+            // fetch the board for that row
+            if (state && state !== "gone" && !known.current.has(String(tid)))
+                refresh()
             return
         }
         if (evt.type === "task.hidden") {
@@ -155,7 +171,7 @@ export function useBoard({ api = defaultApi, debounceMs = 300 } = {}) {
         refresh()
     })
 
-    return { lanes, agents, error, loading, reload }
+    return { lanes, agents, agentTasks, error, loading, reload }
 }
 
 /** Insert or update a comment node in the folded thread list. */

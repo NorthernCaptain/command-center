@@ -609,6 +609,9 @@
 .lane-done .lane-lamp {
     background: var(--green);
 }
+.lane-herdr .lane-lamp {
+    background: var(--live);
+}
 
 .lane-count {
     display: inline-grid;
@@ -791,6 +794,9 @@
 }
 .lane-dot-done {
     background: var(--green);
+}
+.lane-dot-now {
+    background: var(--accent);
 }
 
 /* "All": a small header per lane between the groups */

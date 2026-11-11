@@ -4,15 +4,20 @@
  */
 
 import { useState } from "react"
+import { isLiveAgent } from "./AgentChip.jsx"
+import { useApp } from "./AppContext.jsx"
 import TaskRow from "./TaskRow.jsx"
 import { EmptyState } from "./Skeleton.jsx"
-import { LANE_LABELS } from "../lib/constants.js"
+import { LANE_LABELS, statusLane } from "../lib/constants.js"
 
 // Pill order. "all" is Inbox, Active and PRs in one list (in that order,
-// a small header per lane). "ready" (shaped, not started: set by hand, or a
-// reopened task) only gets a pill while it has tasks.
+// a small header per lane). "herdr" is every task with a live herdr agent,
+// from any lane (owner only, with workers on). "ready" (shaped, not
+// started: set by hand, or a reopened task) only gets a pill while it has
+// tasks.
 const OTHER_LANES = [
     "all",
+    "herdr",
     "inbox",
     "ready",
     "active",
@@ -22,6 +27,18 @@ const OTHER_LANES = [
 ]
 const HIDDEN_WHEN_EMPTY = new Set(["ready"])
 export const ALL_LANES = ["inbox", "active", "prs"]
+// the "herdr" list groups its tasks by lane, in this order
+export const HERDR_LANES = [
+    "now",
+    "active",
+    "prs",
+    "ready",
+    "inbox",
+    "waiting",
+    "done",
+]
+// pills that repeat rows of other lanes: never the default pick
+const VIEWS = new Set(["all", "herdr"])
 // the chosen pill, remembered per device
 const TAB_KEY = "cc.board.tab"
 
@@ -41,13 +58,39 @@ function saveTab(tab) {
     }
 }
 
-const laneTasks = (lanes, lane) =>
+/**
+ * Lane -> its tasks with a live herdr agent (lanes without any left out).
+ * `extra`: tasks with an agent that are not on the board (done before the
+ * board's window), each under its status's lane.
+ */
+export function herdrGroups(lanes, agents = {}, extra = []) {
+    const all = {}
+    for (const l of HERDR_LANES) all[l] = [...(lanes[l] || [])]
+    const seen = new Set(
+        Object.values(all)
+            .flat()
+            .map((t) => String(t.id))
+    )
+    for (const t of extra)
+        if (!seen.has(String(t.id))) all[statusLane(t.status)].push(t)
+    const out = {}
+    for (const l of HERDR_LANES) {
+        const tasks = all[l].filter((t) => isLiveAgent(agents[t.id]))
+        if (tasks.length) out[l] = tasks
+    }
+    return out
+}
+
+const laneTasks = (lanes, lane, agents = {}, extra = []) =>
     lane === "all"
         ? ALL_LANES.flatMap((l) => lanes[l] || [])
-        : lanes[lane] || []
+        : lane === "herdr"
+          ? Object.values(herdrGroups(lanes, agents, extra)).flat()
+          : lanes[lane] || []
 
 const LANE_EMPTY = {
     all: "Nothing open.",
+    herdr: "No herdr agents running.",
     active: "Nothing in flight.",
     prs: "No open PRs.",
     ready: "Nothing queued up.",
@@ -85,22 +128,27 @@ function Rows({ tasks, lane, rowProps }) {
     )
 }
 
-/** The "All" list: Inbox, Active and PRs, each under a small header. */
-function AllGroups({ lanes, rowProps }) {
-    return ALL_LANES.filter((l) => (lanes[l] || []).length).map((l) => (
-        <div key={l} className="lane-group">
-            <h3 className="lane-sep">
-                <span className={`lane-dot lane-dot-${l}`} aria-hidden="true" />
-                {LANE_LABELS[l]}
-                <span className="lane-sep-count">{lanes[l].length}</span>
-            </h3>
-            <Rows tasks={lanes[l]} lane={l} rowProps={rowProps} />
-        </div>
-    ))
+/** The "All" and "herdr" lists: rows under a small header per lane. */
+function Groups({ lanes, order, rowProps }) {
+    return order
+        .filter((l) => (lanes[l] || []).length)
+        .map((l) => (
+            <div key={l} className="lane-group">
+                <h3 className="lane-sep">
+                    <span
+                        className={`lane-dot lane-dot-${l}`}
+                        aria-hidden="true"
+                    />
+                    {LANE_LABELS[l]}
+                    <span className="lane-sep-count">{lanes[l].length}</span>
+                </h3>
+                <Rows tasks={lanes[l]} lane={l} rowProps={rowProps} />
+            </div>
+        ))
 }
 
 function Lane({ lane, lanes, rowProps, current }) {
-    const tasks = laneTasks(lanes, lane)
+    const tasks = laneTasks(lanes, lane, rowProps.agents, rowProps.agentTasks)
     const note = laneNote(lane, tasks)
     return (
         <section
@@ -124,7 +172,17 @@ function Lane({ lane, lanes, rowProps, current }) {
                         : LANE_EMPTY[lane]}
                 </p>
             ) : lane === "all" ? (
-                <AllGroups lanes={lanes} rowProps={rowProps} />
+                <Groups lanes={lanes} order={ALL_LANES} rowProps={rowProps} />
+            ) : lane === "herdr" ? (
+                <Groups
+                    lanes={herdrGroups(
+                        lanes,
+                        rowProps.agents,
+                        rowProps.agentTasks
+                    )}
+                    order={HERDR_LANES}
+                    rowProps={rowProps}
+                />
             ) : (
                 <Rows tasks={tasks} lane={lane} rowProps={rowProps} />
             )}
@@ -140,25 +198,39 @@ function Lane({ lane, lanes, rowProps, current }) {
 export default function Board({
     lanes,
     agents = {},
+    agentTasks = [],
     isOwner,
     onDone,
     onSnooze,
     onStart,
     onFocus,
 }) {
+    const { features } = useApp()
+    const herdr = Boolean(isOwner && features.workers)
     const shown = OTHER_LANES.filter(
-        (l) => !HIDDEN_WHEN_EMPTY.has(l) || (lanes[l] || []).length
+        (l) =>
+            (l !== "herdr" || herdr) &&
+            (!HIDDEN_WHEN_EMPTY.has(l) || (lanes[l] || []).length)
     )
-    // the default pill: the first lane with tasks ("all" only when picked)
+    // the default pill: the first lane with tasks ("all" and "herdr" only
+    // when picked)
     const firstNonEmpty =
-        shown.find((l) => l !== "all" && (lanes[l] || []).length) || "inbox"
+        shown.find((l) => !VIEWS.has(l) && (lanes[l] || []).length) || "inbox"
     const [tab, setTab] = useState(savedTab)
     const current = tab && shown.includes(tab) ? tab : firstNonEmpty
-    const total = Object.values(lanes).reduce(
-        (n, l) => n + (l ? l.length : 0),
-        0
-    )
-    const rowProps = { agents, isOwner, onDone, onSnooze, onStart, onFocus }
+    // rows to show: lane tasks, plus (herdr pill) agents on off-board tasks
+    const total =
+        Object.values(lanes).reduce((n, l) => n + (l ? l.length : 0), 0) +
+        (herdr ? laneTasks(lanes, "herdr", agents, agentTasks).length : 0)
+    const rowProps = {
+        agents,
+        agentTasks,
+        isOwner,
+        onDone,
+        onSnooze,
+        onStart,
+        onFocus,
+    }
 
     function pick(l) {
         setTab(l)
@@ -191,16 +263,16 @@ export default function Board({
                     >
                         {LANE_LABELS[l]}
                         <span className="lane-count">
-                            {laneTasks(lanes, l).length}
+                            {laneTasks(lanes, l, agents, agentTasks).length}
                         </span>
                     </button>
                 ))}
             </div>
             <div className="lanes-grid">
-                {/* "all" repeats rows of other lanes: rendered only while
-                    it is the one shown */}
+                {/* "all" and "herdr" repeat rows of other lanes:
+                    rendered only while shown */}
                 {shown
-                    .filter((l) => l !== "all" || current === "all")
+                    .filter((l) => !VIEWS.has(l) || current === l)
                     .map((l) => (
                         <Lane
                             key={l}

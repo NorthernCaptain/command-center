@@ -483,6 +483,29 @@ export function createApp({
 
     api.get("/events", createSseHandler({ bus, store, auth, log, ...sse }))
 
+    /**
+     * Tasks with an agent that the lanes leave out (done before the board's
+     * window): the web "herdr" pill lists them too. A task that can't be
+     * read is skipped.
+     */
+    async function offBoardTasks(lanes, agents) {
+        const onBoard = new Set(
+            Object.values(lanes)
+                .flat()
+                .map((t) => String(t.id))
+        )
+        const out = []
+        for (const id of Object.keys(agents)) {
+            if (onBoard.has(id)) continue
+            try {
+                out.push((await store.getTask(Number(id))).task)
+            } catch {
+                // deleted or unreadable: nothing to list
+            }
+        }
+        return out
+    }
+
     // board
     api.get("/board", async (req, res) => {
         const q = parse(
@@ -508,6 +531,8 @@ export function createApp({
         }
         const extras = {}
         for (const fn of boardExtras) Object.assign(extras, await fn())
+        if (extras.agents)
+            extras.agent_tasks = await offBoardTasks(lanes, extras.agents)
         res.json({ ...extras, lanes })
     })
 

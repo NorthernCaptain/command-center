@@ -110,7 +110,7 @@ export function useTopbarSlot() {
 export default function Home() {
     const { isOwner, features } = useApp()
     const toast = useToast()
-    const { lanes, agents, loading, error, reload } = useBoard()
+    const { lanes, agents, agentTasks, loading, error, reload } = useBoard()
     const { q, setQ, results, searching } = useSearch(isOwner)
     const [command, setCommand] = useState(null)
     const searchRef = useRef(null)
@@ -288,6 +288,7 @@ export default function Home() {
                 <Board
                     lanes={lanes}
                     agents={agents}
+                    agentTasks={agentTasks}
                     isOwner={isOwner}
                     onDone={onDone}
                     onSnooze={onSnooze}

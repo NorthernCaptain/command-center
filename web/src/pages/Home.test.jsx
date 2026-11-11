@@ -763,6 +763,145 @@ describe("Home: phase 2/3", () => {
         expect(screen.getByLabelText("Agent idle")).toBeInTheDocument()
     })
 
+    it("herdr: every task with a live agent, from any lane, grouped by lane", async () => {
+        setup(
+            {
+                "GET /api/board": {
+                    ...prBoard,
+                    // 5 (done) has a gone agent: not attached any more
+                    agents: {
+                        1: "idle",
+                        2: "working",
+                        8: "blocked",
+                        5: "gone",
+                    },
+                },
+                "GET /api/digest": { digest: null },
+            },
+            { features: ALL_FEATURES }
+        )
+        await screen.findByText("iOS crash on upload")
+        expect(
+            screen
+                .getAllByRole("tab")
+                .map((t) => t.textContent.replace(/\d+$/, ""))
+        ).toEqual(["All", "herdr", "Inbox", "Active", "PRs", "Waiting", "Done"])
+        const tab = screen.getByRole("tab", { name: /herdr/ })
+        expect(tab).toHaveTextContent("3")
+        // never the default pill, and not rendered until picked
+        expect(tab).toHaveAttribute("aria-selected", "false")
+        expect(document.getElementById("lane-herdr")).toBeNull()
+        fireEvent.click(tab)
+        const lane = document.getElementById("lane-herdr")
+        expect(lane).toHaveClass("is-current")
+        expect(
+            within(lane)
+                .getAllByRole("heading", { level: 3 })
+                .map((h) => h.textContent)
+        ).toEqual(["Now1", "Active1", "PRs1"])
+        const ids = () =>
+            [...lane.querySelectorAll(".row")].map((r) => r.dataset.taskId)
+        expect(ids()).toEqual(["1", "2", "8"])
+        expect(lane.querySelector(".lane-dot").className).toBe(
+            "lane-dot lane-dot-now"
+        )
+        // live: an agent that goes away leaves, a new one joins
+        act(() => emit(stream, "agent.updated", 2, { state: "gone" }))
+        act(() => emit(stream, "agent.updated", 3, { state: "working" }))
+        expect(ids()).toEqual(["1", "8", "3"])
+        expect(tab).toHaveTextContent("3")
+        act(() => emit(stream, "agent.updated", 1, { state: null }))
+        expect(ids()).toEqual(["8", "3"])
+    })
+
+    it("herdr says so when no agent runs", async () => {
+        setup(
+            {
+                "GET /api/board": { lanes: board.lanes },
+                "GET /api/digest": { digest: null },
+            },
+            { features: ALL_FEATURES }
+        )
+        await screen.findByText("iOS crash on upload")
+        fireEvent.click(screen.getByRole("tab", { name: /herdr/ }))
+        expect(screen.getByText("No herdr agents running.")).toBeInTheDocument()
+    })
+
+    it("herdr lists agents on tasks done before the board's window", async () => {
+        const old = sampleTask({
+            id: 40,
+            title: "Old shipped",
+            status: "done",
+            done_at: "2026-09-01T09:00:00Z",
+        })
+        setup(
+            {
+                "GET /api/board": {
+                    lanes: board.lanes,
+                    agents: { 2: "working", 40: "idle" },
+                    // 2 is on the board already: listed once
+                    agent_tasks: [old, sampleTask({ id: 2 })],
+                },
+                "GET /api/digest": { digest: null },
+            },
+            { features: ALL_FEATURES }
+        )
+        await screen.findByText("iOS crash on upload")
+        const tab = screen.getByRole("tab", { name: /herdr/ })
+        expect(tab).toHaveTextContent("2")
+        fireEvent.click(tab)
+        const lane = document.getElementById("lane-herdr")
+        expect(
+            within(lane)
+                .getAllByRole("heading", { level: 3 })
+                .map((h) => h.textContent)
+        ).toEqual(["Active1", "Done1"])
+        expect(within(lane).getByText("Old shipped")).toBeInTheDocument()
+        // not added to the Done lane itself
+        expect(
+            within(document.getElementById("lane-done")).queryByText(
+                "Old shipped"
+            )
+        ).toBeNull()
+    })
+
+    it("an empty board with an agent on an old task still shows herdr", async () => {
+        setup(
+            {
+                "GET /api/board": {
+                    lanes: {},
+                    agents: { 40: "idle" },
+                    agent_tasks: [
+                        sampleTask({
+                            id: 40,
+                            title: "Old shipped",
+                            status: "done",
+                        }),
+                    ],
+                },
+                "GET /api/digest": { digest: null },
+            },
+            { features: ALL_FEATURES }
+        )
+        const tab = await screen.findByRole("tab", { name: /herdr/ })
+        expect(screen.queryByText("No tasks yet")).toBeNull()
+        fireEvent.click(tab)
+        expect(
+            within(document.getElementById("lane-herdr")).getByText(
+                "Old shipped"
+            )
+        ).toBeInTheDocument()
+    })
+
+    it("no herdr pill for a viewer", async () => {
+        setup(
+            { "GET /api/board": prBoard },
+            { features: ALL_FEATURES, role: "viewer" }
+        )
+        await screen.findByText("iOS crash on upload")
+        expect(screen.queryByRole("tab", { name: /herdr/ })).toBeNull()
+    })
+
     it("search results carry the agent chip", async () => {
         setup(
             {
@@ -793,6 +932,7 @@ describe("Home: phase 2/3", () => {
         })
         await screen.findByText("iOS crash on upload")
         expect(screen.queryByLabelText("Agent working")).toBeNull()
+        expect(screen.queryByRole("tab", { name: /herdr/ })).toBeNull()
         fireEvent.click(screen.getByRole("tab", { name: /PRs/ }))
         expect(screen.queryByText("create PR")).toBeNull()
         expect(
