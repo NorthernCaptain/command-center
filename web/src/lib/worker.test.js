@@ -6,6 +6,7 @@
 import { ApiError } from "./api.js"
 import {
     changeRecordBlocker,
+    clearsWhenSeen,
     TABS,
     actionToast,
     blockingDeliverables,
@@ -273,6 +274,29 @@ describe("deliverable state (what blocks Done)", () => {
             "aws-batch",
         ])
         expect(blockingDeliverables(null, [])).toEqual([])
+    })
+})
+
+describe("clearsWhenSeen", () => {
+    it("a reminder or snooze end that nothing replaced", () => {
+        expect(clearsWhenSeen(null)).toBe(false)
+        expect(
+            clearsWhenSeen({ now: false, now_reason: "x", now_seen: "x" })
+        ).toBe(false)
+        expect(clearsWhenSeen({ now: true, now_reason: "" })).toBe(false)
+        expect(
+            clearsWhenSeen({ now: true, now_reason: "x", now_seen: "x" })
+        ).toBe(true)
+        expect(
+            clearsWhenSeen({
+                now: true,
+                now_reason: "Ready for PR",
+                now_seen: "x",
+            })
+        ).toBe(false)
+        expect(clearsWhenSeen({ now: true, now_reason: "Snooze ended" })).toBe(
+            true
+        )
     })
 })
 

@@ -1461,6 +1461,147 @@ describe("Task page", () => {
     })
 })
 
+describe("Task page: Now flags cleared once seen", () => {
+    const withFlags = (flags) => {
+        const r = taskResponse()
+        r.task = { ...r.task, flags: { ...r.task.flags, now: true, ...flags } }
+        return r
+    }
+
+    it("opening a snoozed task that came back clears Snooze ended", async () => {
+        const res = withFlags({ now_reason: "Snooze ended" })
+        const f = mockFetch({
+            "GET /api/tasks/12": res,
+            "POST /api/tasks/12/seen": {
+                cleared: true,
+                task: {
+                    ...res.task,
+                    flags: { ...res.task.flags, now: false, now_reason: null },
+                },
+                revision: "t2",
+            },
+        })
+        renderWithApp(<TaskPage id={12} />)
+        await screen.findByRole("heading", { name: "Fix lambda timeout" })
+        await waitFor(() =>
+            expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(1)
+        )
+        await waitFor(() =>
+            expect(screen.queryByText("Snooze ended")).not.toBeInTheDocument()
+        )
+        expect(f.find("POST", "/api/tasks/12/seen")[0].body).toEqual({
+            updated_at: res.task.updated_at,
+        })
+        // the next snooze ends while the page stays open: a new version,
+        // seen again
+        act(() =>
+            emit(stream, "task.updated", 12, {
+                task: {
+                    ...res.task,
+                    updated_at: "2026-11-08T09:00:00Z",
+                    flags: { ...res.task.flags, now_reason: "Snooze ended" },
+                },
+            })
+        )
+        await waitFor(() =>
+            expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(2)
+        )
+        expect(f.find("POST", "/api/tasks/12/seen")[1].body).toEqual({
+            updated_at: "2026-11-08T09:00:00Z",
+        })
+    })
+
+    it("a reminder that arrives in a background tab waits until it is visible", async () => {
+        Object.defineProperty(document, "visibilityState", {
+            configurable: true,
+            get: () => "hidden",
+        })
+        const f = mockFetch({
+            "GET /api/tasks/12": withFlags({ now_reason: "Snooze ended" }),
+            "POST /api/tasks/12/seen": { cleared: false },
+        })
+        renderWithApp(<TaskPage id={12} />)
+        await screen.findByText("Snooze ended")
+        expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(0)
+        act(() => {
+            delete document.visibilityState
+            document.dispatchEvent(new Event("visibilitychange"))
+        })
+        await waitFor(() =>
+            expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(1)
+        )
+        // cleared: false (e.g. replaced meanwhile) keeps it
+        expect(screen.getByText("Snooze ended")).toBeInTheDocument()
+    })
+
+    it("a late acknowledgement never overwrites newer task data", async () => {
+        const res = withFlags({ now_reason: "Snooze ended" })
+        let answer
+        const f = mockFetch({
+            "GET /api/tasks/12": res,
+            "POST /api/tasks/12/seen": () =>
+                new Promise((resolve) => {
+                    answer = resolve
+                }),
+        })
+        renderWithApp(<TaskPage id={12} />)
+        await waitFor(() =>
+            expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(1)
+        )
+        // a newer update arrives first
+        act(() =>
+            emit(stream, "task.updated", 12, {
+                task: {
+                    ...res.task,
+                    updated_at: "2026-11-08T09:00:00Z",
+                    flags: { ...res.task.flags, now_reason: "Ready for PR" },
+                },
+            })
+        )
+        await screen.findByText("Ready for PR")
+        await act(async () => {
+            answer(
+                reply(200, {
+                    cleared: true,
+                    task: {
+                        ...res.task,
+                        flags: {
+                            ...res.task.flags,
+                            now: false,
+                            now_reason: null,
+                        },
+                    },
+                    revision: "t2",
+                })
+            )
+        })
+        expect(screen.getByText("Ready for PR")).toBeInTheDocument()
+    })
+
+    it("other Now reasons stay; a failed call is ignored", async () => {
+        const f = mockFetch({
+            "GET /api/tasks/12": withFlags({ now_reason: "Ready for PR" }),
+        })
+        renderWithApp(<TaskPage id={12} />)
+        await screen.findByText("Ready for PR")
+        expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(0)
+        cleanup()
+
+        const g = mockFetch({
+            "GET /api/tasks/12": withFlags({
+                now_reason: "Call Ron",
+                now_seen: "Call Ron",
+            }),
+            "POST /api/tasks/12/seen": reply(500, { error: "boom" }),
+        })
+        renderWithApp(<TaskPage id={12} />)
+        await waitFor(() =>
+            expect(g.find("POST", "/api/tasks/12/seen")).toHaveLength(1)
+        )
+        expect(screen.getByText("Call Ron")).toBeInTheDocument()
+    })
+})
+
 describe("Task page: worker flow (phase 2)", () => {
     const PR = "https://github.com/acme/aws-lambda/pull/812"
 

@@ -30,6 +30,7 @@ import { EmptyState, SkeletonDoc } from "../components/Skeleton.jsx"
 import TaskHeader from "../components/TaskHeader.jsx"
 import useDockHeight from "../lib/useDockHeight.js"
 import useKeyboardInset from "../lib/useKeyboardInset.js"
+import usePageVisible from "../lib/usePageVisible.js"
 import {
     ActivityList,
     LinksList,
@@ -57,6 +58,7 @@ import { snoozeTask } from "../lib/snooze.js"
 import {
     blockingDeliverables,
     changeRecordBlocker,
+    clearsWhenSeen,
     actionToast,
     pollError,
     visibleTabs,
@@ -169,6 +171,45 @@ export default function TaskPage({ id }) {
             setChat(null)
         } else setChat(last)
     }, [isOwner, loadedId, data])
+
+    // opened: a Now flag raised only to be seen (reminder, snooze end) is
+    // cleared, once per task version (a later reminder is a new version),
+    // and only while the tab is visible
+    // (a reminder that fires while the page sits in a background tab waits
+    // until Leo comes back to it)
+    const pageVisible = usePageVisible()
+    const seenFor = useRef(null)
+    const nowFlags = data && data.task ? data.task.flags : null
+    const seenKey =
+        pageVisible && isOwner && loadedId && clearsWhenSeen(nowFlags)
+            ? `${loadedId}:${data.task.updated_at}`
+            : null
+    const seenVersion = data && data.task ? data.task.updated_at : null
+    useEffect(() => {
+        if (!seenKey || seenFor.current === seenKey) return
+        seenFor.current = seenKey
+        api.markSeen(loadedId, seenVersion)
+            .then((res) => {
+                if (!res || !res.cleared) return
+                // only onto the version it acknowledged: newer task data
+                // (a live update that came first) is kept
+                setData((prev) =>
+                    prev &&
+                    prev.task &&
+                    String(prev.task.id) === loadedId &&
+                    prev.task.updated_at === seenVersion
+                        ? {
+                              ...prev,
+                              task: res.task || prev.task,
+                              revision: res.revision || prev.revision,
+                          }
+                        : prev
+                )
+            })
+            .catch(() => {
+                // best effort: it stays in Now until the next visit
+            })
+    }, [seenKey, loadedId, seenVersion, setData])
 
     if (hidden) {
         return (

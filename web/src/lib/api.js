@@ -176,6 +176,12 @@ export function createApi({ fetch: fetchImpl, base = "" } = {}) {
         deleteFile: (id, name) =>
             request("DELETE", `${t(id)}/files/${enc(name)}`),
         enrich: (id) => request("POST", `${t(id)}/enrich`),
+        /**
+         * The owner saw the task (version updatedAt): clears a reminder /
+         * snooze-end Now unless the task changed since.
+         */
+        markSeen: (id, updatedAt) =>
+            request("POST", `${t(id)}/seen`, { updated_at: updatedAt }),
         command: (text) => request("POST", "/api/command", { text }),
         getJob: (jid) => request("GET", `/api/jobs/${enc(jid)}`),
         cancelJob: (jid) => request("POST", `/api/jobs/${enc(jid)}/cancel`),

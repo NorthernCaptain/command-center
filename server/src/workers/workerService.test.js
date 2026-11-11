@@ -3043,6 +3043,32 @@ describe("auto clean and close after done", () => {
         await env2.svc.stop()
     })
 
+    test("reopened before its turn on the task chain: nothing queued or closed", async () => {
+        for (const slug of ["k7q2", null]) {
+            const env = await withAgent({}, { slug })
+            const kickoff = env.herdr.agentPrompt.mock.calls.length
+            const task = env.store.tasks.get(1)
+            task.status = "done"
+            // the reopen lands between the first read and the chain
+            const real = env.store.getTask
+            let reads = 0
+            env.store.getTask = jest.fn(async (...a) => {
+                if (++reads === 2) task.status = "active"
+                return real(...a)
+            })
+            expect(await env.svc.autoCloseOnDone(1)).toEqual({
+                skipped: "status",
+            })
+            expect((await env.sessions.current(1)).close_after).toBeFalsy()
+            expect(env.outbox.rows.some((r) => r.reason === "clean")).toBe(
+                false
+            )
+            expect(env.herdr.agentPrompt).toHaveBeenCalledTimes(kickoff)
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            await env.svc.stop()
+        }
+    })
+
     test("other errors propagate; other bus events are ignored", async () => {
         const env = await withAgent()
         env.store.tasks.get(1).status = "done"

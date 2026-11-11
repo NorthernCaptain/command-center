@@ -3,6 +3,8 @@
  * MIT license.
  */
 import {
+    clearsWhenSeen,
+    SNOOZE_ENDED,
     canTransition,
     assertTransition,
     TransitionError,
@@ -130,6 +132,23 @@ describe("snooze helpers", () => {
             laneOf({ ...base, ...p, flags: { ...base.flags, ...p.flags } })
         ).not.toBe("now")
     })
+    test("clearsWhenSeen: a reminder or snooze end nothing replaced", () => {
+        expect(clearsWhenSeen(null)).toBe(false)
+        expect(
+            clearsWhenSeen({ now: false, now_reason: "x", now_seen: "x" })
+        ).toBe(false)
+        expect(clearsWhenSeen({ now: true, now_reason: null })).toBe(false)
+        expect(
+            clearsWhenSeen({ now: true, now_reason: "x", now_seen: "x" })
+        ).toBe(true)
+        expect(
+            clearsWhenSeen({ now: true, now_reason: "y", now_seen: "x" })
+        ).toBe(false)
+        expect(clearsWhenSeen({ now: true, now_reason: SNOOZE_ENDED })).toBe(
+            true
+        )
+    })
+
     test("withSnoozeFlags keeps other patch fields and flags", () => {
         const input = { title: "x", flags: { error: "e" } }
         expect(withSnoozeFlags(input)).toEqual({

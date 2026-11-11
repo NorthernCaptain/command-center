@@ -15,7 +15,11 @@
 
 import { z } from "zod"
 import { AREAS, STATUSES } from "../../contracts/schemas.js"
-import { canTransition, snoozePatch } from "../../contracts/lifecycle.js"
+import {
+    canTransition,
+    SNOOZE_ENDED,
+    snoozePatch,
+} from "../../contracts/lifecycle.js"
 import { enqueueCloseOut, openDeliverables } from "./close_out.js"
 import { nowLine, systemPrompt, untrusted } from "../prompts.js"
 import { assertTaskChangeRecord } from "../../phase3/soc2.js"
@@ -184,7 +188,7 @@ const HANDLERS = {
                 task_id: a.task_id,
                 fire_at: until,
                 action: "surface",
-                payload: { reason: "Snooze ended", snooze: true },
+                payload: { reason: SNOOZE_ENDED, snooze: true },
                 note: "snooze (command)",
             })
             return `T-${a.task_id}: snoozed until ${until}`

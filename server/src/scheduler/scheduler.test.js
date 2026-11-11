@@ -496,6 +496,9 @@ describe("tick: surface", () => {
             enriching: false,
             now: true,
             now_reason: "Talk to Ron",
+            // cleared once Leo opens the task
+            now_seen: "Talk to Ron",
+            now_seen_id: expect.any(String),
             error: null,
         })
         expect(store.updateTask).toHaveBeenCalledWith(

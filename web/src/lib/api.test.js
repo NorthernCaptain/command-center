@@ -165,6 +165,7 @@ describe("routes", () => {
         [() => api.createAsana(5), "POST", "/api/tasks/5/asana"],
         [() => api.closeOut(5), "POST", "/api/tasks/5/close-out"],
         [() => api.enrich(5), "POST", "/api/tasks/5/enrich"],
+        [() => api.markSeen(5, "v1"), "POST", "/api/tasks/5/seen"],
         [
             () => api.command("snooze all"),
             "POST",

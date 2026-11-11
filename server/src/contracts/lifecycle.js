@@ -163,6 +163,21 @@ export function withSnoozeFlags(patch) {
     }
 }
 
+/** Now reason of a snooze that ended (the snooze-end schedule). */
+export const SNOOZE_ENDED = "Snooze ended"
+
+/**
+ * Is the task in Now only to be seen (a reminder or snooze end raised it,
+ * nothing since replaced the reason)? Opening the task clears it then.
+ * "Snooze ended" counts without the mark (flags raised before it existed).
+ */
+export function clearsWhenSeen(flags) {
+    if (!flags || !flags.now || !flags.now_reason) return false
+    return (
+        flags.now_reason === flags.now_seen || flags.now_reason === SNOOZE_ENDED
+    )
+}
+
 /** Patch for snoozing a task until `until` (ISO). */
 export function snoozePatch(until) {
     return withSnoozeFlags({ status: "waiting", snooze_until: until })

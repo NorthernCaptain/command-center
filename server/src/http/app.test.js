@@ -1247,6 +1247,78 @@ describe("owner: patch, artifact, history", () => {
         expect(call[3]).toEqual({ actor: "me", baseRevision: undefined })
     })
 
+    test("seen clears a Now flag raised only to be seen, nothing else", async () => {
+        const V = "2026-11-07T12:00:00.000Z" // makeTask updated_at
+        const seen = (id, updatedAt = V) =>
+            bearer(
+                request(h.local)
+                    .post(`/api/tasks/${id}/seen`)
+                    .send({ updated_at: updatedAt })
+            )
+        const flags = (over) => ({
+            enriching: false,
+            now: true,
+            error: null,
+            ...over,
+        })
+        // a reminder: cleared
+        h.store.seed(
+            makeTask(3, {
+                flags: flags({ now_reason: "Call Ron", now_seen: "Call Ron" }),
+            })
+        )
+        let res = await seen(3)
+        expect(res.status).toBe(200)
+        expect(res.body.cleared).toBe(true)
+        expect(res.body.task.flags).toMatchObject({
+            now: false,
+            now_reason: null,
+            now_seen: null,
+        })
+        const call = h.store.calls.find((c) => c[0] === "updateTask")
+        expect(call[3]).toEqual({ actor: "me", reason: "seen" })
+        // a snooze end raised before the mark existed: cleared too
+        h.store.seed(
+            makeTask(4, { flags: flags({ now_reason: "Snooze ended" }) })
+        )
+        expect((await seen(4)).body.cleared).toBe(true)
+        // the reason was replaced since (e.g. Ready for PR): kept
+        h.store.seed(
+            makeTask(5, {
+                flags: flags({
+                    now_reason: "Ready for PR",
+                    now_seen: "Call Ron",
+                }),
+            })
+        )
+        expect((await seen(5)).body).toEqual({ cleared: false })
+        expect((await h.store.getTask(5)).task.flags.now).toBe(true)
+        // the page showed an older version (a newer reminder fired since)
+        h.store.seed(
+            makeTask(7, {
+                flags: flags({ now_reason: "Call Ron", now_seen: "Call Ron" }),
+            })
+        )
+        expect((await seen(7, "2026-11-07T11:00:00.000Z")).body).toEqual({
+            cleared: false,
+            stale: true,
+        })
+        expect((await h.store.getTask(7)).task.flags.now).toBe(true)
+        expect(
+            (await bearer(request(h.local).post("/api/tasks/7/seen").send({})))
+                .status
+        ).toBe(400)
+        // not in Now, unknown task
+        expect((await seen(2)).body).toEqual({ cleared: false })
+        expect((await seen(99)).status).toBe(404)
+        // without a task lock in the store it still works
+        h.store.withTaskLock = undefined
+        h.store.seed(
+            makeTask(6, { flags: flags({ now_reason: "Snooze ended" }) })
+        )
+        expect((await seen(6)).body.cleared).toBe(true)
+    })
+
     test("stale base_revision -> 409 with current", async () => {
         const res = await patch(2, {
             patch: { title: "x" },

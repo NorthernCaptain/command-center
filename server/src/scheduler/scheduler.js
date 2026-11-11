@@ -167,7 +167,14 @@ export function createScheduler({
                 return { skipped: true, task }
             }
             const patch = {
-                flags: { ...task.flags, now: true, now_reason: reason },
+                // seen once Leo opens the task (clearsWhenSeen)
+                flags: {
+                    ...task.flags,
+                    now: true,
+                    now_reason: reason,
+                    now_seen: reason,
+                    now_seen_id: String(schedule.id),
+                },
                 snooze_until: null,
             }
             if (task.status === "waiting") {

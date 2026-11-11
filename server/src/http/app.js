@@ -18,6 +18,8 @@ import {
     LANES,
     viewerTask,
     withSnoozeFlags,
+    clearsWhenSeen,
+    SNOOZE_ENDED,
 } from "../contracts/lifecycle.js"
 import {
     AnchorSchema,
@@ -868,7 +870,7 @@ export function createApp({
                     task_id: id,
                     fire_at: patch.snooze_until,
                     action: "surface",
-                    payload: { reason: "Snooze ended", snooze: true },
+                    payload: { reason: SNOOZE_ENDED, snooze: true },
                     note: "snooze",
                 })
             }
@@ -878,6 +880,49 @@ export function createApp({
             return
         }
         res.json({ task: result.task, revision: result.revision })
+    })
+
+    /**
+     * The owner opened the task: a Now flag that was only there to be seen
+     * (a reminder or snooze end, lifecycle.js clearsWhenSeen) is cleared.
+     * Other Now reasons stay until their cause is resolved. updated_at: the
+     * version of the task the page showed; a task changed since (e.g. a
+     * newer reminder fired) is left alone, and the page asks again with
+     * the version it then shows.
+     */
+    const SeenBody = z.object({ updated_at: z.string().min(1).max(64) })
+    api.post("/tasks/:id/seen", async (req, res) => {
+        const id = parseTaskId(req.params.id)
+        const body = parse(SeenBody, req.body || {})
+        const locked =
+            typeof store.withTaskLock === "function"
+                ? (fn) => store.withTaskLock(id, fn)
+                : (fn) => fn()
+        const out = await locked(async () => {
+            const { task } = await store.getTask(id)
+            if (task.updated_at !== body.updated_at)
+                return { cleared: false, stale: true }
+            if (!clearsWhenSeen(task.flags)) return { cleared: false }
+            const result = await store.updateTask(
+                id,
+                {
+                    flags: {
+                        ...task.flags,
+                        now: false,
+                        now_reason: null,
+                        now_seen: null,
+                        now_seen_id: null,
+                    },
+                },
+                { actor: "me", reason: "seen" }
+            )
+            return {
+                cleared: true,
+                task: result.task,
+                revision: result.revision,
+            }
+        })
+        res.json(out)
     })
 
     // artifact

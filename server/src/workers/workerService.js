@@ -1728,7 +1728,10 @@ export function createWorkerService({
             throw conflict("no_slug", `T-${id} has no folders to clean`)
         // Queue the prompt and record its row on the task chain: no flush
         // can send it before the session knows which row to wait for.
-        const { cur, row, duplicate } = await serial(id, async () => {
+        const queuedClose = await serial(id, async () => {
+            // automatic: the task may have been reopened since the done
+            // that started it (cancelCleanOnReopen ran first): leave it
+            if (auto && !(await stillDone(id))) return null
             const c = await idleAgent(id, { busyOk: auto })
             const dup = ((await outbox.pending(id)) || []).find(
                 (r) => r.reason === "clean"
@@ -1749,6 +1752,8 @@ export function createWorkerService({
             })
             return { cur: c, row: r, duplicate: Boolean(dup) }
         })
+        if (!queuedClose) return { skipped: "status" }
+        const { cur, row, duplicate } = queuedClose
         const closeAfter = `clean:${row.id}`
         const delivery = duplicate
             ? { status: "queued", outbox_id: row.id, duplicate: true }
@@ -1770,6 +1775,11 @@ export function createWorkerService({
             actor
         )
         return { delivery, close_after: closeAfter }
+    }
+
+    /** Is the task still done (read now, on the task chain)? */
+    async function stillDone(id) {
+        return (await store.getTask(id)).task.status === "done"
     }
 
     const SKIP_CODES = ["no_agent", "agent_not_found", "agent_busy"]
@@ -1802,9 +1812,11 @@ export function createWorkerService({
                     auto: true,
                 })
             return await serial(id, async () =>
-                closeWorkspace(id, await idleAgent(id), "system", {
-                    after: "done",
-                })
+                (await stillDone(id))
+                    ? closeWorkspace(id, await idleAgent(id), "system", {
+                          after: "done",
+                      })
+                    : { skipped: "status" }
             )
         } catch (err) {
             if (!SKIP_CODES.includes(err && err.code)) throw err

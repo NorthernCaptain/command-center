@@ -151,6 +151,14 @@ export const TaskSchema = z.object({
             now: z.boolean().default(false),
             now_reason: z.string().nullable().default(null),
             error: z.string().nullable().default(null),
+            // the Now reason that the owner opening the task clears (set by
+            // schedule surfaces: reminders, snooze end); lifecycle.js
+            // clearsWhenSeen
+            now_seen: z.string().nullable().optional(),
+            // the schedule that raised it: every surface is a change of its
+            // own (a same-reason reminder bumps updated_at, which POST seen
+            // compares)
+            now_seen_id: z.string().nullable().optional(),
         })
         .default({
             enriching: false,
