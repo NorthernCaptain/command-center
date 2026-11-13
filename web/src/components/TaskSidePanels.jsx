@@ -145,6 +145,13 @@ function eventText(e) {
     if (e.type === "updated" && Array.isArray(d.changed))
         return `updated ${d.changed.join(", ")}`
     if (e.type === "created") return "created the task"
+    if (e.type === "spun_off")
+        return d.moved_from
+            ? `T-${d.task_id} moved here from T-${d.moved_from}`
+            : `spun off T-${d.task_id}${d.by ? ` (from T-${d.by})` : ""}`
+    if (e.type === "reparented")
+        return `moved under T-${d.to}${d.from ? ` (was under T-${d.from})` : ""}`
+    if (e.type === "spin_off_moved") return `spin-off T-${d.task_id} moved away`
     if (e.type === "slack_asana_link")
         return `asked Brain to post the Asana link in the Slack thread (${d.brain_job || "job"})`
     if (e.type === "slack_asana_link_failed")
@@ -181,74 +188,135 @@ const LINK_GLYPH = {
     other: "↗",
 }
 
+// a task link's role in the Links tab: the parent (role "parent", or the
+// "spun off from T-n" label of spin-offs made before roles), a spin-off,
+// or any other task; null for links that are not tasks
+const LEGACY_PARENT_RE = /^spun off from T-\d+/i
+const TASK_ROLE_ORDER = ["parent", "spin-off", "task"]
+
+function taskRole(l) {
+    if (!isAppPath(l.url)) return null
+    if (
+        l.role === "parent" ||
+        (!l.role && LEGACY_PARENT_RE.test(String(l.label || "")))
+    )
+        return "parent"
+    return l.role === "spin_off" ? "spin-off" : "task"
+}
+
+function LinkRow({ l, taskId, onOpenFile }) {
+    const body = (
+        <>
+            <span className="link-glyph" aria-hidden="true">
+                {LINK_GLYPH[l.type] || "↗"}
+            </span>
+            <span className="link-label">{l.label || l.url}</span>
+            <span className="link-type">{taskRole(l) || l.type}</span>
+        </>
+    )
+    const file = l.type === "file" ? fileNameOfUrl(l.url) : null
+    return (
+        <li>
+            {file && taskId != null ? (
+                <a
+                    href={fileHref(taskId, file)}
+                    title={l.label || file}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="link link-file"
+                    onClick={(e) => {
+                        if (
+                            !onOpenFile ||
+                            e.button !== 0 ||
+                            e.metaKey ||
+                            e.ctrlKey ||
+                            e.shiftKey ||
+                            e.altKey
+                        )
+                            return
+                        e.preventDefault()
+                        onOpenFile(file)
+                    }}
+                >
+                    {body}
+                </a>
+            ) : isAppPath(l.url) ? (
+                // another task: routes in this tab
+                <Link
+                    to={l.url.trim()}
+                    title={l.url}
+                    className={`link link-${l.type}`}
+                >
+                    {body}
+                </Link>
+            ) : (
+                <a
+                    href={hrefFor(l.url) || undefined}
+                    title={l.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className={`link link-${l.type}`}
+                >
+                    {body}
+                </a>
+            )}
+        </li>
+    )
+}
+
+function LinkRows({ list, taskId, onOpenFile }) {
+    return (
+        <ul className="links">
+            {list.map((l, i) => (
+                <LinkRow
+                    key={l.id || `${l.url}-${i}`}
+                    l={l}
+                    taskId={taskId}
+                    onOpenFile={onOpenFile}
+                />
+            ))}
+        </ul>
+    )
+}
+
 /**
- * links: allLinks(task). Attachments ("file" links) open in the task
- * page's viewer (onOpenFile(name)) on a plain click.
+ * links: allLinks(task). Links to other tasks (parent, spin-offs) come
+ * first, in their own "Tasks" group. Attachments ("file" links) open in
+ * the task page's viewer (onOpenFile(name)) on a plain click.
  */
 export function LinksList({ links, taskId, onOpenFile }) {
     const list = links || []
     if (!list.length) return <p className="muted">No links yet.</p>
+    const tasks = list
+        .filter((l) => taskRole(l))
+        .sort(
+            (a, b) =>
+                TASK_ROLE_ORDER.indexOf(taskRole(a)) -
+                TASK_ROLE_ORDER.indexOf(taskRole(b))
+        )
+    const rest = list.filter((l) => !taskRole(l))
+    if (!tasks.length)
+        return <LinkRows list={rest} taskId={taskId} onOpenFile={onOpenFile} />
     return (
-        <ul className="links">
-            {list.map((l, i) => {
-                const body = (
-                    <>
-                        <span className="link-glyph" aria-hidden="true">
-                            {LINK_GLYPH[l.type] || "↗"}
-                        </span>
-                        <span className="link-label">{l.label || l.url}</span>
-                        <span className="link-type">{l.type}</span>
-                    </>
-                )
-                const file = l.type === "file" ? fileNameOfUrl(l.url) : null
-                return (
-                    <li key={l.id || `${l.url}-${i}`}>
-                        {file && taskId != null ? (
-                            <a
-                                href={fileHref(taskId, file)}
-                                title={l.label || file}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="link link-file"
-                                onClick={(e) => {
-                                    if (
-                                        !onOpenFile ||
-                                        e.button !== 0 ||
-                                        e.metaKey ||
-                                        e.ctrlKey ||
-                                        e.shiftKey ||
-                                        e.altKey
-                                    )
-                                        return
-                                    e.preventDefault()
-                                    onOpenFile(file)
-                                }}
-                            >
-                                {body}
-                            </a>
-                        ) : isAppPath(l.url) ? (
-                            // another task: routes in this tab
-                            <Link
-                                to={l.url.trim()}
-                                title={l.url}
-                                className={`link link-${l.type}`}
-                            >
-                                {body}
-                            </Link>
-                        ) : (
-                            <a
-                                href={hrefFor(l.url) || undefined}
-                                title={l.url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className={`link link-${l.type}`}
-                            >
-                                {body}
-                            </a>
-                        )}
-                    </li>
-                )
-            })}
-        </ul>
+        <>
+            <h3 className="panel-sub links-sub">
+                Tasks
+                <span className="lane-count">{tasks.length}</span>
+            </h3>
+            <LinkRows list={tasks} taskId={taskId} onOpenFile={onOpenFile} />
+            {rest.length ? (
+                <>
+                    <h3 className="panel-sub links-sub">
+                        Links
+                        <span className="lane-count">{rest.length}</span>
+                    </h3>
+                    <LinkRows
+                        list={rest}
+                        taskId={taskId}
+                        onOpenFile={onOpenFile}
+                    />
+                </>
+            ) : null}
+        </>
     )
 }

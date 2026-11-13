@@ -176,19 +176,12 @@ export function deliverableState(d, watch = null) {
     }
 }
 
-// lifecycle.js SNOOZE_ENDED
-const SNOOZE_ENDED = "Snooze ended"
-
 /**
- * Is the task in Now only to be seen (a reminder or snooze end raised it)?
- * Opening the task clears it (POST seen). Same rule as the server's
- * contracts/lifecycle.js clearsWhenSeen.
+ * Does looking at the task clear its Now flag (POST seen)? Any Now reason
+ * does. Same rule as the server's contracts/lifecycle.js clearsWhenSeen.
  */
 export function clearsWhenSeen(flags) {
-    if (!flags || !flags.now || !flags.now_reason) return false
-    return (
-        flags.now_reason === flags.now_seen || flags.now_reason === SNOOZE_ENDED
-    )
+    return Boolean(flags && flags.now)
 }
 
 const RECORD_LABELS = {

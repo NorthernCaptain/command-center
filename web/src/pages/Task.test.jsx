@@ -11,7 +11,7 @@ import {
     waitFor,
     within,
 } from "@testing-library/react"
-import TaskPage from "./Task.jsx"
+import TaskPage, { SEEN_AFTER_MS } from "./Task.jsx"
 import { mockFetch, reply, sampleTask } from "../../test/helpers.js"
 import {
     ALL_FEATURES,
@@ -1461,15 +1461,38 @@ describe("Task page", () => {
     })
 })
 
-describe("Task page: Now flags cleared once seen", () => {
+describe("Task page: Now flag cleared once seen", () => {
     const withFlags = (flags) => {
         const r = taskResponse()
         r.task = { ...r.task, flags: { ...r.task.flags, now: true, ...flags } }
         return r
     }
+    const posts = (f) => f.find("POST", "/api/tasks/12/seen")
+    const wait = (ms) =>
+        act(async () => {
+            jest.advanceTimersByTime(ms)
+        })
+    const setHidden = (hidden) =>
+        act(() => {
+            if (hidden)
+                Object.defineProperty(document, "visibilityState", {
+                    configurable: true,
+                    get: () => "hidden",
+                })
+            else delete document.visibilityState
+            document.dispatchEvent(new Event("visibilitychange"))
+        })
 
-    it("opening a snoozed task that came back clears Snooze ended", async () => {
-        const res = withFlags({ now_reason: "Snooze ended" })
+    beforeEach(() => jest.useFakeTimers())
+    afterEach(() => {
+        jest.useRealTimers()
+        delete document.visibilityState
+    })
+
+    it("any Now reason clears once the page stayed visible for 2 s", async () => {
+        const res = withFlags({
+            now_reason: "Agent blocked: waiting on a deploy",
+        })
         const f = mockFetch({
             "GET /api/tasks/12": res,
             "POST /api/tasks/12/seen": {
@@ -1482,18 +1505,16 @@ describe("Task page: Now flags cleared once seen", () => {
             },
         })
         renderWithApp(<TaskPage id={12} />)
-        await screen.findByRole("heading", { name: "Fix lambda timeout" })
-        await waitFor(() =>
-            expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(1)
-        )
-        await waitFor(() =>
-            expect(screen.queryByText("Snooze ended")).not.toBeInTheDocument()
-        )
-        expect(f.find("POST", "/api/tasks/12/seen")[0].body).toEqual({
-            updated_at: res.task.updated_at,
-        })
-        // the next snooze ends while the page stays open: a new version,
-        // seen again
+        await screen.findByText("Agent blocked: waiting on a deploy")
+        await wait(SEEN_AFTER_MS - 1)
+        expect(posts(f)).toHaveLength(0)
+        await wait(1)
+        expect(posts(f)).toHaveLength(1)
+        expect(posts(f)[0].body).toEqual({ updated_at: res.task.updated_at })
+        expect(
+            screen.queryByText("Agent blocked: waiting on a deploy")
+        ).not.toBeInTheDocument()
+        // raised again while the page stays open: a new version, seen again
         act(() =>
             emit(stream, "task.updated", 12, {
                 task: {
@@ -1503,35 +1524,45 @@ describe("Task page: Now flags cleared once seen", () => {
                 },
             })
         )
-        await waitFor(() =>
-            expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(2)
-        )
-        expect(f.find("POST", "/api/tasks/12/seen")[1].body).toEqual({
+        await wait(SEEN_AFTER_MS)
+        expect(posts(f)).toHaveLength(2)
+        expect(posts(f)[1].body).toEqual({
             updated_at: "2026-11-08T09:00:00Z",
         })
     })
 
-    it("a reminder that arrives in a background tab waits until it is visible", async () => {
-        Object.defineProperty(document, "visibilityState", {
-            configurable: true,
-            get: () => "hidden",
-        })
+    it("leaving the page or hiding the tab before 2 s keeps the flag", async () => {
         const f = mockFetch({
-            "GET /api/tasks/12": withFlags({ now_reason: "Snooze ended" }),
+            "GET /api/tasks/12": withFlags({ now_reason: "Ready for PR" }),
             "POST /api/tasks/12/seen": { cleared: false },
         })
         renderWithApp(<TaskPage id={12} />)
-        await screen.findByText("Snooze ended")
-        expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(0)
-        act(() => {
-            delete document.visibilityState
-            document.dispatchEvent(new Event("visibilitychange"))
+        await screen.findByText("Ready for PR")
+        await wait(SEEN_AFTER_MS / 2)
+        setHidden(true)
+        await wait(SEEN_AFTER_MS * 5)
+        expect(posts(f)).toHaveLength(0)
+        // back: the wait starts over
+        setHidden(false)
+        await wait(SEEN_AFTER_MS / 2)
+        expect(posts(f)).toHaveLength(0)
+        await wait(SEEN_AFTER_MS / 2)
+        expect(posts(f)).toHaveLength(1)
+        // cleared: false (e.g. replaced meanwhile) keeps it, no retry
+        expect(screen.getByText("Ready for PR")).toBeInTheDocument()
+        await wait(SEEN_AFTER_MS * 2)
+        expect(posts(f)).toHaveLength(1)
+        cleanup()
+
+        const g = mockFetch({
+            "GET /api/tasks/12": withFlags({ now_reason: "Ready for PR" }),
         })
-        await waitFor(() =>
-            expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(1)
-        )
-        // cleared: false (e.g. replaced meanwhile) keeps it
-        expect(screen.getByText("Snooze ended")).toBeInTheDocument()
+        renderWithApp(<TaskPage id={12} />)
+        await screen.findByText("Ready for PR")
+        await wait(SEEN_AFTER_MS / 2)
+        cleanup()
+        await wait(SEEN_AFTER_MS * 2)
+        expect(posts(g)).toHaveLength(0)
     })
 
     it("a late acknowledgement never overwrites newer task data", async () => {
@@ -1545,9 +1576,9 @@ describe("Task page: Now flags cleared once seen", () => {
                 }),
         })
         renderWithApp(<TaskPage id={12} />)
-        await waitFor(() =>
-            expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(1)
-        )
+        await screen.findByText("Snooze ended")
+        await wait(SEEN_AFTER_MS)
+        expect(posts(f)).toHaveLength(1)
         // a newer update arrives first
         act(() =>
             emit(stream, "task.updated", 12, {
@@ -1578,26 +1609,22 @@ describe("Task page: Now flags cleared once seen", () => {
         expect(screen.getByText("Ready for PR")).toBeInTheDocument()
     })
 
-    it("other Now reasons stay; a failed call is ignored", async () => {
-        const f = mockFetch({
-            "GET /api/tasks/12": withFlags({ now_reason: "Ready for PR" }),
-        })
+    it("no flag, no call; a failed call is ignored", async () => {
+        const f = mockFetch({ "GET /api/tasks/12": taskResponse() })
         renderWithApp(<TaskPage id={12} />)
-        await screen.findByText("Ready for PR")
-        expect(f.find("POST", "/api/tasks/12/seen")).toHaveLength(0)
+        await screen.findByRole("heading", { name: "Fix lambda timeout" })
+        await wait(SEEN_AFTER_MS * 2)
+        expect(posts(f)).toHaveLength(0)
         cleanup()
 
         const g = mockFetch({
-            "GET /api/tasks/12": withFlags({
-                now_reason: "Call Ron",
-                now_seen: "Call Ron",
-            }),
+            "GET /api/tasks/12": withFlags({ now_reason: "Call Ron" }),
             "POST /api/tasks/12/seen": reply(500, { error: "boom" }),
         })
         renderWithApp(<TaskPage id={12} />)
-        await waitFor(() =>
-            expect(g.find("POST", "/api/tasks/12/seen")).toHaveLength(1)
-        )
+        await screen.findByText("Call Ron")
+        await wait(SEEN_AFTER_MS)
+        expect(posts(g)).toHaveLength(1)
         expect(screen.getByText("Call Ron")).toBeInTheDocument()
     })
 })

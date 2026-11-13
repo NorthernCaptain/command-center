@@ -235,12 +235,15 @@ installed for both.
 | `cc_report(task_id, status, summary, work_repos?, checks?, next_steps?)` | `ready_for_pr` (requires `work_repos`: every repo with staged changes, checked against deliverables) / `review` / `blocked` / `progress` |
 | `cc_feedback(task_id, item_id, status, commit?, reply_url?, note?)` | Resolves one PR feedback item: `fixed` / `answered` / `declined` (the agent never sets `no_action`). Required fields depend on the item kind: `commit` for every `fixed`; `reply_url` for every comment/review item; for `ci_failure` + `fixed` no reply, the check must pass on the new head. The watcher verifies exactly those on its next poll ([03 — PR feedback items](03-architecture.md#pr-feedback-items)). |
 | `cc_schedule(task_id, at, action, prompt?)` | Agent asks to be woken later ("re-check CI in 30m") |
-| `cc_create_task(title, details, parent_id?)` | Spin-off work lands in my inbox |
+| `cc_create_task(title, details, parent_id?)` | Spin-off work lands in my inbox. `parent_id`: the agent's task (default) or another task of its family. The child gets a `parent` link, the parent a `spin_off` link. |
+| `cc_reparent_task(task_id, parent_id)` | Moves a task under another parent. Both must be in the caller's family (same top of the parent chain); a loop is refused (`cycle`). The old parent loses its `spin_off` link, the new one gets it. The current parent again repairs a missing `spin_off` link. |
 | `cc_attach_file(task_id, path, label?)` | Copies a screenshot, video, report or log into the task ([03 — attachments](03-architecture.md)). Only from the tree folder or a temp folder. |
 
 Every tool takes an explicit `task_id`. The server cross-checks it against
 the calling agent where possible (`CC_TASK_ID` / agent name) to catch
-wrong-task writes. The `cc` CLI wraps the same endpoints for codex agents,
+wrong-task writes. `cc_create_task` and `cc_reparent_task` may touch other
+tasks of the caller's family (parents and spin-offs). Task links are not
+shown to viewers. The `cc` CLI wraps the same endpoints for codex agents,
 hooks and my shell.
 
 ## Review orchestrator

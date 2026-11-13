@@ -33,6 +33,8 @@ const base = {
         { type: "pr", url: "https://gh/pr/1", label: "PR" },
         { type: "folder", url: "/tmp/x", label: "f" },
         { type: "slack", url: "https://slack", label: "s" },
+        { type: "doc", url: "/t/9", label: "T-9: private", role: "spin_off" },
+        { type: "doc", url: "https://example.com/d", label: "Doc" },
     ],
     source: { type: "slack", url: "u", text: "secret" },
     created_at: "a",
@@ -113,7 +115,11 @@ describe("visibility", () => {
         expect(v.source).toBeUndefined()
         expect(v.flags).toBeUndefined()
         expect(v.asana).toEqual({ url: "https://a" })
-        expect(v.links.map((l) => l.type)).toEqual(["pr"])
+        // task links (e.g. a private spin-off) stay with the owner
+        expect(v.links.map((l) => l.url)).toEqual([
+            "https://gh/pr/1",
+            "https://example.com/d",
+        ])
         expect(
             viewerTask({ ...base, asana: undefined, links: undefined })
         ).toMatchObject({ asana: { url: null }, links: [] })
@@ -132,18 +138,18 @@ describe("snooze helpers", () => {
             laneOf({ ...base, ...p, flags: { ...base.flags, ...p.flags } })
         ).not.toBe("now")
     })
-    test("clearsWhenSeen: a reminder or snooze end nothing replaced", () => {
+    test("clearsWhenSeen: any Now flag", () => {
         expect(clearsWhenSeen(null)).toBe(false)
         expect(
             clearsWhenSeen({ now: false, now_reason: "x", now_seen: "x" })
         ).toBe(false)
-        expect(clearsWhenSeen({ now: true, now_reason: null })).toBe(false)
+        expect(clearsWhenSeen({ now: true, now_reason: null })).toBe(true)
         expect(
             clearsWhenSeen({ now: true, now_reason: "x", now_seen: "x" })
         ).toBe(true)
         expect(
-            clearsWhenSeen({ now: true, now_reason: "y", now_seen: "x" })
-        ).toBe(false)
+            clearsWhenSeen({ now: true, now_reason: "Agent blocked: x" })
+        ).toBe(true)
         expect(clearsWhenSeen({ now: true, now_reason: SNOOZE_ENDED })).toBe(
             true
         )

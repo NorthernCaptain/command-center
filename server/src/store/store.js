@@ -30,6 +30,7 @@ import {
     TransitionError,
     assertTransition,
     isShared,
+    isViewerLink,
     laneOf,
     openDeliverables,
 } from "../contracts/lifecycle.js"
@@ -66,9 +67,6 @@ const GLOBAL_LOCK = "global"
 const PATCH_KEYS = new Set(Object.keys(TaskPatchSchema.shape))
 const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
 const JSONL_FILES = ["comments.jsonl", "feedback.jsonl", "events.jsonl"]
-
-/** Link types whose labels viewers can see (matches viewerTask()). */
-const PUBLIC_LINK_TYPES = new Set(["pr", "branch", "asana", "doc", "file"])
 
 /** FTS columns a viewer may search (shared_only queries). */
 const PUBLIC_FTS_COLUMNS = "{title public_body}"
@@ -360,8 +358,9 @@ export function createStore({
 
     /**
      * Rebuild the index row + FTS columns of one task from disk. Viewers may
-     * search only title + public_body (artifact text and labels of the link
-     * types viewerTask() exposes); comments and other labels are private.
+     * search only title + public_body (artifact text and labels of the links
+     * viewerTask() exposes, lifecycle.js isViewerLink); comments and other
+     * labels (e.g. a spin-off's title on its parent) are private.
      */
     async function indexTask(id, task) {
         const t = task || (await readTask(id)).task
@@ -370,7 +369,7 @@ export function createStore({
         const comments = threads.flatMap((th) => [th, ...th.replies])
         const labels = (pub) =>
             t.links
-                .filter((l) => PUBLIC_LINK_TYPES.has(l.type) === pub)
+                .filter((l) => isViewerLink(l) === pub)
                 .map((l) => l.label)
                 .filter(Boolean)
         const publicBody = [content, ...labels(true)].join("\n")

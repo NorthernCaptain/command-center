@@ -766,6 +766,29 @@ describe("worker tool commands", () => {
         expect((await cc(["schedule", "12", "tomorrow"])).code).toBe(2)
     })
 
+    test("reparent", async () => {
+        const r = await cc(["reparent", "T-32", "24"], {
+            "POST /api/agent/cc_reparent_task": ok({
+                ok: true,
+                previous_parent_id: 29,
+            }),
+        })
+        expect(r.fetch.calls[0].body).toEqual({ task_id: 32, parent_id: 24 })
+        expect(r.out).toBe("T-32 moved under T-24 (was T-29)\n")
+        const fresh = await cc(["reparent", "33", "24"], {
+            "POST /api/agent/cc_reparent_task": ok({ ok: true }),
+        })
+        expect(fresh.out).toBe("T-33 moved under T-24\n")
+        const same = await cc(["reparent", "32", "24"], {
+            "POST /api/agent/cc_reparent_task": ok({
+                ok: true,
+                unchanged: true,
+            }),
+        })
+        expect(same.out).toBe("T-32 already under T-24\n")
+        expect((await cc(["reparent", "32"])).code).toBe(2)
+    })
+
     test("validation errors show the first issue", async () => {
         const r = await cc(["feedback", "12", "x", "nope"], {
             "POST /api/agent/cc_feedback": () =>

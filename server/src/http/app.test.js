@@ -1282,7 +1282,7 @@ describe("owner: patch, artifact, history", () => {
         expect(call[3]).toEqual({ actor: "me", baseRevision: undefined })
     })
 
-    test("seen clears a Now flag raised only to be seen, nothing else", async () => {
+    test("seen clears the Now flag, whatever its reason", async () => {
         const V = "2026-11-07T12:00:00.000Z" // makeTask updated_at
         const seen = (id, updatedAt = V) =>
             bearer(
@@ -1317,17 +1317,21 @@ describe("owner: patch, artifact, history", () => {
             makeTask(4, { flags: flags({ now_reason: "Snooze ended" }) })
         )
         expect((await seen(4)).body.cleared).toBe(true)
-        // the reason was replaced since (e.g. Ready for PR): kept
+        // any other reason (an agent report, Ready for PR): cleared too
         h.store.seed(
             makeTask(5, {
                 flags: flags({
-                    now_reason: "Ready for PR",
-                    now_seen: "Call Ron",
+                    now_reason: "Agent blocked: waiting on a deploy",
+                    error: "kept",
                 }),
             })
         )
-        expect((await seen(5)).body).toEqual({ cleared: false })
-        expect((await h.store.getTask(5)).task.flags.now).toBe(true)
+        expect((await seen(5)).body.cleared).toBe(true)
+        expect((await h.store.getTask(5)).task.flags).toMatchObject({
+            now: false,
+            now_reason: null,
+            error: "kept",
+        })
         // the page showed an older version (a newer reminder fired since)
         h.store.seed(
             makeTask(7, {

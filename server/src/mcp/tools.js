@@ -17,6 +17,16 @@ import { z } from "zod"
 import { ActorSchema, LINK_TYPES, taskKey } from "../contracts/schemas.js"
 import { newLinkId } from "../agent/jobs/util.js"
 import {
+    isParentLink,
+    PARENT_ROLE,
+    parentIdOf,
+    parentLabel,
+    SPIN_OFF_ROLE,
+    spinOffLabel,
+    taskIdOfUrl,
+    taskUrl,
+} from "../contracts/family.js"
+import {
     parseChangeRecord,
     requiresChangeRecord,
     SOC2_SECTION,
@@ -127,6 +137,10 @@ export const TOOL_SCHEMAS = {
         details: z.string().max(20000).optional(),
         parent_id: TaskIdSchema.optional(),
     }),
+    cc_reparent_task: z.object({
+        task_id: TaskIdSchema,
+        parent_id: TaskIdSchema,
+    }),
     cc_attach_file: z.object({
         task_id: TaskIdSchema,
         path: text(4000).describe(
@@ -153,7 +167,10 @@ export const TOOL_DESCRIPTIONS = {
         "Resolve one PR feedback item: fixed (commit), answered or declined (reply_url for comment/review items). ci_failure: fixed (commit) or declined (reply_url).",
     cc_schedule:
         "Ask to be woken later: surface (back to Leo's Now), prompt_agent (prompt sent to you), center_job (the center agent answers prompt on the task).",
-    cc_create_task: "Create a spin-off task in Leo's inbox.",
+    cc_create_task:
+        "Create a spin-off task in Leo's inbox. parent_id: your task (the default) or another task of its family (e.g. your parent, when the work belongs there).",
+    cc_reparent_task:
+        "Move a task under another parent: both must be in your task's family (its parent chain and their spin-offs). The old parent's spin-off link goes, the new parent gets one. Repeating it with the current parent repairs a missing spin-off link.",
     cc_attach_file:
         "Attach a file (screenshot, video, report .md, PDF, log) to the task: it is copied next to the artifact, listed in its Attachments section (images and videos shown inline) and in the task's Files tab. Only files under the tree folder or a temp folder. Max 250 MB.",
 }
@@ -248,6 +265,94 @@ export function createAgentTools({
                     details: { caller: String(raw), task_id: taskId },
                 }
             )
+    }
+
+    /** The caller's task id (X-CC-Task), or null for the owner. */
+    function callerOf(ctx) {
+        const raw = ctx && ctx.callerTaskId
+        if (raw === undefined || raw === null || raw === "") return null
+        return toTaskId(raw)
+    }
+
+    /** Parent chain of a task, nearest first (stops at a loop or a gap). */
+    async function ancestorsOf(id) {
+        const out = []
+        const seen = new Set([id])
+        let cur = id
+        for (;;) {
+            let task
+            try {
+                task = (await store.getTask(cur)).task
+            } catch (err) {
+                if (err instanceof NotFoundError && cur !== id) break
+                throw err
+            }
+            const p = parentIdOf(task)
+            if (!p || seen.has(p)) break
+            seen.add(p)
+            out.push(p)
+            cur = p
+        }
+        return out
+    }
+
+    const rootOf = async (id) => (await ancestorsOf(id)).pop() || id
+
+    // Family changes (reparent, a spin-off's links) run one at a time: the
+    // family and cycle checks read several tasks, which per-task locks
+    // can't hold (concurrent 2->3, 3->4, 4->2 would each pass alone).
+    let familyTail = Promise.resolve()
+    function familyLock(fn) {
+        const run = familyTail.then(fn)
+        familyTail = run.catch(() => {})
+        return run
+    }
+
+    /**
+     * An agent may touch another task of its own task's family: one with
+     * the same root (top of the parent chain). The owner (no caller) may
+     * touch any.
+     */
+    async function checkFamily(taskId, ctx) {
+        const caller = callerOf(ctx)
+        if (caller === null || caller === taskId) return
+        // an unknown caller task has no family: always a mismatch
+        const callerRoot = await rootOf(caller).catch((err) => {
+            if (err instanceof NotFoundError) return null
+            throw err
+        })
+        if ((await rootOf(taskId)) === callerRoot) return
+        throw new AppError(
+            "wrong_task",
+            `${taskKey(taskId)} is not in ${taskKey(caller)}'s task family`,
+            { status: 403, details: { caller, task_id: taskId } }
+        )
+    }
+
+    /** Add (or relabel) the parent's link to one spin-off. */
+    async function linkSpinOff(parentId, child, actor) {
+        await locked(parentId, async () => {
+            const { task } = await store.getTask(parentId)
+            const link = makeLink(
+                {
+                    type: "doc",
+                    url: taskUrl(child.id),
+                    label: spinOffLabel(child),
+                    role: SPIN_OFF_ROLE,
+                },
+                actor
+            )
+            const cur = (task.links || []).find(
+                (l) => l.type === "doc" && l.url === link.url
+            )
+            if (cur && cur.label === link.label && cur.role === link.role)
+                return
+            await store.updateTask(
+                parentId,
+                { links: withLink(task, link).links },
+                { actor, reason: `spin-off ${taskKey(child.id)}` }
+            )
+        })
     }
 
     async function resolveActor(taskId, ctx = {}) {
@@ -1025,15 +1130,18 @@ export function createAgentTools({
 
     async function cc_create_task(args, ctx = {}) {
         const a = validate(TOOL_SCHEMAS.cc_create_task, args)
-        let parentId = null
-        if (a.parent_id !== undefined) {
-            parentId = toTaskId(a.parent_id)
-            checkCaller(parentId, ctx)
-        } else if (ctx.callerTaskId) {
-            parentId = toTaskId(ctx.callerTaskId)
+        return familyLock(() => createSpinOff(a, ctx))
+    }
+
+    async function createSpinOff(a, ctx) {
+        const caller = callerOf(ctx)
+        let parentId = caller
+        if (a.parent_id !== undefined) parentId = toTaskId(a.parent_id)
+        if (parentId) {
+            await store.getTask(parentId)
+            await checkFamily(parentId, ctx)
         }
-        if (parentId) await store.getTask(parentId)
-        const actor = await resolveActor(parentId, ctx)
+        const actor = await resolveActor(caller || parentId, ctx)
         const details = (a.details || "").trim()
         const input = {
             title: a.title,
@@ -1045,22 +1153,137 @@ export function createAgentTools({
                 makeLink(
                     {
                         type: "doc",
-                        url: `/t/${parentId}`,
-                        label: `spun off from ${taskKey(parentId)}`,
+                        url: taskUrl(parentId),
+                        label: parentLabel(parentId, caller || parentId),
+                        role: PARENT_ROLE,
                     },
                     actor
                 ),
             ]
         const { task } = await store.createTask(input, actor)
-        if (parentId)
-            await store.appendEvent(
-                parentId,
-                { type: "spun_off", data: { task_id: task.id } },
-                actor
-            )
+        if (parentId) {
+            await linkSpinOff(parentId, task, actor)
+            const data = { task_id: task.id }
+            if (caller && caller !== parentId) data.by = caller
+            await store.appendEvent(parentId, { type: "spun_off", data }, actor)
+        }
         return {
             ok: true,
             task: { id: task.id, title: task.title, status: task.status },
+        }
+    }
+
+    async function cc_reparent_task(args, ctx = {}) {
+        const a = validate(TOOL_SCHEMAS.cc_reparent_task, args)
+        return familyLock(() => reparentTask(a, ctx))
+    }
+
+    async function reparentTask(a, ctx) {
+        const taskId = toTaskId(a.task_id)
+        const parentId = toTaskId(a.parent_id)
+        if (taskId === parentId)
+            throw new ValidationError("a task can't be its own parent")
+        await store.getTask(taskId)
+        await store.getTask(parentId)
+        await checkFamily(taskId, ctx)
+        await checkFamily(parentId, ctx)
+        if ((await ancestorsOf(parentId)).includes(taskId))
+            throw new AppError(
+                "cycle",
+                `${taskKey(parentId)} is under ${taskKey(taskId)}`,
+                {
+                    status: 409,
+                    details: { task_id: taskId, parent_id: parentId },
+                }
+            )
+        const actor = await resolveActor(callerOf(ctx) || taskId, ctx)
+        let from = null
+        let child = null
+        await locked(taskId, async () => {
+            const { task } = await store.getTask(taskId)
+            child = task
+            from = parentIdOf(task)
+            if (from === parentId) return
+            // the old parent link goes, and a plain link to the new parent
+            // becomes the parent link (no duplicate URL)
+            const links = (task.links || []).filter(
+                (l) => !isParentLink(l) && taskIdOfUrl(l.url) !== parentId
+            )
+            links.push(
+                makeLink(
+                    {
+                        type: "doc",
+                        url: taskUrl(parentId),
+                        label: parentLabel(parentId, from || parentId),
+                        role: PARENT_ROLE,
+                    },
+                    actor
+                )
+            )
+            const res = await store.updateTask(
+                taskId,
+                { links },
+                { actor, reason: `moved under ${taskKey(parentId)}` }
+            )
+            child = res.task
+        })
+        // the same parent again: only make sure its spin-off link exists
+        await linkSpinOff(parentId, child, actor)
+        if (from === parentId)
+            return {
+                ok: true,
+                unchanged: true,
+                task_id: taskId,
+                parent_id: parentId,
+            }
+        if (from) await unlinkSpinOff(from, taskId, actor)
+        await store.appendEvent(
+            taskId,
+            { type: "reparented", data: { from, to: parentId } },
+            actor
+        )
+        await store.appendEvent(
+            parentId,
+            { type: "spun_off", data: { task_id: taskId, moved_from: from } },
+            actor
+        )
+        return {
+            ok: true,
+            task_id: taskId,
+            parent_id: parentId,
+            previous_parent_id: from,
+        }
+    }
+
+    /** Drop the old parent's link to a spin-off that moved away. */
+    async function unlinkSpinOff(parentId, childId, actor) {
+        try {
+            await locked(parentId, async () => {
+                const { task } = await store.getTask(parentId)
+                const links = (task.links || []).filter(
+                    (l) =>
+                        !(
+                            l.role === SPIN_OFF_ROLE &&
+                            taskIdOfUrl(l.url) === childId
+                        )
+                )
+                if (links.length !== (task.links || []).length)
+                    await store.updateTask(
+                        parentId,
+                        { links },
+                        {
+                            actor,
+                            reason: `spin-off ${taskKey(childId)} moved away`,
+                        }
+                    )
+            })
+            await store.appendEvent(
+                parentId,
+                { type: "spin_off_moved", data: { task_id: childId } },
+                actor
+            )
+        } catch (err) {
+            if (!(err instanceof NotFoundError)) throw err
         }
     }
 
@@ -1073,6 +1296,7 @@ export function createAgentTools({
         cc_feedback,
         cc_schedule,
         cc_create_task,
+        cc_reparent_task,
         cc_attach_file,
     }
 }

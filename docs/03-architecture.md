@@ -198,6 +198,10 @@ its PR(s) are merged**, the same rule as the Asana task.
 | `cancelled` | dropped | me |
 
 - **reminder** tasks: `inbox → waiting(due) → Now → done`.
+- **Seen clears Now**: once a task page has stayed visible for 2 seconds,
+  its Now flag goes, whatever the reason. The status stays. A cause that
+  comes back (a new reminder, new PR feedback, another agent report)
+  raises it again.
 - **todo** tasks (manual, no agent): `ready → active → done`, with optional
   Asana and follow-ups.
 - **PR closed without merge**: notify and show in Now. The status stays
@@ -449,6 +453,7 @@ POST   /api/tasks/:id/chat                   instruction/question to center agen
 POST   /api/tasks/:id/comments               inline/general comment
 POST   /api/tasks/:id/schedules              follow-up / reminder
 POST   /api/tasks/:id/asana                  create Asana task now
+POST   /api/tasks/:id/seen                   I looked at it: clear its Now flag
 POST   /api/tasks/:id/start                  herdr launch                (phase 2)
 POST   /api/tasks/:id/actions/:name          create-pr | address-feedback | clean | focus  (phase 2)
 POST   /api/command                          home-page command bar ("remind me…", "move T-12 to waiting")

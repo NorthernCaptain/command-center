@@ -278,12 +278,12 @@ describe("deliverable state (what blocks Done)", () => {
 })
 
 describe("clearsWhenSeen", () => {
-    it("a reminder or snooze end that nothing replaced", () => {
+    it("any Now flag", () => {
         expect(clearsWhenSeen(null)).toBe(false)
         expect(
             clearsWhenSeen({ now: false, now_reason: "x", now_seen: "x" })
         ).toBe(false)
-        expect(clearsWhenSeen({ now: true, now_reason: "" })).toBe(false)
+        expect(clearsWhenSeen({ now: true, now_reason: "" })).toBe(true)
         expect(
             clearsWhenSeen({ now: true, now_reason: "x", now_seen: "x" })
         ).toBe(true)
@@ -293,7 +293,7 @@ describe("clearsWhenSeen", () => {
                 now_reason: "Ready for PR",
                 now_seen: "x",
             })
-        ).toBe(false)
+        ).toBe(true)
         expect(clearsWhenSeen({ now: true, now_reason: "Snooze ended" })).toBe(
             true
         )

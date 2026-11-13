@@ -908,9 +908,9 @@ export function createApp({
     })
 
     /**
-     * The owner opened the task: a Now flag that was only there to be seen
-     * (a reminder or snooze end, lifecycle.js clearsWhenSeen) is cleared.
-     * Other Now reasons stay until their cause is resolved. updated_at: the
+     * The owner looked at the task (its page stayed visible for 2 s): its
+     * Now flag is cleared, whatever the reason (lifecycle.js
+     * clearsWhenSeen). updated_at: the
      * version of the task the page showed; a task changed since (e.g. a
      * newer reminder fired) is left alone, and the page asks again with
      * the version it then shows.

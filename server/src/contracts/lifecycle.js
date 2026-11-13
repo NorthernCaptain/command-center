@@ -7,6 +7,7 @@
 // See docs/03-architecture.md#task-lifecycle.
 
 import { STATUSES } from "./schemas.js"
+import { taskIdOfUrl } from "./family.js"
 
 const ANY_OPEN = STATUSES.filter((s) => s !== "done" && s !== "cancelled")
 
@@ -130,6 +131,19 @@ export function isShared(task) {
 
 /** Whitelisted fields a viewer may see. Never includes comments, history,
  *  jobs, source text, flags.error or agent details. */
+const VIEWER_LINK_TYPES = new Set(["pr", "branch", "asana", "doc", "file"])
+
+/**
+ * May a viewer see this link (viewerTask, and the search index's public
+ * part)? Links to other tasks stay with the owner: a private spin-off's
+ * title must not show on, or be searchable through, a shared parent.
+ */
+export function isViewerLink(l) {
+    return Boolean(
+        l && VIEWER_LINK_TYPES.has(l.type) && taskIdOfUrl(l.url) === null
+    )
+}
+
 export function viewerTask(task) {
     return {
         id: task.id,
@@ -141,9 +155,7 @@ export function viewerTask(task) {
         branch: task.branch,
         asana: { url: task.asana ? task.asana.url : null },
         links: (task.links || [])
-            .filter((l) =>
-                ["pr", "branch", "asana", "doc", "file"].includes(l.type)
-            )
+            .filter(isViewerLink)
             .map((l) => ({ type: l.type, url: l.url, label: l.label })),
         created_at: task.created_at,
         updated_at: task.updated_at,
@@ -167,15 +179,12 @@ export function withSnoozeFlags(patch) {
 export const SNOOZE_ENDED = "Snooze ended"
 
 /**
- * Is the task in Now only to be seen (a reminder or snooze end raised it,
- * nothing since replaced the reason)? Opening the task clears it then.
- * "Snooze ended" counts without the mark (flags raised before it existed).
+ * Does the owner looking at the task clear its Now flag? Any Now reason
+ * does: once Leo has seen it (the task page stayed visible for a moment),
+ * it leaves Now. A cause that comes back raises it again.
  */
 export function clearsWhenSeen(flags) {
-    if (!flags || !flags.now || !flags.now_reason) return false
-    return (
-        flags.now_reason === flags.now_seen || flags.now_reason === SNOOZE_ENDED
-    )
+    return Boolean(flags && flags.now)
 }
 
 /** Patch for snoozing a task until `until` (ISO). */

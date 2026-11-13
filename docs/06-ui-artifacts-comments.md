@@ -193,6 +193,10 @@ events for shared tasks, with internal fields stripped.
   once every item that needed work is resolved (or how many are open);
   the PR feedback tab shows the same line. The file keeps only
   placeholders.
+- The **Links** tab lists links to other tasks first, in a **Tasks** group:
+  the parent, then spin-offs (role `parent` / `spin_off`, see
+  [04 — tools](04-herdr-integration.md)), then other task links. The rest
+  follow under **Links**. Without task links there are no group headers.
 - **Files**: attach screenshots, videos, .md docs, PDFs and other files
   with the Files tab's button, by dropping them anywhere on the page, or
   by pasting a screenshot (outside text fields). They are copied next to

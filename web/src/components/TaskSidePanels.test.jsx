@@ -3,7 +3,7 @@
  * MIT license.
  */
 
-import { fireEvent, render, screen } from "@testing-library/react"
+import { fireEvent, render, screen, within } from "@testing-library/react"
 import { ActivityList, LinksList } from "./TaskSidePanels.jsx"
 
 const at = "2026-11-08T19:00:00Z"
@@ -53,7 +53,98 @@ describe("ActivityList", () => {
     })
 })
 
+describe("ActivityList: task family events", () => {
+    it("explains spin-offs and moves", () => {
+        const ev = (type, data) => ({ type, actor: "agent:x", at, data })
+        render(
+            <ActivityList
+                events={[
+                    ev("spun_off", { task_id: 32 }),
+                    ev("spun_off", { task_id: 33, by: 29 }),
+                    ev("spun_off", { task_id: 32, moved_from: 29 }),
+                    ev("reparented", { from: 29, to: 24 }),
+                    ev("reparented", { from: null, to: 24 }),
+                    ev("spin_off_moved", { task_id: 32 }),
+                ]}
+            />
+        )
+        for (const text of [
+            "spun off T-32",
+            "spun off T-33 (from T-29)",
+            "T-32 moved here from T-29",
+            "moved under T-24 (was under T-29)",
+            "moved under T-24",
+            "spin-off T-32 moved away",
+        ])
+            expect(screen.getByText(text)).toBeInTheDocument()
+    })
+})
+
 describe("LinksList", () => {
+    it("groups task links at the top: parent, then spin-offs", () => {
+        window.history.replaceState(null, "", "/t/29")
+        const { container } = render(
+            <LinksList
+                links={[
+                    {
+                        id: "w",
+                        type: "pr",
+                        url: "https://example.com/pr/1",
+                        label: "PR",
+                    },
+                    {
+                        id: "s",
+                        type: "doc",
+                        url: "/t/32",
+                        label: "T-32: Merge queue",
+                        role: "spin_off",
+                    },
+                    { id: "o", type: "doc", url: "/t/7", label: "see T-7" },
+                    {
+                        id: "p",
+                        type: "doc",
+                        url: "/t/24",
+                        label: "spun off from T-24",
+                        role: null,
+                    },
+                ]}
+            />
+        )
+        const heads = [...container.querySelectorAll("h3")].map(
+            (h) => h.textContent
+        )
+        expect(heads).toEqual(["Tasks3", "Links1"])
+        const [tasks, rest] = container.querySelectorAll("ul.links")
+        expect(
+            within(tasks)
+                .getAllByRole("link")
+                .map((a) => a.getAttribute("href"))
+        ).toEqual(["/t/24", "/t/32", "/t/7"])
+        expect(
+            [...tasks.querySelectorAll(".link-type")].map((t) => t.textContent)
+        ).toEqual(["parent", "spin-off", "task"])
+        expect(within(rest).getByText("PR")).toBeInTheDocument()
+        expect(container.firstChild.tagName).toBe("H3")
+    })
+
+    it("only task links: no Links group; none: no headers", () => {
+        const { container, unmount } = render(
+            <LinksList
+                links={[{ id: "p", type: "doc", url: "/t/24", role: "parent" }]}
+            />
+        )
+        expect(
+            [...container.querySelectorAll("h3")].map((h) => h.textContent)
+        ).toEqual(["Tasks1"])
+        unmount()
+        const other = render(
+            <LinksList
+                links={[{ id: "a", type: "doc", url: "https://example.com/d" }]}
+            />
+        )
+        expect(other.container.querySelector("h3")).toBeNull()
+    })
+
     it("task links route in this tab; folders are file://; web opens a new tab", () => {
         window.scrollTo = jest.fn() // the router scrolls to top on navigate
         window.history.replaceState(null, "", "/t/5")

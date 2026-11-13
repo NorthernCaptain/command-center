@@ -69,7 +69,12 @@ export const LinkSchema = z.object({
     type: z.enum(LINK_TYPES),
     url: z.string().min(1),
     label: z.string().nullable().default(null),
-    role: z.enum(["main", "ref", "work"]).nullable().default(null),
+    // main | ref | work: repo folders; parent | spin_off: task links
+    // (contracts/family.js)
+    role: z
+        .enum(["main", "ref", "work", "parent", "spin_off"])
+        .nullable()
+        .default(null),
     // type "file" (task attachments, url "files/<name>"): size and MIME type
     size: z.number().int().nonnegative().optional(),
     mime: z.string().max(200).optional(),

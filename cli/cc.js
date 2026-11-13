@@ -58,6 +58,7 @@ Worker tools (CC_TASK_ID / CC_URL / CC_TOKEN are read from the environment):
                             resolve a PR feedback item: fixed | answered | declined
   schedule <id> <when> <action> [prompt...]
                             action: surface | prompt_agent | center_job
+  reparent <id> <parent>    move a task of your task's family under another parent
 `
 
 const COMMANDS = [
@@ -77,6 +78,7 @@ const COMMANDS = [
     "report",
     "feedback",
     "schedule",
+    "reparent",
 ]
 
 /** CC_URL must be a loopback http(s) origin: the token goes there. */
@@ -494,6 +496,23 @@ export async function run(argv, deps) {
                 const r = await tool("cc_feedback", body)
                 out(
                     `${item} ${status}${r.round_resolved ? ` (round ${r.round} resolved)` : ""}`
+                )
+                return 0
+            }
+            case "reparent": {
+                const [rawId, rawParent] = args
+                const id = taskId(rawId)
+                if (!rawParent)
+                    throw new UsageError("cc reparent <id> <parent>")
+                const parent = taskId(rawParent)
+                const r = await tool("cc_reparent_task", {
+                    task_id: id,
+                    parent_id: parent,
+                })
+                out(
+                    r.unchanged
+                        ? `T-${id} already under T-${parent}`
+                        : `T-${id} moved under T-${parent}${r.previous_parent_id ? ` (was T-${r.previous_parent_id})` : ""}`
                 )
                 return 0
             }

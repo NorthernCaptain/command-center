@@ -3507,3 +3507,8 @@ textarea.chatbar-input {
         border-radius: 0;
     }
 }
+
+/* Links tab: the "Tasks" group sits at the very top */
+.links-sub:first-child {
+    margin-top: 0;
+}

@@ -69,7 +69,13 @@ other task is rejected with `wrong_task`.
   them there.
 - Spin-off work **unrelated** to this task (something else you noticed):
   `cc_create_task(title, details, parent_id=<your task>)`. Do not do it
-  here. The fix for what you investigated is never a spin-off.
+  here. The fix for what you investigated is never a spin-off. When the
+  work belongs to your parent task (or another task of the family), pass
+  that task as `parent_id`.
+- Wrong parent: `cc_reparent_task(task_id, parent_id)` moves a task under
+  another parent. Both must be in your task's family (your parent chain
+  and their spin-offs), e.g. a spin-off you made that belongs under your
+  parent. The links on both parents are updated.
 - Wake-ups: `cc_schedule(at, action, prompt?)`. `at` is ISO or a phrase
   ("in 30m", "tomorrow 9am"). `surface` puts the task back in Leo's Now,
   `prompt_agent` sends `prompt` to you later, `center_job` lets the center

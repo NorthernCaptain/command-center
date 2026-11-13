@@ -1096,6 +1096,42 @@ describe("query and board", () => {
         expect(viewer("title:zanzibar")).toEqual([])
     })
 
+    test("a private spin-off's title on a shared parent is owner-only in search", async () => {
+        const { task } = await store.createTask(
+            { title: "Shared parent", visibility: "shared" },
+            "me"
+        )
+        await store.updateTask(
+            task.id,
+            {
+                links: [
+                    {
+                        id: "l1",
+                        type: "doc",
+                        url: "/t/99",
+                        label: "T-99: narwhal migration",
+                        role: "spin_off",
+                        added_by: "me",
+                        at: "2026-11-07T12:00:00.000Z",
+                    },
+                    {
+                        id: "l2",
+                        type: "doc",
+                        url: "https://example.com/design",
+                        label: "axolotl design",
+                        added_by: "me",
+                        at: "2026-11-07T12:00:00.000Z",
+                    },
+                ],
+            },
+            { actor: "me" }
+        )
+        const ids = (params) => store.query(params).tasks.map((t) => t.id)
+        expect(ids({ q: "narwhal" })).toEqual([task.id])
+        expect(ids({ q: "narwhal", shared_only: true })).toEqual([])
+        expect(ids({ q: "axolotl", shared_only: true })).toEqual([task.id])
+    })
+
     test("board lanes and ordering", async () => {
         const ids = await seed()
         const b = store.board()

@@ -151,7 +151,7 @@ describe("helpers", () => {
     })
 
     test("a schema per tool", () => {
-        expect(TOOL_NAMES).toHaveLength(9)
+        expect(TOOL_NAMES).toHaveLength(10)
         for (const n of TOOL_NAMES) expect(TOOL_SCHEMAS[n]).toBeTruthy()
         expect(Object.keys(tools).sort()).toEqual([...TOOL_NAMES].sort())
     })
@@ -1704,13 +1704,56 @@ describe("cc_create_task", () => {
             type: "doc",
             url: `/t/${id}`,
             label: `spun off from T-${id}`,
+            role: "parent",
             added_by: `agent:${SESSION}`,
         })
+        // the parent lists it
+        expect((await getTask()).links).toContainEqual(
+            expect.objectContaining({
+                type: "doc",
+                url: `/t/${r.task.id}`,
+                label: `T-${r.task.id}: Clean up old retries`,
+                role: "spin_off",
+            })
+        )
         const events = await store.listEvents(id)
         expect(events[0]).toMatchObject({
             type: "spun_off",
             data: { task_id: r.task.id },
         })
+    })
+
+    test("an agent may file a spin-off under its own parent", async () => {
+        const child = await tools.cc_create_task(
+            { title: "Child" },
+            { callerTaskId: String(id) }
+        )
+        const cid = child.task.id
+        const r = await tools.cc_create_task(
+            { title: "Sibling", parent_id: `T-${id}` },
+            { callerTaskId: String(cid) }
+        )
+        const { task } = await store.getTask(r.task.id)
+        expect(task.links[0]).toMatchObject({
+            url: `/t/${id}`,
+            label: `spun off from T-${cid}, under T-${id}`,
+            role: "parent",
+        })
+        const events = await store.listEvents(id)
+        expect(events[0]).toMatchObject({
+            type: "spun_off",
+            data: { task_id: r.task.id, by: cid },
+        })
+        // outside the family: refused
+        const other = await seedTask({ title: "Other", branch: "t9-other" })
+        await expectError(
+            tools.cc_create_task(
+                { title: "x", parent_id: other },
+                { callerTaskId: String(cid) }
+            ),
+            "wrong_task",
+            403
+        )
     })
 
     test("parent defaults to the caller's task", async () => {
@@ -1745,6 +1788,191 @@ describe("cc_create_task", () => {
             404
         )
         await expectError(tools.cc_create_task({}), "validation", 400)
+    })
+})
+
+describe("cc_reparent_task", () => {
+    const spinOff = async (title, parent, caller = parent) =>
+        (
+            await tools.cc_create_task(
+                { title, parent_id: parent },
+                { callerTaskId: String(caller) }
+            )
+        ).task.id
+    const links = async (tid) => (await store.getTask(tid)).task.links
+
+    test("moves a spin-off of the caller up under the caller's parent", async () => {
+        const mid = await spinOff("Middle", id)
+        const leaf = await spinOff("Leaf", mid)
+        const r = await tools.cc_reparent_task(
+            { task_id: leaf, parent_id: id },
+            { callerTaskId: `T-${mid}` }
+        )
+        expect(r).toEqual({
+            ok: true,
+            task_id: leaf,
+            parent_id: id,
+            previous_parent_id: mid,
+        })
+        const leafLinks = await links(leaf)
+        expect(leafLinks.filter((l) => l.role === "parent")).toEqual([
+            expect.objectContaining({
+                url: `/t/${id}`,
+                label: `spun off from T-${mid}, under T-${id}`,
+            }),
+        ])
+        expect((await links(mid)).some((l) => l.url === `/t/${leaf}`)).toBe(
+            false
+        )
+        expect(
+            (await links(id)).filter((l) => l.role === "spin_off")
+        ).toHaveLength(2)
+        expect((await store.listEvents(leaf))[0]).toMatchObject({
+            type: "reparented",
+            data: { from: mid, to: id },
+        })
+        expect((await store.listEvents(id))[0]).toMatchObject({
+            type: "spun_off",
+            data: { task_id: leaf, moved_from: mid },
+        })
+        expect((await store.listEvents(mid))[0]).toMatchObject({
+            type: "spin_off_moved",
+            data: { task_id: leaf },
+        })
+    })
+
+    test("the same parent again repairs a missing spin-off link", async () => {
+        // a spin-off from before the roles: legacy parent link only
+        const old = await seedTask({ title: "Old", branch: "t5-old" })
+        await store.updateTask(
+            old,
+            {
+                links: [
+                    {
+                        id: "l_legacy",
+                        type: "doc",
+                        url: `/t/${id}`,
+                        label: `spun off from T-${id}`,
+                        role: null,
+                        added_by: "agent:x",
+                        at: "2026-11-07T11:00:00.000Z",
+                    },
+                ],
+            },
+            { actor: "me" }
+        )
+        const r = await tools.cc_reparent_task({ task_id: old, parent_id: id })
+        expect(r).toMatchObject({ ok: true, unchanged: true })
+        expect((await links(id)).map((l) => l.url)).toContain(`/t/${old}`)
+        // again: nothing to change
+        const before = (await store.listEvents(id)).length
+        await tools.cc_reparent_task({ task_id: old, parent_id: id })
+        expect(await store.listEvents(id)).toHaveLength(before)
+    })
+
+    test("a task without a parent gets one; the owner may move any", async () => {
+        const loose = await seedTask({ title: "Loose", branch: "t6-loose" })
+        // a plain link to the new parent already there
+        await store.updateTask(
+            loose,
+            {
+                links: [
+                    {
+                        id: "l_see",
+                        type: "doc",
+                        url: `/t/${id}`,
+                        label: "see also",
+                        role: null,
+                        added_by: "me",
+                        at: "2026-11-07T11:00:00.000Z",
+                    },
+                ],
+            },
+            { actor: "me" }
+        )
+        const r = await tools.cc_reparent_task({
+            task_id: `T-${loose}`,
+            parent_id: id,
+        })
+        expect(await links(loose)).toHaveLength(1)
+        expect(r.previous_parent_id).toBeNull()
+        expect((await links(loose))[0]).toMatchObject({
+            label: `spun off from T-${id}`,
+            role: "parent",
+        })
+    })
+
+    test("refuses loops, itself, strangers and unknown tasks", async () => {
+        const mid = await spinOff("Middle", id)
+        const leaf = await spinOff("Leaf", mid)
+        await expectError(
+            tools.cc_reparent_task({ task_id: id, parent_id: leaf }),
+            "cycle",
+            409
+        )
+        await expectError(
+            tools.cc_reparent_task({ task_id: id, parent_id: id }),
+            "validation",
+            400
+        )
+        const other = await seedTask({ title: "Other", branch: "t9-other" })
+        await expectError(
+            tools.cc_reparent_task(
+                { task_id: other, parent_id: id },
+                { callerTaskId: String(mid) }
+            ),
+            "wrong_task",
+            403
+        )
+        await expectError(
+            tools.cc_reparent_task(
+                { task_id: leaf, parent_id: other },
+                { callerTaskId: String(mid) }
+            ),
+            "wrong_task",
+            403
+        )
+        await expectError(
+            tools.cc_reparent_task({ task_id: 999, parent_id: id }),
+            "not_found",
+            404
+        )
+        await expectError(tools.cc_reparent_task({}), "validation", 400)
+    })
+
+    test("concurrent moves can't make a loop", async () => {
+        const [b, c, d] = [
+            await spinOff("B", id),
+            await spinOff("C", id),
+            await spinOff("D", id),
+        ]
+        const results = await Promise.allSettled([
+            tools.cc_reparent_task({ task_id: b, parent_id: c }),
+            tools.cc_reparent_task({ task_id: c, parent_id: d }),
+            tools.cc_reparent_task({ task_id: d, parent_id: b }),
+        ])
+        expect(results.map((r) => r.status)).toEqual([
+            "fulfilled",
+            "fulfilled",
+            "rejected",
+        ])
+        expect(results[2].reason).toMatchObject({ code: "cycle", status: 409 })
+        // the queue keeps working after a refusal
+        const r = await tools.cc_reparent_task({ task_id: d, parent_id: id })
+        expect(r).toMatchObject({ ok: true, unchanged: true })
+    })
+
+    test("an old parent that is gone is skipped", async () => {
+        const mid = await spinOff("Middle", id)
+        const leaf = await spinOff("Leaf", mid)
+        const getTaskOrig = store.getTask.bind(store)
+        const { NotFoundError } = await import("../util/errors.js")
+        store.getTask = async (tid) => {
+            if (tid === mid) throw new NotFoundError(`task ${tid}`)
+            return getTaskOrig(tid)
+        }
+        const r = await tools.cc_reparent_task({ task_id: leaf, parent_id: id })
+        expect(r).toMatchObject({ ok: true, previous_parent_id: mid })
     })
 })
 

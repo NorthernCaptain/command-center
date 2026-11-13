@@ -66,6 +66,9 @@ import {
 } from "../lib/worker.js"
 import { formatDue } from "../lib/time.js"
 
+// how long the page stays visible before its Now flag counts as seen
+export const SEEN_AFTER_MS = 2000
+
 const SKIPPED_NOTICE = {
     pending: "Brain is still on it",
     already_posted: "Already posted",
@@ -172,11 +175,11 @@ export default function TaskPage({ id }) {
         } else setChat(last)
     }, [isOwner, loadedId, data])
 
-    // opened: a Now flag raised only to be seen (reminder, snooze end) is
-    // cleared, once per task version (a later reminder is a new version),
-    // and only while the tab is visible
-    // (a reminder that fires while the page sits in a background tab waits
-    // until Leo comes back to it)
+    // looked at: the Now flag (any reason) is cleared once the page has
+    // stayed visible for SEEN_AFTER_MS, once per task version (a flag
+    // raised again later is a new version). Leaving the page, hiding the
+    // tab or a newer version before then restarts the wait (a flag raised
+    // while the page sits in a background tab waits until Leo comes back)
     const pageVisible = usePageVisible()
     const seenFor = useRef(null)
     const nowFlags = data && data.task ? data.task.flags : null
@@ -187,28 +190,35 @@ export default function TaskPage({ id }) {
     const seenVersion = data && data.task ? data.task.updated_at : null
     useEffect(() => {
         if (!seenKey || seenFor.current === seenKey) return
-        seenFor.current = seenKey
-        api.markSeen(loadedId, seenVersion)
-            .then((res) => {
-                if (!res || !res.cleared) return
-                // only onto the version it acknowledged: newer task data
-                // (a live update that came first) is kept
-                setData((prev) =>
-                    prev &&
-                    prev.task &&
-                    String(prev.task.id) === loadedId &&
-                    prev.task.updated_at === seenVersion
-                        ? {
-                              ...prev,
-                              task: res.task || prev.task,
-                              revision: res.revision || prev.revision,
-                          }
-                        : prev
-                )
-            })
-            .catch(() => {
-                // best effort: it stays in Now until the next visit
-            })
+        const timer = setTimeout(() => {
+            seenFor.current = seenKey
+            markSeen()
+        }, SEEN_AFTER_MS)
+        return () => clearTimeout(timer)
+
+        function markSeen() {
+            api.markSeen(loadedId, seenVersion)
+                .then((res) => {
+                    if (!res || !res.cleared) return
+                    // only onto the version it acknowledged: newer task data
+                    // (a live update that came first) is kept
+                    setData((prev) =>
+                        prev &&
+                        prev.task &&
+                        String(prev.task.id) === loadedId &&
+                        prev.task.updated_at === seenVersion
+                            ? {
+                                  ...prev,
+                                  task: res.task || prev.task,
+                                  revision: res.revision || prev.revision,
+                              }
+                            : prev
+                    )
+                })
+                .catch(() => {
+                    // best effort: it stays in Now until the next visit
+                })
+        }
     }, [seenKey, loadedId, seenVersion, setData])
 
     if (hidden) {
