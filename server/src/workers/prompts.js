@@ -29,6 +29,19 @@ export function oneLine(value, max = 200) {
     return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
+/**
+ * "T-12 Fix the upload retry": the agent's session title (claude --name),
+ * task id first, so every herdr pane shows which task it belongs to.
+ */
+export function sessionTitle(task, max = 60) {
+    const own = new RegExp(`^T-${task.id}\\b[\\s:.-]*`, "i")
+    const title = oneLine(String(task.title ?? "").replace(own, ""), max)
+        .replace(/[`$\\"'!]/g, "")
+        .replace(/\s+/g, " ")
+        .trim()
+    return title ? `T-${task.id} ${title}` : `T-${task.id}`
+}
+
 /** A token safe to show as an id / path / URL: no whitespace or quotes. */
 function token(value, max = 300) {
     const s = oneLine(value, max).replace(/[\s"'`<>]/g, "")
@@ -184,9 +197,27 @@ export function feedbackPrompt({ task, pr, round, items, branch }) {
     ].join("\n")
 }
 
-/** "Clean folders" click. */
+/**
+ * "Clean folders" click, or the clean-up after done / cancelled. A cancelled
+ * task's work is dropped: its folders go even with uncommitted or unpushed
+ * changes.
+ */
+const FORCED_CLEAN_RE = /^T-\d+ was cancelled: /
+
+/** Is this clean-up prompt the forced one (cancelled task)? */
+export function isForcedClean(text) {
+    return FORCED_CLEAN_RE.test(String(text ?? ""))
+}
+
 export function cleanPrompt({ task }) {
-    return `Clean: follow tree AGENTS.md §6 for slug ${task.slug}.`
+    const base = `Clean: follow tree AGENTS.md §6 for slug ${task.slug}.`
+    if (task.status !== "cancelled") return base
+    return [
+        `T-${task.id} was cancelled: stop any work on it.`,
+        base,
+        "Force clean: delete the task's folders even if they have uncommitted or unpushed changes; I'm dropping that work, don't stop to ask.",
+        "Still delete only this task's folders, by explicit name. No commit, no push.",
+    ].join(" ")
 }
 
 /** Leo's inline comment from the artifact (Send to agent). */
@@ -196,6 +227,18 @@ export function sendToAgentPrompt({ task, quote, comment }) {
     return q
         ? `Re T-${task.id} artifact, about '${q}': ${text}`
         : `Re T-${task.id}: ${text}`
+}
+
+/**
+ * Launch prompt of an agent started only to clean up after a done or
+ * cancelled task (no live agent left, its folders still there).
+ */
+export function cleanupStartPrompt({ task, treeDir, action }) {
+    return [
+        `Command-center task T-${task.id} ("${oneLine(task.title, 300)}") is ${task.status}. You are started only to clean up its folders (slug ${task.slug}); do no other work on it.`,
+        workspaceRules(treeDir),
+        `Now: ${String(action ?? "").trim()}`,
+    ].join("\n")
 }
 
 /** Sent after a revive (resumed session or adopted agent). */

@@ -300,7 +300,11 @@ its PR(s) are merged**, the same rule as the Asana task.
    gets the Clean prompt (tree AGENTS.md §6) and its herdr workspace
    closes once it is done, as with **Close agent** + **Clean folders**. A
    busy agent gets the prompt when it is idle; a task without folders only
-   has its idle agent closed; no live agent: nothing happens.
+   has its idle agent closed. No live agent but folders left: the agent is
+   started again (resumed when it can be) only for the clean-up, then
+   closed the same way. A task moved
+   to `cancelled` gets the same clean-up, with a forced Clean prompt: the
+   folders go even with uncommitted or unpushed work.
 
 ### PR feedback items
 

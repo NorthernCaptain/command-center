@@ -332,8 +332,9 @@ function CenterSettings() {
                             }
                         />
                         <span>
-                            When a task is done, clean its folders and close the
-                            agent
+                            When a task is done or cancelled, clean its folders
+                            and close the agent (cancelled: uncommitted work is
+                            dropped)
                         </span>
                     </label>
                 ) : null}

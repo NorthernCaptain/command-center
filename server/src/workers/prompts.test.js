@@ -5,6 +5,8 @@
 
 import {
     cleanPrompt,
+    cleanupStartPrompt,
+    isForcedClean,
     createPrPrompt,
     feedbackPrompt,
     freshContextPrompt,
@@ -13,6 +15,7 @@ import {
     orderedRepos,
     resumePrompt,
     sendToAgentPrompt,
+    sessionTitle,
 } from "./prompts.js"
 
 const task = {
@@ -36,6 +39,21 @@ test("oneLine collapses control chars and truncates", () => {
     expect(oneLine("a\n\tb\u0007c")).toBe("a b c")
     expect(oneLine("abcdef", 4)).toBe("abc…")
     expect(oneLine(null)).toBe("")
+})
+
+test("sessionTitle: task id first, one line, no shell quoting characters", () => {
+    expect(sessionTitle({ id: 7, title: "Fix  the\nupload" })).toBe(
+        "T-7 Fix the upload"
+    )
+    expect(sessionTitle({ id: 7, title: `Say "hi" to $USER's \`x\`!` })).toBe(
+        "T-7 Say hi to USERs x"
+    )
+    expect(sessionTitle({ id: 7, title: "" })).toBe("T-7")
+    expect(sessionTitle({ id: 7 })).toBe("T-7")
+    expect(sessionTitle({ id: 7, title: "x".repeat(100) })).toHaveLength(64)
+    // a title that already starts with the id keeps it once
+    expect(sessionTitle({ id: 7, title: "T-7: Fix it" })).toBe("T-7 Fix it")
+    expect(sessionTitle({ id: 7, title: "T-71 other" })).toBe("T-7 T-71 other")
 })
 
 test("orderedRepos puts main first, else the first repo", () => {
@@ -164,10 +182,37 @@ test("feedbackPrompt lists ids, kinds, paths, urls only", () => {
     )
 })
 
+test("cleanupStartPrompt: clean-up only, then the action", () => {
+    const p = cleanupStartPrompt({
+        task: { ...task, status: "cancelled" },
+        treeDir: "/w/tree/",
+        action: "wait for my next message",
+    })
+    expect(p.split("\n")).toEqual([
+        expect.stringMatching(
+            /^Command-center task T-123 \(".*"\) is cancelled\. You are started only to clean up its folders \(slug k7q2\); do no other work on it\.$/
+        ),
+        "Workspace rules: follow /w/tree/AGENTS.md exactly.",
+        "Now: wait for my next message",
+    ])
+    expect(cleanupStartPrompt({ task }).endsWith("Now: ")).toBe(true)
+})
+
 test("clean / send / resume prompts", () => {
     expect(cleanPrompt({ task })).toBe(
         "Clean: follow tree AGENTS.md §6 for slug k7q2."
     )
+    // a cancelled task: forced, its work is dropped
+    const forced = cleanPrompt({ task: { ...task, status: "cancelled" } })
+    expect(forced).toMatch(/^T-123 was cancelled: stop any work on it\. /)
+    expect(forced).toContain("Clean: follow tree AGENTS.md §6 for slug k7q2.")
+    expect(forced).toContain(
+        "even if they have uncommitted or unpushed changes"
+    )
+    expect(forced).toContain("No commit, no push.")
+    expect(isForcedClean(forced)).toBe(true)
+    expect(isForcedClean(cleanPrompt({ task }))).toBe(false)
+    expect(isForcedClean(undefined)).toBe(false)
     expect(
         sendToAgentPrompt({ task, quote: "some\ntext", comment: " do it " })
     ).toBe("Re T-123 artifact, about 'some text': do it")

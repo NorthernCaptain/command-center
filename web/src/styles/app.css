@@ -873,7 +873,7 @@
 
 .row-actions {
     display: flex;
-    flex-direction: column;
+    align-items: center;
     justify-content: center;
     gap: 2px;
     padding: 4px;
@@ -883,10 +883,10 @@
     border-color: transparent;
 }
 
-@media (min-width: 640px) {
+@media (max-width: 639.98px) and (orientation: portrait) {
+    /* phones upright: no quick actions, the row only opens the task */
     .row-actions {
-        flex-direction: row;
-        align-items: center;
+        display: none;
     }
 }
 

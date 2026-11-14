@@ -599,7 +599,7 @@ describe("Settings: phase 2/3", () => {
         renderWithApp(<Settings />, { features: { workers: true } })
         await screen.findByDisplayValue("claude-sdk")
         const box = screen.getByLabelText(
-            /When a task is done, clean its folders/
+            /When a task is done or cancelled, clean its folders/
         )
         expect(box).toBeChecked()
         fireEvent.click(box)

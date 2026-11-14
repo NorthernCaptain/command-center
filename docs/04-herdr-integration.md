@@ -77,6 +77,10 @@ herdr agent get t123-upload-retry     # -> .result.agent.agent_session.value
 
 - **Agent name** = `t<id>-<short-slug-of-title>` (must match
   `[a-z][a-z0-9_-]{0,31}`). It is the key for every later command.
+- **Session title**: a Claude agent starts (and resumes) with
+  `--name "T-<id> <title>"`, so its terminal title in herdr always leads
+  with the task id instead of a title Claude makes up. Codex has no such
+  flag and names its own session.
 - **No focus** by default. **Open in herdr** → `herdr agent focus <name>`.
 - **Workspace metadata** (nice-to-have):
   `herdr workspace report-metadata <ws> --source command-center --token
@@ -126,7 +130,7 @@ the tree AGENTS.md "only on the user's command" rules are satisfied.
 | **PR feedback** (automatic; also a manual **Address feedback** button) | `pr_feedback` | See the template below. |
 | **Clean folders** (click) | `done` | "Clean: follow tree AGENTS.md §6 for slug k7q2." |
 | **Close agent** with **Clean folders** checked (default on a `done` task with folders) | `done` | The same Clean prompt. The session is marked `close_after` with the prompt's outbox row (recorded before the prompt is sent); once that row was sent and the agent has worked and is idle again with no `…--<slug>` folder left, the service closes its workspace. A failed or cancelled prompt cancels the close. Folders left after the turn: the workspace stays open, Now "Clean-up left folders; agent kept open". |
-| Task moved to `done` (close-out or Done), setting `workers.auto_clean_on_done` on (default) | `done` | The same as **Close agent** + **Clean folders**, by the service (event `agent_close_requested` with `auto: true`). A busy or blocked agent gets the prompt once it is idle (the close stays pending). No folders: an idle agent is closed (`agent_closed` with `after: "done"`). An agent that is gone or busy without folders is skipped (`agent_auto_close_skipped`). |
+| Task moved to `done` (close-out or Done) or `cancelled`, setting `workers.auto_clean_on_done` on (default) | `done`, `cancelled` | The same as **Close agent** + **Clean folders**, by the service (event `agent_close_requested` with `auto: true`). A busy or blocked agent gets the prompt once it is idle (the close stays pending). No folders: an idle agent is closed (`agent_closed` with `after: "done"`). No live agent but folders left: the agent is started again (resumed, or relaunched with a clean-up-only prompt) for the clean-up, then closed (`agent_cleanup_started`). An agent that is gone or busy without folders is skipped (`agent_auto_close_skipped`). On `cancelled` the Clean prompt is forced: the folders go even with uncommitted or unpushed work. |
 | **Send to agent** (inline comment) | any active | "Re T-123 artifact, about '<quote>': <comment>" |
 
 ### PR feedback prompt (template)
