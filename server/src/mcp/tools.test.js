@@ -139,19 +139,71 @@ describe("helpers", () => {
     test("contextFromHeaders", () => {
         expect(
             contextFromHeaders({ "x-cc-task": " 7 ", "x-cc-agent": ["a1"] })
-        ).toEqual({ callerTaskId: "7", agent: "a1" })
+        ).toEqual({ callerTaskId: "7", callerReviewId: null, agent: "a1" })
         expect(contextFromHeaders({ "x-cc-task": "" })).toEqual({
             callerTaskId: null,
+            callerReviewId: null,
+            agent: null,
+        })
+        expect(contextFromHeaders({ "x-cc-review": "12" })).toEqual({
+            callerTaskId: null,
+            callerReviewId: "12",
             agent: null,
         })
         expect(contextFromHeaders()).toEqual({
             callerTaskId: null,
+            callerReviewId: null,
             agent: null,
         })
     })
 
+    test("a review agent can call no task tool", async () => {
+        const t = createAgentTools({ store: {}, scheduler: {}, dateParser: {} })
+        for (const name of TOOL_NAMES.filter((n) => n !== "cc_review_report")) {
+            let err = null
+            try {
+                await t[name]({ task_id: 999 }, { callerReviewId: "12" })
+            } catch (e) {
+                err = e
+            }
+            expect(err).toMatchObject({ code: "wrong_caller", status: 403 })
+        }
+    })
+
+    test("cc_review_report: validated, passed to the review service", async () => {
+        const reviewService = { report: jest.fn(async () => ({ ok: true })) }
+        const t = createAgentTools({
+            store: {},
+            scheduler: {},
+            dateParser: {},
+            reviewService,
+        })
+        const ctx = { callerReviewId: "12" }
+        expect(
+            await t.cc_review_report(
+                { review_id: "12", verdict: "approved", issues: 0 },
+                ctx
+            )
+        ).toEqual({ ok: true })
+        expect(reviewService.report).toHaveBeenCalledWith(
+            { review_id: 12, verdict: "approved", issues: 0 },
+            ctx
+        )
+        await expect(
+            t.cc_review_report({ review_id: 12, verdict: "maybe" })
+        ).rejects.toMatchObject({ code: "validation" })
+        const bare = createAgentTools({
+            store: {},
+            scheduler: {},
+            dateParser: {},
+        })
+        await expect(
+            bare.cc_review_report({ review_id: 1, verdict: "skipped" })
+        ).rejects.toMatchObject({ code: "unavailable" })
+    })
+
     test("a schema per tool", () => {
-        expect(TOOL_NAMES).toHaveLength(10)
+        expect(TOOL_NAMES).toHaveLength(11)
         for (const n of TOOL_NAMES) expect(TOOL_SCHEMAS[n]).toBeTruthy()
         expect(Object.keys(tools).sort()).toEqual([...TOOL_NAMES].sort())
     })

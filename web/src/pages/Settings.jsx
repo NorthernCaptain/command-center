@@ -23,6 +23,10 @@ export const SETTING_KEYS = [
     "workers.default_kind",
     "workers.auto_clean_on_done",
     "github.poll_minutes",
+    "github.auto_merge",
+    "reviews.poll_minutes",
+    "reviews.parallel",
+    "reviews.agent_kind",
     "digest.enabled",
     "digest.time",
     "stale.days",
@@ -39,6 +43,10 @@ export function settingErrors(form) {
     const errors = {}
     if (!intIn(form["github.poll_minutes"], 5, 1440))
         errors["github.poll_minutes"] = "Whole minutes, 5 to 1440."
+    if (!intIn(form["reviews.poll_minutes"], 5, 1440))
+        errors["reviews.poll_minutes"] = "Whole minutes, 5 to 1440."
+    if (!intIn(form["reviews.parallel"], 1, 10))
+        errors["reviews.parallel"] = "1 to 10 agents."
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(String(form["digest.time"] || "")))
         errors["digest.time"] = "Use HH:MM, e.g. 08:30."
     if (!intIn(form["stale.days"], 1, 90))
@@ -368,6 +376,26 @@ function CenterSettings() {
                                 {errorFor("github.poll_minutes")}
                             </label>
                         ) : null}
+                        {features.github ? (
+                            <label className="field field-check">
+                                <input
+                                    type="checkbox"
+                                    className="switch"
+                                    checked={Boolean(form["github.auto_merge"])}
+                                    onChange={(e) =>
+                                        set(
+                                            "github.auto_merge",
+                                            e.target.checked
+                                        )
+                                    }
+                                />
+                                <span>
+                                    Merge our task PRs automatically once
+                                    approved and all required checks pass (merge
+                                    commit)
+                                </span>
+                            </label>
+                        ) : null}
                         {features.digest ? (
                             <>
                                 <label className="field">
@@ -455,6 +483,76 @@ function CenterSettings() {
                             </button>
                         </div>
                     ) : null}
+                </>
+            ) : null}
+            {features.github ? (
+                <>
+                    <h3 className="panel-sub">PR reviews</h3>
+                    <div className="field-grid">
+                        <label className="field">
+                            <span>Scan every (minutes)</span>
+                            <input
+                                className="input"
+                                type="number"
+                                inputMode="numeric"
+                                min={5}
+                                max={1440}
+                                aria-label="PR review scan (minutes)"
+                                aria-invalid={Boolean(
+                                    errors["reviews.poll_minutes"] &&
+                                    "reviews.poll_minutes" in changes
+                                )}
+                                value={form["reviews.poll_minutes"]}
+                                onChange={(e) =>
+                                    set(
+                                        "reviews.poll_minutes",
+                                        toNumber(e.target.value)
+                                    )
+                                }
+                            />
+                            {errorFor("reviews.poll_minutes")}
+                        </label>
+                        <label className="field">
+                            <span>Review agents in parallel</span>
+                            <input
+                                className="input"
+                                type="number"
+                                inputMode="numeric"
+                                min={1}
+                                max={10}
+                                aria-label="Review agents in parallel"
+                                aria-invalid={Boolean(
+                                    errors["reviews.parallel"] &&
+                                    "reviews.parallel" in changes
+                                )}
+                                value={form["reviews.parallel"]}
+                                onChange={(e) =>
+                                    set(
+                                        "reviews.parallel",
+                                        toNumber(e.target.value)
+                                    )
+                                }
+                            />
+                            {errorFor("reviews.parallel")}
+                        </label>
+                        <label className="field">
+                            <span>Review agent</span>
+                            <select
+                                className="input"
+                                aria-label="Review agent"
+                                value={form["reviews.agent_kind"]}
+                                onChange={(e) =>
+                                    set("reviews.agent_kind", e.target.value)
+                                }
+                            >
+                                {WORKER_KINDS.map((k) => (
+                                    <option key={k} value={k}>
+                                        {k}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                    </div>
                 </>
             ) : null}
             <h3 className="panel-sub">Models</h3>

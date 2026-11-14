@@ -3,7 +3,7 @@
  * MIT license.
  */
 
-// Tiny history-API router: "/", "/t/:id", "/settings". The server serves
+// Tiny history-API router: "/", "/t/:id", "/settings", "/reviews". The server serves
 // index.html for unknown paths (SPA fallback).
 
 import { useSyncExternalStore } from "react"
@@ -45,6 +45,7 @@ export function matchRoute(path) {
     const p = (path || "/").replace(/\/+$/, "") || "/"
     if (p === "/") return { name: "home", params: {} }
     if (p === "/settings") return { name: "settings", params: {} }
+    if (p === "/reviews") return { name: "reviews", params: {} }
     const m = p.match(/^\/t\/(?:T-)?(\d+)$/i)
     if (m) return { name: "task", params: { id: Number(m[1]) } }
     return { name: "not_found", params: {} }

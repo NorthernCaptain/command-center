@@ -238,6 +238,33 @@ export function createApi({ fetch: fetchImpl, base = "" } = {}) {
             request("DELETE", "/api/push/subscribe", { endpoint }),
         getDigest: () => request("GET", "/api/digest"),
         runDigest: () => request("POST", "/api/digest/run"),
+
+        // --- PR reviews (docs/09-pr-reviews.md) -------------------------
+        /** Dashboard: { prs, counts, stats, settings, me }. */
+        reviews: ({ tab, q } = {}, opts) =>
+            request(
+                "GET",
+                `/api/reviews${buildQuery({ tab, q })}`,
+                undefined,
+                opts
+            ),
+        reviewRepos: () => request("GET", "/api/reviews/repos"),
+        /** { track?, auto_review? } -> { repo } */
+        setReviewRepo: (repo, flags = {}) =>
+            request("PUT", `/api/reviews/repos/${enc(repo)}`, flags),
+        /** Scan one repo (or every tracked one) in the background. */
+        scanReviews: (repo) =>
+            request("POST", "/api/reviews/scan", repo ? { repo } : {}),
+        /** Queue a review (or re-review) of one PR -> { run }. */
+        reviewPr: (repo, number) =>
+            request(
+                "POST",
+                `/api/reviews/prs/${enc(repo)}/${enc(number)}/review`
+            ),
+        cancelReviewRun: (id) =>
+            request("POST", `/api/reviews/runs/${enc(id)}/cancel`),
+        focusReviewRun: (id) =>
+            request("POST", `/api/reviews/runs/${enc(id)}/focus`),
     }
 }
 

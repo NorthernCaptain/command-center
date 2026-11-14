@@ -19,6 +19,7 @@ the paperwork. Real work is delegated to Claude agents running in
 | [06 — UI, artifacts & comments](docs/06-ui-artifacts-comments.md) | Home, task page, inline comments and anchoring          |
 | [07 — Roadmap](docs/07-roadmap.md)                                | Phases 0–5                                              |
 | [08 — Open questions](docs/08-open-questions.md)                  | Decisions needed                                        |
+| [09 — PR reviews and auto-merge](docs/09-pr-reviews.md)           | Review dashboard, review agents, auto-merge of task PRs |
 
 ## One-paragraph summary
 

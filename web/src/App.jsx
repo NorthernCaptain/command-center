@@ -10,6 +10,7 @@ import Link from "./components/Link.jsx"
 import { EmptyState } from "./components/Skeleton.jsx"
 import TopBar, { BrandMark } from "./components/TopBar.jsx"
 import Home from "./pages/Home.jsx"
+import Reviews from "./pages/Reviews.jsx"
 import Settings from "./pages/Settings.jsx"
 import TaskPage from "./pages/Task.jsx"
 import { api, errorMessage, isTailnetConfigError } from "./lib/api.js"
@@ -135,6 +136,8 @@ export default function App() {
     else if (route.name === "task")
         page = <TaskPage key={route.params.id} id={route.params.id} />
     else if (route.name === "settings") page = <Settings />
+    // owner only: the page shows "Nothing here" to viewers
+    else if (route.name === "reviews") page = <Reviews />
     else
         page = (
             <EmptyState title="Nothing here" glyph="?">

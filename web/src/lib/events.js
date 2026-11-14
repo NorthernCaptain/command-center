@@ -24,6 +24,8 @@ export const EVENT_TYPES = [
     "pr.updated",
     "feedback.updated",
     "digest.updated",
+    // PR reviews dashboard (docs/09-pr-reviews.md)
+    "reviews.updated",
 ]
 
 /** Normalize a parsed SSE payload to { type, task_id, data, at }. */

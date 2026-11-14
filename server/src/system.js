@@ -66,6 +66,8 @@ import {
     mountAgentTools,
 } from "./mcp/index.js"
 import { createGithub } from "./github/index.js"
+import { createReviews } from "./reviews/index.js"
+import { mcpLaunchArgs, REVIEW_HEADER_ENV } from "./workers/mcpArgs.js"
 import { createPhase3 } from "./phase3/index.js"
 import { startListeners } from "./http/server.js"
 import { createTaskFiles } from "./files/taskFiles.js"
@@ -386,6 +388,29 @@ export function createSystem({ config, overrides = {} }) {
     })
     // "Address feedback" goes through the watcher's round queue
     workerService.setFeedbackDelivery(github.prWatcher)
+    // PR reviews of other developers' PRs (docs/09)
+    const localPort = config.listeners?.local?.port || 7788
+    const reviewsMod = createReviews({
+        db,
+        config,
+        gh: github.gh,
+        herdr: herdrClient,
+        repoTable,
+        settingsRepo,
+        bus,
+        clock,
+        log,
+        agentEnv: () => ({
+            CC_URL: `http://127.0.0.1:${localPort}`,
+            CC_TOKEN: auth.localToken() || "",
+        }),
+        mcpArgs: (kind) =>
+            mcpLaunchArgs(kind, {
+                url: `http://127.0.0.1:${localPort}/mcp`,
+                headerEnv: REVIEW_HEADER_ENV,
+            }),
+        ...(overrides.reviewsFs ? { fs: overrides.reviewsFs } : {}),
+    })
     // task attachments; workers attach from the tree folder or temp folders
     const taskFiles = createTaskFiles({
         tasksDir: config.tasksDir,
@@ -402,6 +427,7 @@ export function createSystem({ config, overrides = {} }) {
         identity,
         prWatcher: github.prWatcher,
         workerService,
+        reviewService: reviewsMod.reviewService,
         notifier,
         bus,
         clock,
@@ -447,6 +473,7 @@ export function createSystem({ config, overrides = {} }) {
         mounts: [
             (api, h) => mountWorkers(api, h, { workerService }),
             github.mount,
+            reviewsMod.mount,
             (api, h) => mountAgentTools(api, h, { tools: agentTools }),
             phase3.mount,
             (api, h) => mountThreadNotice(api, h, { notifier: threadNotifier }),
@@ -489,6 +516,7 @@ export function createSystem({ config, overrides = {} }) {
         herdrClient,
         workerService,
         github,
+        reviews: reviewsMod,
         agentTools,
         phase3,
         appLocal,
@@ -519,6 +547,7 @@ export function createSystem({ config, overrides = {} }) {
             await asanaSync.start()
             await phase3.start()
             github.prWatcher.start()
+            reviewsMod.reviewService.start()
             // unresolved Slack thread notices keep their tasks in Now
             threadNotifier.start()
             if (listen) {
@@ -546,6 +575,7 @@ export function createSystem({ config, overrides = {} }) {
             if (listeners) await listeners.close()
             // PR watcher first: it calls the worker service while it runs
             await github.prWatcher.stop()
+            await reviewsMod.reviewService.stop()
             await threadNotifier.stop()
             await workerService.stop()
             await phase3.stop()

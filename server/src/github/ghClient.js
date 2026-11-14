@@ -39,6 +39,8 @@ export const VIEW_FIELDS = [
     "reviewDecision",
     "statusCheckRollup",
     "commits",
+    "isDraft",
+    "mergeStateStatus",
 ]
 
 /** Default exec: execFile without a shell; resolves to stdout. */
@@ -237,6 +239,8 @@ export function createGhClient({
         ])
         return {
             ...normalizePr(pr),
+            isDraft: Boolean(pr.isDraft),
+            mergeStateStatus: pr.mergeStateStatus || null,
             reviewDecision: pr.reviewDecision || null,
             statusCheckRollup: (pr.statusCheckRollup || []).map(normalizeCheck),
             reviews: revs,
@@ -298,7 +302,65 @@ export function createGhClient({
         return typeof out === "string" ? out.trim() : out
     }
 
+    /**
+     * GraphQL query with string variables -> its "data"; any error (also
+     * next to partial data) throws. partial: -> { data, errors } instead,
+     * for queries whose parts (aliases) the caller can take one by one (gh
+     * exits 1 on such an answer but prints it).
+     */
+    async function graphql(query, vars = {}, { partial = false } = {}) {
+        const args = ["api", "graphql", "-f", `query=${query}`]
+        // -f: raw strings (-F would turn "123" or "true" into JSON types)
+        for (const [k, v] of Object.entries(vars)) args.push("-f", `${k}=${v}`)
+        let res
+        try {
+            res = await run(args, "graphql")
+        } catch (err) {
+            const out = err && err.stdout
+            if (!out || !String(out).trim()) throw err
+            res = parseOutput(out, "graphql")
+            if (!res || !res.data) throw err
+        }
+        const errors = Array.isArray(res && res.errors) ? res.errors : []
+        if (partial && res && res.data) return { data: res.data, errors }
+        if (errors.length)
+            throw new Error(`gh graphql: ${errors[0].message || "error"}`)
+        return partial
+            ? { data: (res && res.data) || null, errors }
+            : (res && res.data) || null
+    }
+
+    /** The authenticated user's login. */
+    async function login() {
+        const me = await run(["api", "user"], "user")
+        if (!me || !me.login) throw new Error("gh api user: no login")
+        return me.login
+    }
+
+    /**
+     * Merge a PR (merge commit by default) and delete its branch; only the
+     * given head commit (--match-head-commit), so nothing unreviewed merges.
+     */
+    async function mergePr(repo, number, { method = "merge", headSha } = {}) {
+        const args = [
+            "pr",
+            "merge",
+            String(number),
+            "--repo",
+            full(repo),
+            `--${method}`,
+            "--delete-branch",
+        ]
+        if (headSha) args.push("--match-head-commit", headSha)
+        const out = await exec(ghBin, args)
+        return typeof out === "string" ? out.trim() : out
+    }
+
     return {
+        graphql,
+        login,
+        mergePr,
+        org: org || null,
         listPrsByHead,
         getPr,
         reviewComments,

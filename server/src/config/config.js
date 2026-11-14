@@ -90,6 +90,8 @@ export function defaultConfig({ home = os.homedir(), root = REPO_ROOT } = {}) {
             // thread replies stay no_action)
             actionableBots: [],
         },
+        // PR review agents start here (docs/09); its AGENTS.md says how
+        reviews: { dir: path.join(home, "work", "reviews") },
         review: {
             archiveDir: path.join(home, "work", "review", "reviews"),
             dashboardUrl: "http://127.0.0.1:7777/",

@@ -569,6 +569,10 @@ describe("Settings: phase 2/3", () => {
         expect(form["digest.time"]).toBe("08:30")
         expect(form["stale.days"]).toBe(7)
         expect(form["push.enabled"]).toBe(false)
+        expect(form["github.auto_merge"]).toBe(true)
+        expect(form["reviews.poll_minutes"]).toBe(20)
+        expect(form["reviews.parallel"]).toBe(4)
+        expect(form["reviews.agent_kind"]).toBe("claude")
         expect(readSetting(null, "digest.time")).toBe("08:30")
     })
 
@@ -585,6 +589,18 @@ describe("Settings: phase 2/3", () => {
                 })
             )
         ).toEqual(["github.poll_minutes", "digest.time", "stale.days"])
+        expect(
+            Object.keys(
+                settingErrors({
+                    ...ok,
+                    "reviews.poll_minutes": 4,
+                    "reviews.parallel": 11,
+                })
+            )
+        ).toEqual(["reviews.poll_minutes", "reviews.parallel"])
+        expect(settingErrors({ ...ok, "reviews.parallel": 0 })).toHaveProperty([
+            "reviews.parallel",
+        ])
         expect(settingErrors({ ...ok, "digest.time": null })).toHaveProperty([
             "digest.time",
         ])
@@ -670,6 +686,42 @@ describe("Settings: phase 2/3", () => {
             "digest.time": "07:15",
             "digest.enabled": false,
             "push.enabled": true,
+        })
+    })
+
+    it("edits the PR review settings and auto-merge", async () => {
+        const f = setup({
+            "PATCH /api/settings": ({ body }) => ({
+                settings: { ...SETTINGS, ...body },
+            }),
+        })
+        renderWithApp(<Settings />, { features: { github: true } })
+        await screen.findByDisplayValue("claude-sdk")
+        const save = screen.getByRole("button", { name: "Save" })
+        const merge = screen.getByLabelText(/Merge our task PRs automatically/)
+        expect(merge).toBeChecked()
+        fireEvent.click(merge)
+        const scan = screen.getByLabelText("PR review scan (minutes)")
+        expect(scan).toHaveValue(20)
+        fireEvent.change(scan, { target: { value: "3" } })
+        expect(screen.getByRole("alert")).toHaveTextContent("5 to 1440")
+        expect(save).toBeDisabled()
+        fireEvent.change(scan, { target: { value: "30" } })
+        const parallel = screen.getByLabelText("Review agents in parallel")
+        expect(parallel).toHaveValue(4)
+        fireEvent.change(parallel, { target: { value: "12" } })
+        expect(screen.getByRole("alert")).toHaveTextContent("1 to 10")
+        fireEvent.change(parallel, { target: { value: "2" } })
+        fireEvent.change(screen.getByLabelText("Review agent"), {
+            target: { value: "codex" },
+        })
+        fireEvent.click(save)
+        await screen.findByText("Settings saved")
+        expect(f.find("PATCH", "/api/settings")[0].body).toEqual({
+            "github.auto_merge": false,
+            "reviews.poll_minutes": 30,
+            "reviews.parallel": 2,
+            "reviews.agent_kind": "codex",
         })
     })
 

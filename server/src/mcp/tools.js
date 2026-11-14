@@ -9,11 +9,13 @@
 //
 // Each handler is (args, ctx) -> plain JSON result and throws AppError.
 // ctx = { callerTaskId?, agent?, actor? }: callerTaskId is the X-CC-Task
-// header (a write for another task is a 403 wrong_task), agent the
+// header (a write for another task is a 403 wrong_task), callerReviewId
+// the X-CC-Review header of a PR review agent (cc_review_report), agent the
 // X-CC-Agent header. The actor is "agent:<name>" from the header, else the
 // task's live session name, else "agent:unknown".
 
 import { z } from "zod"
+import { REVIEW_VERDICTS } from "../contracts/reviews.js"
 import { ActorSchema, LINK_TYPES, taskKey } from "../contracts/schemas.js"
 import { newLinkId } from "../agent/jobs/util.js"
 import {
@@ -148,6 +150,20 @@ export const TOOL_SCHEMAS = {
         ),
         label: z.string().trim().min(1).max(200).optional(),
     }),
+    cc_review_report: z.object({
+        review_id: z
+            .union([z.number().int().positive(), z.string().regex(/^\d{1,9}$/)])
+            .describe("The review id from your prompt"),
+        verdict: z.enum(REVIEW_VERDICTS),
+        issues: z
+            .number()
+            .int()
+            .min(0)
+            .max(1000)
+            .optional()
+            .describe("Actionable issues in the submitted review"),
+        summary: z.string().trim().max(4000).optional(),
+    }),
 }
 
 export const TOOL_NAMES = Object.keys(TOOL_SCHEMAS)
@@ -171,6 +187,8 @@ export const TOOL_DESCRIPTIONS = {
         "Create a spin-off task in Leo's inbox. parent_id: your task (the default) or another task of its family (e.g. your parent, when the work belongs there).",
     cc_reparent_task:
         "Move a task under another parent: both must be in your task's family (its parent chain and their spin-offs). The old parent's spin-off link goes, the new parent gets one. Repeating it with the current parent repairs a missing spin-off link.",
+    cc_review_report:
+        "PR review agents only: report the outcome of the review you were started for. verdict approved | changes_requested (the GitHub review is submitted), unchanged (re-review: nothing since our change request changes it, it stands, no new review) or skipped (no review could be done; say why in summary). issues: actionable issues in the review. Your session is closed after this.",
     cc_attach_file:
         "Attach a file (screenshot, video, report .md, PDF, log) to the task: it is copied next to the artifact, listed in its Attachments section (images and videos shown inline) and in the task's Files tab. Only files under the tree folder or a temp folder. Max 250 MB.",
 }
@@ -205,7 +223,11 @@ export function contextFromHeaders(headers = {}) {
         const s = Array.isArray(v) ? v[0] : v
         return typeof s === "string" && s.trim() ? s.trim() : null
     }
-    return { callerTaskId: get("x-cc-task"), agent: get("x-cc-agent") }
+    return {
+        callerTaskId: get("x-cc-task"),
+        callerReviewId: get("x-cc-review"),
+        agent: get("x-cc-agent"),
+    }
 }
 
 /** "t123-x" | "agent:t123-x" -> "agent:t123-x"; invalid -> null. */
@@ -229,6 +251,7 @@ export function agentActor(name) {
  * @param {object} [deps.notifier]     notify()
  * @param {object} [deps.bus]          emit(); feedback.updated after cc_feedback
  * @param {object} [deps.taskFiles]  task attachments (cc_attach_file)
+ * @param {object} [deps.reviewService] PR reviews (cc_review_report)
  * @param {object} [deps.clock]
  * @param {object} [deps.log]
  */
@@ -242,6 +265,7 @@ export function createAgentTools({
     notifier = null,
     bus = null,
     taskFiles = null,
+    reviewService = null,
     clock = systemClock,
     log = nullLogger,
 }) {
@@ -1287,17 +1311,41 @@ export function createAgentTools({
         }
     }
 
+    async function cc_review_report(args, ctx = {}) {
+        const a = validate(TOOL_SCHEMAS.cc_review_report, args)
+        if (!reviewService) throw unavailable("PR reviews")
+        return reviewService.report(
+            { ...a, review_id: Number(a.review_id) },
+            ctx
+        )
+    }
+
+    // A PR review agent (X-CC-Review) works on no task: it may only report
+    // its review, never read or change tasks (it is not the owner either).
+    const taskOnly =
+        (fn) =>
+        (args, ctx = {}) => {
+            if (ctx && ctx.callerReviewId)
+                throw new AppError(
+                    "wrong_caller",
+                    "a PR review agent can only call cc_review_report",
+                    { status: 403 }
+                )
+            return fn(args, ctx)
+        }
+
     return {
-        cc_get_task,
-        cc_update_artifact,
-        cc_log_decision,
-        cc_add_link,
-        cc_report,
-        cc_feedback,
-        cc_schedule,
-        cc_create_task,
-        cc_reparent_task,
-        cc_attach_file,
+        cc_review_report,
+        cc_get_task: taskOnly(cc_get_task),
+        cc_update_artifact: taskOnly(cc_update_artifact),
+        cc_log_decision: taskOnly(cc_log_decision),
+        cc_add_link: taskOnly(cc_add_link),
+        cc_report: taskOnly(cc_report),
+        cc_feedback: taskOnly(cc_feedback),
+        cc_schedule: taskOnly(cc_schedule),
+        cc_create_task: taskOnly(cc_create_task),
+        cc_reparent_task: taskOnly(cc_reparent_task),
+        cc_attach_file: taskOnly(cc_attach_file),
     }
 }
 

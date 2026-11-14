@@ -394,6 +394,138 @@ describe("createGhClient", () => {
         expect(await gh2.prComment("r", 3, "b")).toEqual({ stdout: "x" })
     })
 
+    test("graphql, login and mergePr (PR reviews, auto-merge)", async () => {
+        const exec = jest.fn(async (file, args) => {
+            if (args[1] === "graphql")
+                return JSON.stringify(
+                    args.includes("name=broken")
+                        ? { errors: [{ message: "Could not resolve" }] }
+                        : args.includes("name=empty")
+                          ? { errors: [{}] }
+                          : { data: { repository: { id: 1 } } }
+                )
+            if (args[1] === "user") return JSON.stringify({ login: "leok" })
+            return "merged\n"
+        })
+        const gh = createGhClient({ exec, org: "acme" })
+        expect(gh.org).toBe("acme")
+        expect(
+            await gh.graphql("query { x }", { owner: "acme", name: "mobile" })
+        ).toEqual({ repository: { id: 1 } })
+        expect(exec).toHaveBeenCalledWith("gh", [
+            "api",
+            "graphql",
+            "-f",
+            "query=query { x }",
+            "-f",
+            "owner=acme",
+            "-f",
+            "name=mobile",
+        ])
+        await expect(gh.graphql("q", { name: "broken" })).rejects.toThrow(
+            "gh graphql: Could not resolve"
+        )
+        await expect(gh.graphql("q", { name: "empty" })).rejects.toThrow(
+            "gh graphql: error"
+        )
+        // gh exits 1 on a partial answer but prints the data
+        const partial = createGhClient({
+            exec: jest.fn(async (file, args) => {
+                const err = new Error("Command failed: gh api graphql")
+                if (args.includes("name=part"))
+                    err.stdout = JSON.stringify({
+                        data: { repository: { p1: null, p2: { number: 2 } } },
+                        errors: [{ type: "NOT_FOUND" }],
+                    })
+                if (args.includes("name=nodata"))
+                    err.stdout = JSON.stringify({ errors: [{}] })
+                throw err
+            }),
+            org: "acme",
+        })
+        // any error rejects the answer, unless the caller takes parts
+        await expect(partial.graphql("q", { name: "part" })).rejects.toThrow(
+            "gh graphql: error"
+        )
+        expect(
+            await partial.graphql("q", { name: "part" }, { partial: true })
+        ).toEqual({
+            data: { repository: { p1: null, p2: { number: 2 } } },
+            errors: [{ type: "NOT_FOUND" }],
+        })
+        // exit 0 with data and field errors
+        const fieldErr = createGhClient({
+            exec: jest.fn(async () =>
+                JSON.stringify({
+                    data: { repository: { p3: { reviews: null } } },
+                    errors: [
+                        {
+                            message: "reviews failed",
+                            path: ["repository", "p3", "reviews"],
+                        },
+                    ],
+                })
+            ),
+            org: "acme",
+        })
+        await expect(fieldErr.graphql("q")).rejects.toThrow(
+            "gh graphql: reviews failed"
+        )
+        expect(
+            (await fieldErr.graphql("q", {}, { partial: true })).errors
+        ).toHaveLength(1)
+        const empty = createGhClient({
+            exec: jest.fn(async () => "{}"),
+            org: "acme",
+        })
+        expect(await empty.graphql("q", {}, { partial: true })).toEqual({
+            data: null,
+            errors: [],
+        })
+        await expect(partial.graphql("q", { name: "nodata" })).rejects.toThrow(
+            "Command failed"
+        )
+        await expect(partial.graphql("q", { name: "x" })).rejects.toThrow(
+            "Command failed"
+        )
+        expect(await gh.login()).toBe("leok")
+        expect(
+            await gh.mergePr("mobile", 7, { method: "merge", headSha: "abc" })
+        ).toBe("merged")
+        expect(exec).toHaveBeenLastCalledWith("gh", [
+            "pr",
+            "merge",
+            "7",
+            "--repo",
+            "acme/mobile",
+            "--merge",
+            "--delete-branch",
+            "--match-head-commit",
+            "abc",
+        ])
+        await gh.mergePr("mobile", 8)
+        expect(exec.mock.calls.at(-1)[1]).toEqual([
+            "pr",
+            "merge",
+            "8",
+            "--repo",
+            "acme/mobile",
+            "--merge",
+            "--delete-branch",
+        ])
+        const nobody = createGhClient({
+            exec: jest.fn(async () => "{}"),
+            org: "acme",
+        })
+        await expect(nobody.login()).rejects.toThrow("no login")
+        expect(await nobody.graphql("q")).toBeNull()
+        const objOut = createGhClient({
+            exec: jest.fn(async () => ({ stdout: "x" })),
+            org: "acme",
+        })
+        expect(await objOut.mergePr("r", 1)).toEqual({ stdout: "x" })
+    })
+
     test("defaultExec runs a real process", async () => {
         const out = await defaultExec(process.execPath, [
             "-e",

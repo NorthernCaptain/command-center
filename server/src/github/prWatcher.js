@@ -102,6 +102,40 @@ const FEEDBACK_REASON = "PR feedback"
 const WATCHER_ERROR = "PR watcher:"
 const ACTOR = "system"
 
+/** Runtime setting (default on): merge approved, mergeable task PRs. */
+export const AUTO_MERGE_SETTING = "github.auto_merge"
+/** GitHub merge states with nothing blocking (checks green, no conflict). */
+const MERGEABLE_STATES = new Set(["CLEAN", "HAS_HOOKS"])
+const OPINIONS = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"])
+
+/**
+ * Is a PR ready to merge? GitHub's merge state has nothing blocking
+ * (checks, conflicts, required reviews), GitHub's review decision is
+ * APPROVED or none (no review required), and the current head commit is
+ * approved: some reviewer's latest opinion is an approval of that commit
+ * and no reviewer's latest opinion is a change request. An approval of an
+ * older commit never merges a newer one.
+ */
+export function mergeReady(pr) {
+    if (!pr || pr.isDraft) return false
+    if (!MERGEABLE_STATES.has(pr.mergeStateStatus)) return false
+    if (pr.reviewDecision && pr.reviewDecision !== "APPROVED") return false
+    const latest = new Map()
+    const reviews = [...(pr.reviews || [])].sort(
+        (a, b) => ms(a.submittedAt) - ms(b.submittedAt)
+    )
+    for (const r of reviews) {
+        const who = r.author && r.author.login
+        if (who && OPINIONS.has(r.state)) latest.set(who.toLowerCase(), r)
+    }
+    const opinions = [...latest.values()]
+    if (opinions.some((r) => r.state === "CHANGES_REQUESTED")) return false
+    const head = lower(pr.headRefOid)
+    return opinions.some(
+        (r) => r.state === "APPROVED" && head && lower(r.commitId) === head
+    )
+}
+
 const lower = (s) => String(s || "").toLowerCase()
 const same = (a, b) => lower(a) === lower(b)
 const ms = (iso) => (iso ? new Date(iso).getTime() : NaN)
@@ -404,6 +438,7 @@ export function createPrWatcher({
 }) {
     const now = () => clock.now().toISOString()
     const queues = new Map()
+    const mergeFailedHead = new Map() // PR url -> head sha of the last failed merge
     const inflight = new Map()
     const candidateMap = new Map() // taskId -> Map(repo -> [{repo,url,number,reason}])
     let pollAllRun = null
@@ -1244,14 +1279,13 @@ export function createPrWatcher({
         const known = new Map(
             (await store.listFeedback(taskId)).map((i) => [i.id, i])
         )
-        const pr = await gh.getPr(d.repo, ref.number)
+        let pr = await gh.getPr(d.repo, ref.number)
         const reviewComments = await gh.reviewComments(d.repo, ref.number)
         const watch = st.getWatch.get(d.repo, ref.number)
-        const merged = Boolean(pr.mergedAt) || pr.state === "MERGED"
+        let merged = Boolean(pr.mergedAt) || pr.state === "MERGED"
         // state wins when present: a reopened PR may still carry closedAt
-        const closed =
+        let closed =
             !merged && (pr.state ? pr.state === "CLOSED" : Boolean(pr.closedAt))
-
         if (!merged && !closed) {
             const fresh = extractItems({
                 pr,
@@ -1320,6 +1354,20 @@ export function createPrWatcher({
             else out.failedTwice.push(rec)
         }
 
+        // after this poll's verification: an item resolved without its
+        // evidence (commit, reply) still blocks the merge
+        if (!merged && !closed) {
+            const items = [
+                ...(await store.listFeedback(taskId)),
+                ...out.fresh.filter((i) => i.pr === d.pr),
+            ]
+            if (await autoMerge(taskId, d, pr, items)) {
+                // merged now: the usual merged handling follows below
+                pr = await gh.getPr(d.repo, ref.number)
+                merged = Boolean(pr.mergedAt) || pr.state === "MERGED"
+            }
+        }
+
         if (merged && !d.merged_at) {
             const at = pr.mergedAt ? new Date(pr.mergedAt).toISOString() : now()
             await mutateTask(
@@ -1377,6 +1425,70 @@ export function createPrWatcher({
             ),
             last_checked_at: now(),
         })
+    }
+
+    // ---- auto-merge ----------------------------------------------------
+
+    function autoMergeOn() {
+        try {
+            return settingsRepo
+                ? settingsRepo.get(AUTO_MERGE_SETTING, true) !== false
+                : true
+        } catch {
+            return true
+        }
+    }
+
+    /**
+     * Merge an approved, mergeable task PR (merge commit, only its current
+     * head) unless actionable feedback on it is not settled (open, new in
+     * this poll, or resolved but not verified yet) or the task's agent is
+     * at work. True when merged.
+     */
+    async function autoMerge(taskId, d, pr, items) {
+        if (!autoMergeOn() || !mergeReady(pr)) return false
+        const open = items.some(
+            (i) =>
+                i.pr === d.pr &&
+                i.actionable &&
+                !i.verified &&
+                (i.status || "open") !== "no_action"
+        )
+        if (open) return false
+        const head = pr.headRefOid || null
+        const number = parsePrUrl(d.pr).number
+        const merge = () =>
+            gh.mergePr(d.repo, number, { method: "merge", headSha: head })
+        try {
+            // on the task's worker chain, only while the agent is not at
+            // work (nothing queued, sent, starting or working; unknown is
+            // busy): no prompt or revive can start mid-merge
+            if (workerService && workerService.runWhenIdle) {
+                const r = await workerService.runWhenIdle(taskId, merge)
+                if (!r.ran) return false
+            } else await merge()
+        } catch (err) {
+            if (mergeFailedHead.get(d.pr) !== head) {
+                mergeFailedHead.set(d.pr, head)
+                await store.appendEvent(
+                    taskId,
+                    {
+                        type: "pr_auto_merge_failed",
+                        data: { url: d.pr, head, error: err.message },
+                    },
+                    ACTOR
+                )
+            }
+            log.warn({ err: err.message, pr: d.pr }, "auto-merge failed")
+            return false
+        }
+        mergeFailedHead.delete(d.pr)
+        await store.appendEvent(
+            taskId,
+            { type: "pr_auto_merged", data: { url: d.pr, head } },
+            ACTOR
+        )
+        return true
     }
 
     // ---- close ---------------------------------------------------------

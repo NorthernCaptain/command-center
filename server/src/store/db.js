@@ -186,6 +186,98 @@ export const MIGRATIONS = [
     `
     ALTER TABLE agent_sessions ADD COLUMN close_after TEXT;
     `,
+    // 5: PR reviews (docs/09): tracked repos, other developers' PRs, our
+    // review decisions on them (stats) and the review agent runs.
+    `
+    CREATE TABLE review_repos (
+        repo TEXT PRIMARY KEY,
+        track INTEGER NOT NULL DEFAULT 0,
+        auto_review INTEGER NOT NULL DEFAULT 0,
+        last_scan_at TEXT,
+        last_error TEXT,
+        backfilled INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT
+    );
+
+    CREATE TABLE review_prs (
+        repo TEXT NOT NULL,
+        number INTEGER NOT NULL,
+        url TEXT,
+        title TEXT,
+        author TEXT,
+        author_bot INTEGER NOT NULL DEFAULT 0,
+        is_draft INTEGER NOT NULL DEFAULT 0,
+        base TEXT,
+        default_branch TEXT,
+        head_sha TEXT,
+        state TEXT,
+        created_at TEXT,
+        updated_at TEXT,
+        merged_at TEXT,
+        closed_at TEXT,
+        additions INTEGER,
+        deletions INTEGER,
+        changed_files INTEGER,
+        ci_state TEXT,
+        mergeable TEXT,
+        review_decision TEXT,
+        decision TEXT,
+        decided_at TEXT,
+        decided_sha TEXT,
+        first_review_at TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_activity_at TEXT,
+        needs_review TEXT,
+        first_seen_at TEXT,
+        last_scanned_at TEXT,
+        PRIMARY KEY (repo, number)
+    );
+
+    CREATE TABLE review_decisions (
+        repo TEXT NOT NULL,
+        number INTEGER NOT NULL,
+        review_id TEXT NOT NULL,
+        state TEXT NOT NULL,
+        submitted_at TEXT,
+        commit_sha TEXT,
+        PRIMARY KEY (repo, number, review_id)
+    );
+    CREATE INDEX review_decisions_at ON review_decisions(submitted_at);
+
+    CREATE TABLE review_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        repo TEXT NOT NULL,
+        number INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        trigger_key TEXT,
+        manual INTEGER NOT NULL DEFAULT 0,
+        head_sha TEXT,
+        agent_name TEXT,
+        agent_kind TEXT,
+        workspace_id TEXT,
+        pane_id TEXT,
+        folder TEXT,
+        queued_at TEXT,
+        started_at TEXT,
+        reported_at TEXT,
+        finished_at TEXT,
+        verdict TEXT,
+        issues INTEGER,
+        summary TEXT,
+        error TEXT,
+        seen_working INTEGER NOT NULL DEFAULT 0,
+        idle_since TEXT,
+        nudged_at TEXT
+    );
+    CREATE INDEX review_runs_pr ON review_runs(repo, number, id);
+    CREATE INDEX review_runs_status ON review_runs(status, id);
+    `,
+    // 6: the PR's review trigger (what a review would look at), stored with
+    // the PR so the queue is reconciled from the stored state
+    `
+    ALTER TABLE review_prs ADD COLUMN trigger_key TEXT;
+    `,
 ]
 
 /** Apply pending migrations. Returns the resulting schema version. */

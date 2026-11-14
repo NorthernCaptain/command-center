@@ -63,6 +63,10 @@ export function createOutboxRepo(db, { clock = systemClock } = {}) {
         interrupted: db.prepare(
             "SELECT * FROM agent_outbox WHERE status = 'sending' ORDER BY id"
         ),
+        sendingFor: db.prepare(
+            `SELECT * FROM agent_outbox WHERE status = 'sending' AND task_id = ?
+             ORDER BY id`
+        ),
         cancel: db.prepare(
             `UPDATE agent_outbox SET status = 'cancelled'
              WHERE id = ? AND status = 'pending'`
@@ -133,6 +137,10 @@ export function createOutboxRepo(db, { clock = systemClock } = {}) {
          * reached the agent, so recoverInterrupted() fails it as uncertain
          * instead of sending it again.
          */
+        /** The task's prompts handed to herdr right now (status sending). */
+        sendingFor(taskId) {
+            return st.sendingFor.all(Number(taskId)).map(toItem)
+        },
         markSending(id) {
             return st.sending.run(Number(id)).changes === 1
         },

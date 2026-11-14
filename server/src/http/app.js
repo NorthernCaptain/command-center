@@ -98,6 +98,11 @@ export const SETTINGS_SCHEMAS = {
     "workers.auto_clean_on_done": z.boolean(),
     // phase 2/3
     "github.poll_minutes": z.number().int().min(5).max(1440),
+    "github.auto_merge": z.boolean(),
+    // PR reviews (docs/09)
+    "reviews.poll_minutes": z.number().int().min(5).max(1440),
+    "reviews.parallel": z.number().int().min(1).max(10),
+    "reviews.agent_kind": z.enum(WORKER_KINDS),
     "digest.enabled": z.boolean(),
     "digest.time": z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
     "stale.days": z.number().int().min(1).max(90),

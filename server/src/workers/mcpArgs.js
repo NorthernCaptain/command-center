@@ -16,7 +16,8 @@
 //   is the same server.
 // - codex: -c overrides of mcp_servers.command-center (url,
 //   bearer_token_env_var = CC_TOKEN, env_http_headers X-CC-Task =
-//   CC_TASK_ID), merged over any global entry.
+//   CC_TASK_ID), merged over any global entry. A PR review agent sends
+//   X-CC-Review = CC_REVIEW_ID instead (headerEnv).
 
 import { fileURLToPath } from "node:url"
 
@@ -30,14 +31,33 @@ export const DEFAULT_HEADERS_HELPER = fileURLToPath(
 const tomlString = (s) => JSON.stringify(String(s))
 
 /**
+ * Launch flags that keep an agent from stopping at a startup dialog before
+ * it takes its prompt: codex shows an "Update available" notice (enter /
+ * esc) that blocks the start or swallows the first prompt.
+ */
+export function quietLaunchArgs(kind) {
+    return kind === "codex" ? ["-c", "check_for_update_on_startup=false"] : []
+}
+
+/** Caller headers a task worker sends: header -> env var. */
+export const TASK_HEADER_ENV = { "X-CC-Task": "CC_TASK_ID" }
+/** Caller headers a PR review agent sends. */
+export const REVIEW_HEADER_ENV = { "X-CC-Review": "CC_REVIEW_ID" }
+
+/**
  * Args to put before the agent's own args (resume etc.).
  * @param {string} kind  "claude" | "codex" (anything else: none)
- * @param {{ url: string, headersHelper?: string }} opts
+ * @param {{ url: string, headersHelper?: string, headerEnv?: object }} opts
+ *        headerEnv: codex env_http_headers (claude's helper reads the env)
  * @returns {string[]}
  */
 export function mcpLaunchArgs(
     kind,
-    { url, headersHelper = DEFAULT_HEADERS_HELPER } = {}
+    {
+        url,
+        headersHelper = DEFAULT_HEADERS_HELPER,
+        headerEnv = TASK_HEADER_ENV,
+    } = {}
 ) {
     if (!url) return []
     if (kind === "claude") {
@@ -56,7 +76,9 @@ export function mcpLaunchArgs(
             "-c",
             `${key}.bearer_token_env_var="CC_TOKEN"`,
             "-c",
-            `${key}.env_http_headers={ "X-CC-Task" = "CC_TASK_ID" }`,
+            `${key}.env_http_headers={ ${Object.entries(headerEnv)
+                .map(([h, env]) => `"${h}" = "${env}"`)
+                .join(", ")} }`,
         ]
     }
     return []

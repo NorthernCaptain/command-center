@@ -14,6 +14,10 @@ describe("router", () => {
             name: "settings",
             params: {},
         })
+        expect(matchRoute("/reviews")).toEqual({
+            name: "reviews",
+            params: {},
+        })
         expect(matchRoute("/t/12")).toEqual({
             name: "task",
             params: { id: 12 },

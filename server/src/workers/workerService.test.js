@@ -1557,7 +1557,10 @@ describe("revive", () => {
         const r = await env.svc.revive(1, { action: "fix CI" })
         expect(r).toMatchObject({ revived: true, resumed: false, status: "ok" })
         const start = env.herdr.agentStart.mock.calls.at(-1)[0]
-        expect(start).toMatchObject({ kind: "codex", args: [] })
+        expect(start).toMatchObject({
+            kind: "codex",
+            args: ["-c", "check_for_update_on_startup=false"],
+        })
         const text = env.herdr.agentPrompt.mock.calls.at(-1)[1]
         expect(text).toContain("You are taking over command-center task T-1")
         expect(text).toContain("aws-lambda--b--k7q2")
@@ -1576,6 +1579,8 @@ describe("revive", () => {
         ])
         await env.svc.revive(1)
         expect(env.herdr.agentStart.mock.calls.at(-1)[0].args).toEqual([
+            "-c",
+            "check_for_update_on_startup=false",
             "resume",
             `sess-${NAME}-p1`,
         ])
@@ -2129,7 +2134,7 @@ describe("actions", () => {
         expect(t.flags).toMatchObject({ now: false, error: null })
         expect(env.herdr.agentStart.mock.calls.at(-1)[0]).toMatchObject({
             kind: "codex",
-            args: [],
+            args: ["-c", "check_for_update_on_startup=false"],
         })
         expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toContain(
             "Then: go on"
@@ -2567,6 +2572,201 @@ describe("early recovery", () => {
     })
 })
 
+describe("agentBusy (auto-merge waits for the agent)", () => {
+    test("live state wins over the stored one; queued prompts; herdr down", async () => {
+        const env = setup()
+        expect(await env.svc.agentBusy(1)).toBe(false) // no agent
+        await started(env)
+        env.herdr.setStatus(NAME, "idle")
+        expect(await env.svc.agentBusy(1)).toBe(false)
+        // stored session still idle, herdr already says working
+        env.sessions.update(env.sessions.current(1).id, { state: "idle" })
+        env.herdr.setStatus(NAME, "working")
+        expect(await env.svc.agentBusy(1)).toBe(true)
+        env.herdr.setStatus(NAME, "blocked")
+        expect(await env.svc.agentBusy(1)).toBe(true)
+        env.herdr.setStatus(NAME, "done")
+        expect(await env.svc.agentBusy(1)).toBe(false)
+        // a prompt waiting to be sent
+        const row = env.outbox.enqueue({
+            task_id: 1,
+            text: "x",
+            reason: "send",
+        })
+        expect(await env.svc.agentBusy(1)).toBe(true)
+        env.outbox.cancel(row.id)
+        // herdr unreachable: unknown counts as busy
+        env.herdr.agentGet.mockRejectedValueOnce(herdrErr("socket"))
+        expect(await env.svc.agentBusy(1)).toBe(true)
+        // the name now belongs to another agent, or the agent is gone
+        env.herdr.agents.set(NAME, { name: NAME, kind: "claude", paneId: "px" })
+        expect(await env.svc.agentBusy(1)).toBe(false)
+        env.herdr.agents.delete(NAME)
+        expect(await env.svc.agentBusy(1)).toBe(false)
+    })
+
+    test("a revive still starting its agent: busy", async () => {
+        const env = setup()
+        await started(env)
+        env.herdr.agents.delete(NAME)
+        await env.svc.action(1, "stop")
+        let release
+        env.herdr.agentStart.mockImplementationOnce(
+            (args) =>
+                new Promise((res) => {
+                    release = () => {
+                        env.herdr.agents.set(args.name, {
+                            name: args.name,
+                            kind: args.kind,
+                            paneId: args.paneId,
+                            status: "idle",
+                        })
+                        res({})
+                    }
+                })
+        )
+        const revived = env.svc.revive(1, { action: "fix CI" })
+        await new Promise((r) => setImmediate(r))
+        // no session and no queued prompt yet, but work is coming
+        expect(env.sessions.current(1)).toBeNull()
+        expect(await env.svc.agentBusy(1)).toBe(true)
+        release()
+        await revived
+        await env.svc.idle()
+    })
+
+    test("a revive that begins while herdr answers: busy", async () => {
+        const env = setup()
+        await started(env)
+        env.herdr.setStatus(NAME, "idle")
+        const real = env.herdr.agentGet.getMockImplementation()
+        let answer
+        env.herdr.agentGet.mockImplementationOnce(
+            (name) =>
+                new Promise((res) => {
+                    answer = () => res(real(name))
+                })
+        )
+        const busy = env.svc.agentBusy(1)
+        await new Promise((r) => setImmediate(r))
+        // a revive (here: a delivery) enters the task chain meanwhile
+        const delivered = env.svc.deliver(1, "more work")
+        answer()
+        expect(await busy).toBe(true)
+        await delivered
+    })
+
+    test("runWhenIdle: runs on the chain when idle; nothing starts mid-run", async () => {
+        const env = setup()
+        await started(env)
+        env.herdr.setStatus(NAME, "idle")
+        let finish
+        const order = []
+        const run = env.svc.runWhenIdle(1, async () => {
+            order.push("merge start")
+            await new Promise((r) => {
+                finish = r
+            })
+            order.push("merge end")
+            return "merged"
+        })
+        await new Promise((r) => setImmediate(r))
+        // a prompt asked for mid-merge waits for it
+        const sent = env.svc
+            .deliver(1, "late work")
+            .then(() => order.push("prompt"))
+        await new Promise((r) => setImmediate(r))
+        expect(order).toEqual(["merge start"])
+        finish()
+        expect(await run).toEqual({ ran: true, value: "merged" })
+        await sent
+        expect(order).toEqual(["merge start", "merge end", "prompt"])
+        // busy: fn is not run
+        env.herdr.setStatus(NAME, "working")
+        const fn = jest.fn()
+        expect(await env.svc.runWhenIdle(1, fn)).toEqual({ ran: false })
+        expect(fn).not.toHaveBeenCalled()
+    })
+
+    test("runWhenIdle: a prompt queued while herdr answers stops the run", async () => {
+        const env = setup()
+        await started(env)
+        env.herdr.setStatus(NAME, "idle")
+        const real = env.herdr.agentGet.getMockImplementation()
+        let answer
+        env.herdr.agentGet.mockImplementationOnce(
+            (name) =>
+                new Promise((res) => {
+                    answer = () => res(real(name))
+                })
+        )
+        const fn = jest.fn()
+        const run = env.svc.runWhenIdle(1, fn)
+        await new Promise((r) => setImmediate(r))
+        // queued straight into the outbox meanwhile
+        env.outbox.enqueue({ task_id: 1, text: "late", reason: "send" })
+        answer()
+        expect(await run).toEqual({ ran: false })
+        expect(fn).not.toHaveBeenCalled()
+        // and a delivery joining the chain meanwhile
+        env.herdr.agentGet.mockImplementationOnce(
+            (name) =>
+                new Promise((res) => {
+                    answer = () => res(real(name))
+                })
+        )
+        env.outbox.rows.forEach((r) => (r.status = "cancelled"))
+        const run2 = env.svc.runWhenIdle(1, fn)
+        await new Promise((r) => setImmediate(r))
+        const sent = env.svc.deliver(1, "more")
+        answer()
+        expect(await run2).toEqual({ ran: false })
+        expect(fn).not.toHaveBeenCalled()
+        await sent
+    })
+
+    test("runWhenIdle: work queued after it, behind an earlier operation, wins", async () => {
+        const env = setup()
+        await started(env)
+        env.herdr.setStatus(NAME, "idle")
+        let release
+        const earlier = env.svc.runWhenIdle(
+            1,
+            () =>
+                new Promise((r) => {
+                    release = r
+                })
+        )
+        await new Promise((r) => setImmediate(r))
+        const fn = jest.fn()
+        const merge = env.svc.runWhenIdle(1, fn)
+        // a revive asked for after the merge, still behind the earlier op
+        const later = env.svc.revive(1, { action: "fix the review comments" })
+        release()
+        await earlier
+        expect(await merge).toEqual({ ran: false })
+        expect(fn).not.toHaveBeenCalled()
+        await later
+    })
+
+    test("a prompt being sent or just sent: busy until the settle window passes", async () => {
+        const outbox = realOutbox()
+        const env = setup({ outbox })
+        await started(env)
+        env.herdr.setStatus(NAME, "idle")
+        const row = outbox.enqueue({ task_id: 1, text: "x", reason: "send" })
+        outbox.markSending(row.id)
+        expect(await env.svc.agentBusy(1)).toBe(true)
+        outbox.markSent(row.id)
+        expect(await env.svc.agentBusy(1)).toBe(false)
+        // a wait:false send: busy until a status arrives or the window ends
+        expect((await env.svc.deliver(1, "go")).status).toBe("sent")
+        expect(await env.svc.agentBusy(1)).toBe(true)
+        await env.clock.advance(60000)
+        expect(await env.svc.agentBusy(1)).toBe(false)
+    })
+})
+
 describe("refused prompts with the real outbox", () => {
     test.each(["agent_not_ready", "agent_blocked"])(
         "%s: the prompt goes back to pending and is sent later",
@@ -2816,7 +3016,11 @@ describe("command-center MCP on worker launch", () => {
             'mcp_servers.command-center.url="http://127.0.0.1:7788/mcp"',
         ])
         expect(args.slice(-2)).toEqual(["resume", `sess-${NAME}-p1`])
-        expect(args).toHaveLength(8)
+        expect(args.slice(6, 8)).toEqual([
+            "-c",
+            "check_for_update_on_startup=false",
+        ])
+        expect(args).toHaveLength(10)
     })
 
     test("default helper is this checkout's install/mcp-headers.sh", async () => {

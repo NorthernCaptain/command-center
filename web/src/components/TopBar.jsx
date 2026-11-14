@@ -76,6 +76,49 @@ export default function TopBar() {
                         {STREAM_LABEL[stream] || stream}
                     </span>
                 </span>
+                {isOwner ? (
+                    <Link
+                        to="/reviews"
+                        className="icon-btn"
+                        aria-label="PR reviews"
+                        title="PR reviews"
+                    >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                            <circle
+                                cx="6"
+                                cy="5.5"
+                                r="2.2"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                            />
+                            <circle
+                                cx="6"
+                                cy="18.5"
+                                r="2.2"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                            />
+                            <circle
+                                cx="18"
+                                cy="18.5"
+                                r="2.2"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                            />
+                            <path
+                                d="M6 7.7v8.6M18 16.3V10a3 3 0 0 0-3-3h-4.5m0 0 2.2-2.2M10.5 7l2.2 2.2"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="1.6"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                            />
+                        </svg>
+                    </Link>
+                ) : null}
                 {showSettings ? (
                     <Link
                         to="/settings"

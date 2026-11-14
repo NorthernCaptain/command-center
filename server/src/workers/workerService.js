@@ -21,13 +21,10 @@ import { WORKER_KINDS } from "../contracts/schemas.js"
 import { systemClock } from "../util/clock.js"
 import { AppError, NotFoundError, ValidationError } from "../util/errors.js"
 import { nullLogger } from "../util/logger.js"
-import { mcpLaunchArgs } from "./mcpArgs.js"
-import {
-    agentName,
-    defaultBranch,
-    folderName,
-    truncateName,
-} from "./identity.js"
+import { mcpLaunchArgs, quietLaunchArgs } from "./mcpArgs.js"
+import { sameAgent } from "../herdr/agentIdentity.js"
+import { freeAgentName } from "../herdr/agentNames.js"
+import { agentName, defaultBranch, folderName } from "./identity.js"
 import {
     cleanPrompt,
     cleanupStartPrompt,
@@ -203,6 +200,7 @@ export function createWorkerService({
               })
 
     const chains = new Map()
+    const opGen = new Map() // taskId -> count of operations begun
     const inflight = new Map() // taskId -> ms of the last wait:false send
     const blockedNotified = new Set() // session ids
     const limited = new Set() // session ids showing a usage-limit banner
@@ -224,6 +222,8 @@ export function createWorkerService({
 
     /** Run fn after every earlier operation of the task finished. */
     function serial(taskId, fn) {
+        // every operation on the task bumps its generation (agentBusy)
+        opGen.set(taskId, (opGen.get(taskId) || 0) + 1)
         const prev = chains.get(taskId) || Promise.resolve()
         const run = prev.then(fn)
         const tail = run.catch(() => {})
@@ -418,34 +418,9 @@ export function createWorkerService({
         }
     }
 
-    /**
-     * Is herdr's agent `info` (looked up by name) the one recorded in
-     * `rec` (a session row)? Names can be reused by another agent, so the
-     * pane decides when both sides know it (a resumed conversation may get a
-     * new session id in the same pane); otherwise the session id, when both
-     * know it. Nothing to compare: trusted.
-     */
-    function sameAgent(rec, info) {
-        if (!rec || !info) return true
-        if (rec.pane_id && info.paneId) return rec.pane_id === info.paneId
-        if (rec.session_id && info.sessionId)
-            return rec.session_id === info.sessionId
-        return true
-    }
-
     /** base, else base-2 … base-9 (first name herdr does not know). */
-    async function freeName(base) {
-        if ((await getAgent(base)) === null) return base
-        const stem = truncateName(base, 29)
-        for (let n = 2; n < 10; n++) {
-            const name = `${stem}-${n}`
-            if ((await getAgent(name)) === null) return name
-        }
-        throw conflict(
-            "agent_name_taken",
-            `no free herdr agent name for ${base}`
-        )
-    }
+    /** base, else base-2 … base-9 (first name herdr does not know). */
+    const freeName = (base) => freeAgentName(base, getAgent)
 
     /**
      * Prompt and wait briefly for the agent to take it. "confirmed" when it
@@ -572,7 +547,12 @@ export function createWorkerService({
                 name,
                 kind,
                 paneId: ws.paneId,
-                args: [...mcpArgs(kind), ...titleArgs(kind, task), ...args],
+                args: [
+                    ...mcpArgs(kind),
+                    ...quietLaunchArgs(kind),
+                    ...titleArgs(kind, task),
+                    ...args,
+                ],
                 timeoutMs: herdrCfg.startTimeoutMs,
             })
             delivery = await submitConfirmed(name, prompt)
@@ -2188,6 +2168,73 @@ export function createWorkerService({
         })
     }
 
+    /**
+     * Is the task's agent at work or about to be (auto-merge waits)? Not
+     * on the task chain (the PR watcher has its own queue; waiting on both
+     * could deadlock), so it looks at everything that leads to work: a
+     * prompt queued or being sent, one sent within the settle window, any
+     * operation on the task chain (a start, revive or relaunch has no
+     * session and no queued prompt until its agent started), and herdr's
+     * live state (not idle / done: busy; herdr unreachable: busy). No live
+     * agent of the task: not busy.
+     */
+    async function agentBusy(taskId) {
+        const id = toId(taskId)
+        if (chains.has(id)) return true
+        const gen = opGen.get(id) || 0
+        const busy = await busyNow(id)
+        // an operation that began while herdr answered: busy after all
+        return busy || chains.has(id) || (opGen.get(id) || 0) !== gen
+    }
+
+    /**
+     * Run fn on the task chain when the agent is not at work: no start,
+     * revive or prompt of the task begins until fn is done (auto-merge
+     * merges here, so nothing new starts mid-merge). The PR watcher's own
+     * queue may be held around this (lock order: watcher, then this chain;
+     * nothing on this chain waits on the watcher). -> { ran, value }
+     */
+    function runWhenIdle(taskId, fn) {
+        const id = toId(taskId)
+        let gen = 0
+        const run = serial(id, async () => {
+            // anything queued on the task after this (a revive, a prompt):
+            // its work comes first, no merge now
+            if ((opGen.get(id) || 0) !== gen) return { ran: false }
+            if (await busyNow(id)) return { ran: false }
+            // a prompt queued while herdr answered (deliver queues off the
+            // chain, then joins it): busy after all
+            if (
+                (opGen.get(id) || 0) !== gen ||
+                ((await outbox.pending(id)) || []).length
+            )
+                return { ran: false }
+            return { ran: true, value: await fn() }
+        })
+        // the generation right after this operation joined the chain
+        gen = opGen.get(id) || 0
+        return run
+    }
+
+    /** agentBusy without the chain check (on the chain itself). */
+    async function busyNow(id) {
+        if (((await outbox.pending(id)) || []).length) return true
+        if (
+            typeof outbox.sendingFor === "function" &&
+            ((await outbox.sendingFor(id)) || []).length
+        )
+            return true
+        const since = inflight.get(id)
+        if (since !== undefined && clock.now().getTime() - since < settleMs)
+            return true
+        const cur = await sessions.current(id)
+        if (!cur) return false
+        const info = await getAgent(cur.name)
+        if (info === undefined) return true
+        if (info === null || !sameAgent(cur, info)) return false
+        return !["idle", "done"].includes(info.status || "unknown")
+    }
+
     async function agentState(taskId) {
         const id = toId(taskId)
         const cur = await sessions.current(id)
@@ -2248,6 +2295,8 @@ export function createWorkerService({
         action,
         autoCloseOnDone,
         agentState,
+        agentBusy,
+        runWhenIdle,
         queued,
         outboxView,
         setFeedbackDelivery,

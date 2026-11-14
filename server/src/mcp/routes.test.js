@@ -36,7 +36,7 @@ describe("POST /api/agent/:tool", () => {
         expect(r.body).toEqual({ ok: true, tool: "cc_report" })
         expect(tools.cc_report).toHaveBeenCalledWith(
             { task_id: 12, status: "progress", summary: "s" },
-            { callerTaskId: "12", agent: "t12-x" }
+            { callerTaskId: "12", callerReviewId: null, agent: "t12-x" }
         )
     })
 
@@ -45,7 +45,7 @@ describe("POST /api/agent/:tool", () => {
         await bearer(request(h.local).post("/api/agent/cc_get_task"))
         expect(tools.cc_get_task).toHaveBeenCalledWith(
             {},
-            { callerTaskId: null, agent: null }
+            { callerTaskId: null, callerReviewId: null, agent: null }
         )
     })
 

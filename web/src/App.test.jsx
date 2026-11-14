@@ -69,6 +69,39 @@ describe("App", () => {
         expect(await screen.findByText("Board task")).toBeInTheDocument()
     })
 
+    it("the owner opens the PR reviews page from the top bar", async () => {
+        mockFetch({
+            "GET /api/me": { role: "owner", mode: "local" },
+            "GET /api/board": BOARD,
+            "GET /api/reviews": {
+                prs: [],
+                counts: { new: 0, rejected: 0, approved: 0, all: 0 },
+                stats: null,
+                settings: null,
+            },
+            "GET /api/reviews/repos": { repos: [] },
+        })
+        renderApp()
+        await screen.findByText("Board task")
+        fireEvent.click(screen.getByLabelText("PR reviews"))
+        expect(
+            await screen.findByRole("heading", { name: "PR reviews" })
+        ).toBeInTheDocument()
+        expect(window.location.pathname).toBe("/reviews")
+    })
+
+    it("viewers get neither the PR reviews link nor the page", async () => {
+        mockFetch({
+            "GET /api/me": { role: "viewer", login: "b@x.com", mode: "local" },
+            "GET /api/board": BOARD,
+        })
+        renderApp()
+        expect(await screen.findByText("read-only")).toBeInTheDocument()
+        expect(screen.queryByLabelText("PR reviews")).not.toBeInTheDocument()
+        act(() => navigate("/reviews"))
+        expect(screen.getByText("Nothing here")).toBeInTheDocument()
+    })
+
     it("a page render error shows a recoverable message, not a blank app", async () => {
         const spy = jest.spyOn(console, "error").mockImplementation(() => {})
         try {

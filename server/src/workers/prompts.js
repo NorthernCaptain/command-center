@@ -35,11 +35,19 @@ export function oneLine(value, max = 200) {
  */
 export function sessionTitle(task, max = 60) {
     const own = new RegExp(`^T-${task.id}\\b[\\s:.-]*`, "i")
-    const title = oneLine(String(task.title ?? "").replace(own, ""), max)
+    const title = cleanTitle(String(task.title ?? "").replace(own, ""), max)
+    return title ? `T-${task.id} ${title}` : `T-${task.id}`
+}
+
+/**
+ * A title for an agent's session / workspace (claude --name, herdr label):
+ * one line, at most max chars, without shell quoting characters.
+ */
+export function cleanTitle(text, max = 60) {
+    return oneLine(text, max)
         .replace(/[`$\\"'!]/g, "")
         .replace(/\s+/g, " ")
         .trim()
-    return title ? `T-${task.id} ${title}` : `T-${task.id}`
 }
 
 /** A token safe to show as an id / path / URL: no whitespace or quotes. */

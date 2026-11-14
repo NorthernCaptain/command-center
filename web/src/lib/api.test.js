@@ -191,6 +191,28 @@ describe("routes", () => {
         [() => api.listDevices(), "GET", "/api/devices"],
         [() => api.revokeDevice("d1"), "DELETE", "/api/devices/d1"],
         [() => api.healthz(), "GET", "/healthz"],
+        [() => api.reviews(), "GET", "/api/reviews"],
+        [() => api.reviewRepos(), "GET", "/api/reviews/repos"],
+        [
+            () => api.setReviewRepo("mobile", { track: true }),
+            "PUT",
+            "/api/reviews/repos/mobile",
+            { track: true },
+        ],
+        [() => api.scanReviews(), "POST", "/api/reviews/scan", {}],
+        [
+            () => api.scanReviews("mobile"),
+            "POST",
+            "/api/reviews/scan",
+            { repo: "mobile" },
+        ],
+        [
+            () => api.reviewPr("mobile", 417),
+            "POST",
+            "/api/reviews/prs/mobile/417/review",
+        ],
+        [() => api.cancelReviewRun(12), "POST", "/api/reviews/runs/12/cancel"],
+        [() => api.focusReviewRun(12), "POST", "/api/reviews/runs/12/focus"],
         [
             () => api.putArtifact(5, "x", "r1"),
             "PUT",
@@ -313,6 +335,15 @@ describe("routes", () => {
         )
         await api.listTasks()
         expect(f.calls[1].url).toBe("/api/tasks")
+    })
+
+    it("reviews sends tab and q, skipping empty ones", async () => {
+        await api.reviews({ tab: "rejected", q: "#417" })
+        await api.reviews({ tab: "all", q: "" })
+        await api.setReviewRepo("mobile")
+        expect(f.calls[0].url).toBe("/api/reviews?tab=rejected&q=%23417")
+        expect(f.calls[1].url).toBe("/api/reviews?tab=all")
+        expect(f.calls[2].body).toEqual({})
     })
 
     it("addComment only sends present fields", async () => {

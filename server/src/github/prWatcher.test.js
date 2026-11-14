@@ -25,6 +25,7 @@ import {
     isBot,
     isWatched,
     isTrivialBody,
+    mergeReady,
     verifyItem,
 } from "./prWatcher.js"
 
@@ -1894,6 +1895,218 @@ describe("verification", () => {
 })
 
 // ---------------------------------------------------------------------------
+
+describe("auto-merge", () => {
+    /** workerService.runWhenIdle fake: runs the merge unless busy. */
+    const idleRunner = (busy) =>
+        jest.fn(async (id, fn) =>
+            busy ? { ran: false } : { ran: true, value: await fn() }
+        )
+    const review = (login, state, at, commitId = HEAD) => ({
+        author: { login },
+        state,
+        submittedAt: at,
+        commitId,
+    })
+    /** Clean, approved by ann on its head. */
+    const ready = (over = {}) =>
+        fullPr({
+            mergeStateStatus: "CLEAN",
+            reviewDecision: "APPROVED",
+            reviews: [
+                review(
+                    "ann",
+                    "APPROVED",
+                    "2026-11-07T12:00:00Z",
+                    over.headRefOid || HEAD
+                ),
+            ],
+            ...over,
+        })
+
+    test("mergeReady: clean merge state and approved", () => {
+        expect(mergeReady(ready())).toBe(true)
+        expect(mergeReady(ready({ mergeStateStatus: "HAS_HOOKS" }))).toBe(true)
+        expect(mergeReady(ready({ mergeStateStatus: "BLOCKED" }))).toBe(false)
+        expect(mergeReady(ready({ mergeStateStatus: "UNKNOWN" }))).toBe(false)
+        expect(mergeReady(ready({ isDraft: true }))).toBe(false)
+        expect(mergeReady(ready({ reviewDecision: "CHANGES_REQUESTED" }))).toBe(
+            false
+        )
+        expect(mergeReady(ready({ reviewDecision: "REVIEW_REQUIRED" }))).toBe(
+            false
+        )
+        expect(mergeReady(null)).toBe(false)
+        // an approval of an older commit never merges a newer head
+        expect(
+            mergeReady(
+                ready({
+                    reviews: [
+                        review(
+                            "ann",
+                            "APPROVED",
+                            "2026-11-07T12:00:00Z",
+                            "old1234"
+                        ),
+                    ],
+                })
+            )
+        ).toBe(false)
+        expect(mergeReady(ready({ reviews: [] }))).toBe(false)
+        expect(mergeReady(ready({ headRefOid: null, reviews: [] }))).toBe(false)
+        // no review required: each reviewer's latest opinion
+        const none = (reviews) => ready({ reviewDecision: null, reviews })
+        expect(mergeReady(none([]))).toBe(false)
+        expect(
+            mergeReady(
+                none([review("ann", "APPROVED", "2026-11-07T12:00:00Z")])
+            )
+        ).toBe(true)
+        expect(
+            mergeReady(
+                none([
+                    review("ann", "APPROVED", "2026-11-07T12:00:00Z"),
+                    review("bob", "CHANGES_REQUESTED", "2026-11-07T12:05:00Z"),
+                ])
+            )
+        ).toBe(false)
+        expect(
+            mergeReady(
+                none([
+                    review("bob", "CHANGES_REQUESTED", "2026-11-07T12:00:00Z"),
+                    review("ann", "APPROVED", "2026-11-07T12:01:00Z"),
+                    review("Bob", "APPROVED", "2026-11-07T12:05:00Z"),
+                    review("cid", "COMMENTED", "2026-11-07T12:06:00Z"),
+                    { state: "APPROVED", submittedAt: null },
+                ])
+            )
+        ).toBe(true)
+    })
+
+    test("an approved, clean task PR is merged (merge commit, its head) and handled as merged", async () => {
+        const { gh, watcher, jobRunner } = await claimedSetup()
+        let merged = false
+        gh.prs[`${REPO}#812`] = () =>
+            merged
+                ? fullPr({
+                      state: "MERGED",
+                      mergedAt: "2026-11-07T12:00:00Z",
+                  })
+                : ready()
+        gh.mergePr = jest.fn(async () => {
+            merged = true
+        })
+        const s = await watcher.pollTask(1)
+        expect(gh.mergePr).toHaveBeenCalledWith(REPO, 812, {
+            method: "merge",
+            headSha: HEAD,
+        })
+        expect(await eventsOf("pr_auto_merged")).toHaveLength(1)
+        expect(s.merged).toEqual([PR_URL])
+        expect(jobRunner.enqueue).toHaveBeenCalledWith(
+            "close_out",
+            {},
+            { task_id: 1 }
+        )
+    })
+
+    test("not merged: setting off, not ready, open feedback, agent working", async () => {
+        const { gh, watcher, settingsRepo, workerService } =
+            await claimedSetup()
+        gh.mergePr = jest.fn(async () => {})
+        gh.prs[`${REPO}#812`] = ready()
+        settingsRepo.set("github.auto_merge", false)
+        await watcher.pollTask(1)
+        settingsRepo.set("github.auto_merge", true)
+        gh.prs[`${REPO}#812`] = ready({ mergeStateStatus: "BLOCKED" })
+        await watcher.pollTask(1)
+        // the agent is at work on the task
+        workerService.runWhenIdle = idleRunner(true)
+        gh.prs[`${REPO}#812`] = ready()
+        await watcher.pollTask(1)
+        expect(workerService.runWhenIdle).toHaveBeenCalledWith(
+            1,
+            expect.any(Function)
+        )
+        expect(gh.mergePr).not.toHaveBeenCalled()
+        // an open review comment on the PR
+        workerService.runWhenIdle = idleRunner(false)
+        gh.rcs[`${REPO}#812`] = [rc(1)]
+        await watcher.pollTask(1)
+        expect(gh.mergePr).not.toHaveBeenCalled()
+        expect(await eventsOf("pr_auto_merged")).toHaveLength(0)
+    })
+
+    test("resolved feedback blocks the merge until it is verified", async () => {
+        const { gh, watcher, workerService } = await claimedSetup()
+        workerService.runWhenIdle = idleRunner(false)
+        gh.mergePr = jest.fn(async () => {})
+        gh.rcs[`${REPO}#812`] = [rc(1001)]
+        gh.prs[`${REPO}#812`] = ready()
+        await watcher.pollTask(1)
+        // the agent says fixed, but the commit is not on the PR
+        await resolve("gh-rc-1001", { status: "fixed", commit: "fff0001" })
+        await watcher.pollTask(1)
+        expect(gh.mergePr).not.toHaveBeenCalled()
+        expect((await feedback())["gh-rc-1001"].status).toBe("open")
+        // fixed for real: commit on the PR and a reply in the thread
+        await resolve("gh-rc-1001", {
+            status: "fixed",
+            commit: "fff0001",
+            reply_url: "r",
+        })
+        gh.rcs[`${REPO}#812`] = [
+            rc(1001),
+            rc(1002, {
+                user: { login: "leo", type: "User" },
+                in_reply_to_id: 1001,
+                body: "fixed in fff0001",
+                created_at: "2026-11-07T11:40:00Z",
+            }),
+        ]
+        gh.prs[`${REPO}#812`] = ready({
+            headRefOid: "fff0001aaaa",
+            commits: [{ oid: "fff0001aaaa" }],
+        })
+        await watcher.pollTask(1)
+        expect((await feedback())["gh-rc-1001"].verified).toBe(true)
+        expect(gh.mergePr).toHaveBeenCalledTimes(1)
+    })
+
+    test("a failed merge is logged once per head and retried next poll", async () => {
+        const { gh, watcher, workerService } = await claimedSetup()
+        workerService.runWhenIdle = idleRunner(false)
+        gh.prs[`${REPO}#812`] = ready()
+        gh.mergePr = jest.fn(async () => {
+            throw new Error("Pull request is not mergeable")
+        })
+        await watcher.pollTask(1)
+        await watcher.pollTask(1)
+        expect(gh.mergePr).toHaveBeenCalledTimes(2)
+        const failed = await eventsOf("pr_auto_merge_failed")
+        expect(failed).toHaveLength(1)
+        expect(failed[0].data).toMatchObject({
+            url: PR_URL,
+            head: HEAD,
+            error: "Pull request is not mergeable",
+        })
+        // a new head that fails again is logged again
+        gh.prs[`${REPO}#812`] = ready({ headRefOid: "fff0001aaaa" })
+        await watcher.pollTask(1)
+        expect(await eventsOf("pr_auto_merge_failed")).toHaveLength(2)
+        // it merges in the end
+        let merged = false
+        gh.mergePr = jest.fn(async () => {
+            merged = true
+        })
+        gh.prs[`${REPO}#812`] = () =>
+            merged
+                ? fullPr({ state: "MERGED", mergedAt: "2026-11-07T12:00:00Z" })
+                : ready({ headRefOid: "fff0001aaaa" })
+        await watcher.pollTask(1)
+        expect(await eventsOf("pr_auto_merged")).toHaveLength(1)
+    })
+})
 
 describe("merge, close and close-out", () => {
     test("merge records merged_at, comments on Asana and enqueues close-out once", async () => {
