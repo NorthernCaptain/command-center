@@ -125,6 +125,52 @@ From GitHub (source of truth), per PR:
   fails (`no report`) and the agent stays open for a look ("Close agent").
   An agent that vanishes without a report fails the run too.
 
+### Usage limits
+
+- An agent that stops (idle or at a dialog) with a usage-limit banner at
+  the bottom of its pane (Claude: "You've hit your usage limit · resets
+  5pm", "5-hour limit reached", "Credit balance is too low", API 429;
+  Codex: "You've hit your usage limit … try again at 4:31 PM") fails its run
+  (`usage limit (<kind>): <banner>`, its agent and checkout closed). Such a
+  failure never counts as "this state was reviewed".
+- Its kind is limited until the banner's reset time (next such local time;
+  an hour without one): the dashboard shows "claude limited until 5:00 PM
+  → codex".
+- Every limit hit queues a replacement for the same state (one
+  transaction with the failure; noted on the run before its agent closes,
+  so a restart in between finishes the hand-over). It starts on
+  `reviews.fallback_kind` (Settings; default none) when that is another
+  kind; else on whichever configured kind is free first (main, then
+  fallback), waiting while both are limited. A retry's saved kind counts
+  only while it is still the main or fallback.
+- Before a replacement starts, its PR is fetched fresh from GitHub (off
+  the run chain, taking turns with the repo's scans; only replacements
+  that could start now; one GitHub can't read waits a minute and leaves
+  its slot to the next). Only the pass that fetched it may start it: when
+  its slot went away, it is fetched again later. Each one starts right after its own fetch; ordinary runs don't wait for those fetches, but a retry ahead of them in the queue keeps its slot (unless it waits out its minute). An automatic
+  replacement is dropped (when it starts, and by scans while it waits)
+  only when tracking or auto-review stopped, the PR became ineligible
+  (closed, draft), or a review decision of ours landed after
+  the stopped attempt began and nothing new came after it (a new head, an
+  answer; after an approval a new head doesn't count, as an approved PR
+  is never re-reviewed automatically). The stopped agent's partial comments don't drop it, also
+  when an earlier attempt's decision came before it (that attempt was
+  started for an answer after the decision). A PR that can't be stored any more (closed, the author's account gone) drops any replacement (its stored row takes the fetched state and waits for nothing, so no new run is queued from it), and no automatic replacement is queued once auto-review is off (a
+  waiting one is cancelled). When auto-review is back, the scan queues
+  the dropped retry for that PR, judged by the same rules. A manual
+  one always goes on. Cancel on a stopped run reaches the chain's active
+  replacement, however many limits it went through. Its prompt names the chain's first start and says to
+  check GitHub for anything already posted and not post it again. The
+  dashboard's limit badge shows the kind new reviews start with now
+  (`next_kind`), or "waiting".
+- The banner is read from the visible screen only (an old banner in the
+  scrollback does not count), also when the agent's start fails (a limit
+  dialog at startup gets the same hand-over). A reset time wrapped onto the
+  next lines still counts. Reset times: "resets 5pm", "try again at
+  4:31 PM", "resets Mon 9am", or Claude's "…|<epoch>"; an hour otherwise.
+  Limits are kept in the settings table across restarts, and a settings
+  change wakes a waiting queue. The dashboard refreshes when a limit lifts.
+
 ### Run states
 
 `queued` -> `running` -> `reported` -> `done`; or `failed` / `cancelled`.
@@ -153,8 +199,20 @@ From GitHub (source of truth), per PR:
 - Search: PR number (`417`, `#417`) or text in the title / author.
 - Per PR: repo#number + title, author, status, attempts, issues (last
   run), our last review, opened / updated, size, CI, conflicts, agent run
-  (state, verdict, summary) and actions (Review / Re-review, Cancel,
-  Close agent, Open in herdr).
+  (state, verdict, summary) and actions (Review / Re-review, Approve,
+  Cancel, Close agent, Open in herdr).
+- **Approve** (open PRs waiting for you or with changes requested, no
+  open review run): approves the PR on GitHub as the `gh` user, with no
+  comment, on the head commit the row showed. The PR is read from GitHub
+  first: new commits since (even ones no scan has seen yet) refuse it
+  with 409 (reload and look again); a closed PR or one not reviewed here
+  is refused too, and an unreadable one gives 502. A failed run's
+  leftover agent is closed first. It runs on the run-state chain, so no
+  review is queued or started meanwhile; the Review button of the row is
+  off until it is done. The approval is stored at once (the PR moves to
+  Approved), then the PR is read again; if that read fails, the stored
+  approval stands and a scan of the repo follows. Refused (409) while a
+  review run is queued or running: cancel it first.
 
 ## API (owner only)
 
@@ -165,6 +223,7 @@ From GitHub (source of truth), per PR:
 | PUT | `/api/reviews/repos/:repo` | `{ track?, auto_review? }` | `{ repo }` |
 | POST | `/api/reviews/scan` | `{ repo? }` | `{ ok: true }` (scan runs in the background) |
 | POST | `/api/reviews/prs/:repo/:number/review` | | `{ run }` |
+| POST | `/api/reviews/prs/:repo/:number/approve` | `{ head_sha }` | `{ ok: true }` (409: not open, new commits, or a review run is open; 502: GitHub unreadable) |
 | POST | `/api/reviews/runs/:id/cancel` | | `{ run }` (queued: dropped; running: agent closed) |
 | POST | `/api/reviews/runs/:id/focus` | | `{ ok: true }` |
 

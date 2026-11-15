@@ -374,6 +374,32 @@ Each code task tracks one **deliverable per work repo** in `task.json`:
 - **Disposition:** `pending` → `pr` (a **claimed** PR, see below) →
   merged; or `no_change`. Only **I** can set `no_change`, either directly
   or by confirming an agent's suggestion.
+- **Follow-up PRs.** A repo can have more than one deliverable. A PR the
+  agent reports (`cc_add_link(type:"pr")`) or I claim for a repo whose
+  deliverables all have their PR (a follow-up opened after the first
+  merged, say) is added as a deliverable of its own, on the PR's head
+  branch (an open one in the main repo moves `task.branch` there too). The task then closes only once that PR merges too (a PR closed
+  without merge still blocks Done, as before). Discovery never adds one: it
+  only fills pending deliverables. No claim is made on a `done` or
+  `cancelled` task (`task_closed`) or after a follow-up marked no change
+  (`deliverable_no_change`), and a new claim only where the watcher polls
+  the task (not in `inbox`: `not_watched`), all checked again under the
+  task lock, as is the deliverable the PR was checked against (a pending
+  one replaced meanwhile: `deliverable_changed`). A close-out applies
+  under that lock too, so a claim lands
+  either before its re-check (no close) or after `done` (refused).
+- Branch and folder registrations, and **No change** (mine names the
+  deliverable clicked by its creation time: 409 `deliverable_changed` if it got a
+  PR meanwhile; or the agent's `no_change_repos`), act on the repo's
+  current deliverable: the
+  pending one, else the newest with an unmerged PR. A done deliverable
+  (merged or no change) keeps its branch and disposition, and a PR is
+  never added after a follow-up marked no change. Once every one is done
+  in a repo that had a PR, a branch (`type:"branch"`, or a work folder with `branch`) other than
+  theirs is follow-up work: it adds a **pending** deliverable on that
+  branch (and `task.branch` for the main repo), so the task does not
+  close under the agent, and discovery claims its PR as usual. Not on a
+  `done`, `cancelled` or `inbox` task.
 - The agent's `cc_report(status:"ready_for_pr")` must list its work repos.
   If that list and `deliverables` differ, the task is flagged in Now and is
   not closed.
@@ -422,8 +448,8 @@ A candidate that fails a check is **not** used. It shows on the task page as
 via `cc_add_link(type:"pr")` is named on purpose, so checks 2, 3 and the
 branch half of 1 do not apply: a task may work on an existing PR on another
 branch (addressing review on someone's PR, say). It must still be in
-`acme/<repo>` (not a fork), match a pending deliverable for that repo, and
-not be claimed by another task. Only claimed PRs count toward deliverables,
+`acme/<repo>` (not a fork), be for a repo the task has a deliverable in
+(not one marked `no_change`), and not be claimed by another task. Only claimed PRs count toward deliverables,
 Asana comments and closing.
 
 A claimed PR on another branch (agent-reported or manual) moves the

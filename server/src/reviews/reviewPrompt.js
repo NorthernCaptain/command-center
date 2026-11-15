@@ -34,7 +34,7 @@ export function reviewFolderName(repo, number, runId) {
  * The review agent's first prompt.
  * @param {{ pr: object, run: object, org: string, folder: string, me: string }} p
  */
-export function reviewPrompt({ pr, run, org, folder, me }) {
+export function reviewPrompt({ pr, run, org, folder, me, retry = null }) {
     const ref = `${org}/${pr.repo}#${pr.number}`
     const lines = [
         `Review PR ${ref}: "${oneLine(pr.title, 200)}" by ${pr.author || "unknown"}.`,
@@ -49,6 +49,11 @@ export function reviewPrompt({ pr, run, org, folder, me }) {
         `Use this new checkout folder for it: ${folder} (fetch the PR there; keep every file of this review, diffs and notes included, inside it; no other folder).`,
         `Clone over SSH: gh repo clone ${org}/${pr.repo} <folder> or git clone git@github.com:${org}/${pr.repo}.git <folder>, then fetch the PR head (git fetch origin pull/${pr.number}/head). Plain git over HTTPS has no valid GitHub credential here. Use gh for every GitHub read and write (PR data, the review, comments).`,
     ]
+    if (retry) {
+        lines.push(
+            `An earlier attempt at this review (started ${retry.started_at || "earlier"}) stopped at a usage limit. Check the PR on GitHub for any review or comments ${me} posted since then, and do not post them again; finish what is missing.`
+        )
+    }
     if (run.kind === "re_review") {
         const when = [
             pr.decided_at,

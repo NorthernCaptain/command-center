@@ -68,7 +68,21 @@ describe("mountGithub", () => {
             .post("/api/tasks/3/deliverables/aws-lambda")
             .send({ disposition: "no_change" })
         expect(res.status).toBe(200)
-        expect(prWatcher.setNoChange).toHaveBeenCalledWith(3, "aws-lambda")
+        expect(prWatcher.setNoChange).toHaveBeenCalledWith(
+            3,
+            "aws-lambda",
+            null
+        )
+        // the deliverable clicked, by its creation time
+        await request(app).post("/api/tasks/3/deliverables/aws-lambda").send({
+            disposition: "no_change",
+            created_at: "2026-11-07T10:00:00Z",
+        })
+        expect(prWatcher.setNoChange).toHaveBeenLastCalledWith(
+            3,
+            "aws-lambda",
+            "2026-11-07T10:00:00Z"
+        )
         const bad = await request(app)
             .post("/api/tasks/3/deliverables/aws-lambda")
             .send({ disposition: "pr" })
@@ -147,6 +161,10 @@ describe("githubTaskExtras", () => {
             deliverables: [
                 { repo: "aws-lambda", branch: "feature/x" },
                 { repo: "infra", branch: "t1-fix" },
+                // a follow-up PR's deliverable in the same folder
+                { repo: "aws-lambda", branch: "feature/x" },
+                // same folder name, another branch: its own review
+                { repo: "aws-lambda", branch: "feature-x" },
             ],
         }
         const out = await extras(1, task)
@@ -163,8 +181,18 @@ describe("githubTaskExtras", () => {
                     file: "f",
                     dashboardUrl: "d",
                 },
+                {
+                    repo: "aws-lambda",
+                    folder: "aws-lambda--feature-x--k7q2",
+                    branch: "feature-x",
+                    status: "GOOD_TO_GO",
+                    timestamp: "t",
+                    file: "f",
+                    dashboardUrl: "d",
+                },
             ],
         })
+        expect(reviewArchive.latest).toHaveBeenCalledTimes(3)
         expect(reviewArchive.latest).toHaveBeenCalledWith({
             folder: "aws-lambda--feature-x--k7q2",
             branch: "feature/x",

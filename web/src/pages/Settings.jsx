@@ -27,6 +27,7 @@ export const SETTING_KEYS = [
     "reviews.poll_minutes",
     "reviews.parallel",
     "reviews.agent_kind",
+    "reviews.fallback_kind",
     "digest.enabled",
     "digest.time",
     "stale.days",
@@ -545,6 +546,24 @@ function CenterSettings() {
                                     set("reviews.agent_kind", e.target.value)
                                 }
                             >
+                                {WORKER_KINDS.map((k) => (
+                                    <option key={k} value={k}>
+                                        {k}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <label className="field">
+                            <span>Fallback at a usage limit</span>
+                            <select
+                                className="input"
+                                aria-label="Fallback review agent"
+                                value={form["reviews.fallback_kind"]}
+                                onChange={(e) =>
+                                    set("reviews.fallback_kind", e.target.value)
+                                }
+                            >
+                                <option value="none">none (wait)</option>
                                 {WORKER_KINDS.map((k) => (
                                     <option key={k} value={k}>
                                         {k}

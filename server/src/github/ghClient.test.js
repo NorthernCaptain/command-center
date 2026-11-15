@@ -394,7 +394,7 @@ describe("createGhClient", () => {
         expect(await gh2.prComment("r", 3, "b")).toEqual({ stdout: "x" })
     })
 
-    test("graphql, login and mergePr (PR reviews, auto-merge)", async () => {
+    test("graphql, login, mergePr and approvePr (PR reviews)", async () => {
         const exec = jest.fn(async (file, args) => {
             if (args[1] === "graphql")
                 return JSON.stringify(
@@ -405,6 +405,8 @@ describe("createGhClient", () => {
                           : { data: { repository: { id: 1 } } }
                 )
             if (args[1] === "user") return JSON.stringify({ login: "leok" })
+            if (args[1] === "-X")
+                return JSON.stringify({ id: 5, state: "APPROVED" })
             return "merged\n"
         })
         const gh = createGhClient({ exec, org: "acme" })
@@ -502,6 +504,29 @@ describe("createGhClient", () => {
             "--delete-branch",
             "--match-head-commit",
             "abc",
+        ])
+        expect(await gh.approvePr("mobile", 7, { headSha: "abc" })).toEqual({
+            id: 5,
+            state: "APPROVED",
+        })
+        expect(exec).toHaveBeenLastCalledWith("gh", [
+            "api",
+            "-X",
+            "POST",
+            "repos/acme/mobile/pulls/7/reviews",
+            "-f",
+            "event=APPROVE",
+            "-f",
+            "commit_id=abc",
+        ])
+        await gh.approvePr("mobile", 8)
+        expect(exec.mock.calls.at(-1)[1]).toEqual([
+            "api",
+            "-X",
+            "POST",
+            "repos/acme/mobile/pulls/8/reviews",
+            "-f",
+            "event=APPROVE",
         ])
         await gh.mergePr("mobile", 8)
         expect(exec.mock.calls.at(-1)[1]).toEqual([

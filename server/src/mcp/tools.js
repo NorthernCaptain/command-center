@@ -19,6 +19,11 @@ import { REVIEW_VERDICTS } from "../contracts/reviews.js"
 import { ActorSchema, LINK_TYPES, taskKey } from "../contracts/schemas.js"
 import { newLinkId } from "../agent/jobs/util.js"
 import {
+    currentDeliverable,
+    FOLLOW_UP_STATUSES,
+    latestDeliverable,
+} from "../contracts/lifecycle.js"
+import {
     isParentLink,
     PARENT_ROLE,
     parentIdOf,
@@ -626,10 +631,29 @@ export function createAgentTools({
             if (cleared) patch.flags = cleared
             if (a.repo === mainRepoOf(task)) patch.branch = a.url
             const deliverables = task.deliverables || []
-            if (deliverables.some((d) => d.repo === a.repo))
+            // the repo's deliverable in work (a follow-up PR adds one);
+            // merged ones keep their branch
+            // a deliverable already on that branch (an older PR worked on
+            // again) is the one: no other deliverable moves
+            const onIt = deliverables.some(
+                (d) => d.repo === a.repo && d.branch === a.url
+            )
+            const cur = onIt ? null : currentDeliverable(deliverables, a.repo)
+            if (cur)
                 patch.deliverables = deliverables.map((d) =>
-                    d.repo === a.repo ? { ...d, branch: a.url } : d
+                    d === cur ? { ...d, branch: a.url } : d
                 )
+            // every one merged, and a new branch: follow-up work, a pending
+            // deliverable of its own (its PR is found on that branch)
+            else if (
+                !onIt &&
+                followUpOk(task) &&
+                isNewBranch(deliverables, a.repo, a.url)
+            )
+                patch.deliverables = [
+                    ...deliverables,
+                    pendingDeliverable(a.repo, a.url),
+                ]
             // The label is the repo: work folders look up a repo's branch
             // by it (repoBranch).
             const { links, link } = withLink(
@@ -693,6 +717,39 @@ export function createAgentTools({
      * this repo: unique across tasks and absent on the remote. Returns
      * { branch } or { conflict, suggestion, branch }.
      */
+    /** A new work repo's (or follow-up's) deliverable, no PR yet. */
+    function pendingDeliverable(repo, branch) {
+        return {
+            repo,
+            branch,
+            role: "work",
+            created_at: nowIso(),
+            disposition: "pending",
+            pr: null,
+            claimed_at: null,
+            merged_at: null,
+        }
+    }
+
+    /** A follow-up deliverable only where the PR watcher would follow it
+     * (not done / cancelled / inbox): FOLLOW_UP_STATUSES. */
+    function followUpOk(task) {
+        return FOLLOW_UP_STATUSES.includes(task.status)
+    }
+
+    /**
+     * The repo had a PR, and none of its deliverables is on `branch`: work
+     * there is a follow-up. (A repo only ever marked no change has had no
+     * PR: the task may not even be watched for one.)
+     */
+    function isNewBranch(deliverables, repo, branch) {
+        const of = deliverables.filter((d) => d.repo === repo)
+        return (
+            of.some((d) => d.disposition === "pr") &&
+            of.every((d) => d.branch !== branch)
+        )
+    }
+
     async function workBranch(a, task, repo, parsed, taskId) {
         const registered = repoBranch(task, repo)
         const branch =
@@ -724,12 +781,33 @@ export function createAgentTools({
                         "repo is required for a work folder (or name it <repo>--<branch>--<slug>)"
                     )
                 const deliverables = task.deliverables || []
-                deliverable = deliverables.find((d) => d.repo === repo) || null
-                if (
-                    deliverable &&
-                    a.branch &&
-                    a.branch !== deliverable.branch
-                ) {
+                // the repo's deliverable in work; when every one is merged,
+                // the newest stands for the repo and keeps its branch
+                // when every one is merged, a folder on a new branch is
+                // follow-up work: a pending deliverable of its own
+                // the deliverable on the branch named (an older PR worked on
+                // again) is the one; else the current one moves to it
+                const onIt = a.branch
+                    ? deliverables
+                          .filter(
+                              (d) => d.repo === repo && d.branch === a.branch
+                          )
+                          .sort(
+                              (x, y) =>
+                                  Number(!x.merged_at) - Number(!y.merged_at)
+                          )
+                          .pop()
+                    : null
+                const cur = onIt ? null : currentDeliverable(deliverables, repo)
+                deliverable =
+                    onIt ||
+                    cur ||
+                    (a.branch &&
+                    followUpOk(task) &&
+                    isNewBranch(deliverables, repo, a.branch)
+                        ? null
+                        : latestDeliverable(deliverables, repo))
+                if (cur && a.branch && a.branch !== cur.branch) {
                     // The agent names the branch checked out there: move the
                     // deliverable to it (same checks as type=branch).
                     const check = await acceptBranch(taskId, repo, a.branch)
@@ -743,15 +821,15 @@ export function createAgentTools({
                         )
                         return check
                     }
-                    deliverable = { ...deliverable, branch: a.branch }
+                    deliverable = { ...cur, branch: a.branch }
                     patch.deliverables = deliverables.map((d) =>
-                        d.repo === repo ? deliverable : d
+                        d === cur ? deliverable : d
                     )
                     if (repo === mainRepoOf(task)) patch.branch = a.branch
                 }
                 // The branch named is the deliverable's (moved just now, or
                 // already by a PR claim): a conflict for the repo is over.
-                if (deliverable && a.branch) {
+                if (deliverable && a.branch === deliverable.branch) {
                     const cleared = clearConflict(task, repo)
                     if (cleared) patch.flags = cleared
                 }
@@ -771,17 +849,14 @@ export function createAgentTools({
                             suggestion: wb.suggestion,
                         }
                     }
-                    const branch = wb.branch
-                    deliverable = {
-                        repo,
-                        branch,
-                        role: "work",
-                        created_at: nowIso(),
-                        disposition: "pending",
-                        pr: null,
-                        claimed_at: null,
-                        merged_at: null,
-                    }
+                    // a follow-up in the main repo: the task's branch is the
+                    // one being worked on now
+                    if (
+                        deliverables.some((d) => d.repo === repo) &&
+                        repo === mainRepoOf(task)
+                    )
+                        patch.branch = wb.branch
+                    deliverable = pendingDeliverable(repo, wb.branch)
                     patch.deliverables = [...deliverables, deliverable]
                     const cleared = clearConflict(task, repo)
                     if (cleared) patch.flags = cleared
@@ -857,29 +932,32 @@ export function createAgentTools({
                     `not deliverables of T-${taskId}: ${unknown.join(", ")}`,
                     { repos: unknown }
                 )
-            const withPr = dl.filter(
-                (d) =>
-                    repos.some((r) => same(d.repo, r)) && d.disposition === "pr"
-            )
+            // Per repo, its current deliverable: the pending one is marked;
+            // one with a PR refuses; a repo already done (newest merged
+            // or no_change, with a follow-up only ever after) is left
+            // alone. Earlier deliverables keep their PR.
+            const targets = []
+            const withPr = []
+            for (const r of repos) {
+                const cur = currentDeliverable(dl, r, same)
+                const newest = latestDeliverable(dl, r, same)
+                if (cur && cur.disposition === "pending") targets.push(cur)
+                else if (cur) withPr.push(cur.repo)
+                else if (newest.disposition === "pr") withPr.push(newest.repo)
+            }
             if (withPr.length)
                 throw new AppError(
                     "invalid_state",
-                    `already has a PR: ${withPr.map((d) => d.repo).join(", ")}`,
+                    `already has a PR: ${withPr.join(", ")}`,
                     { status: 409 }
                 )
-            const hit = dl
-                .filter(
-                    (d) =>
-                        d.disposition === "pending" &&
-                        repos.some((r) => same(d.repo, r))
-                )
-                .map((d) => d.repo)
+            const hit = targets.map((d) => d.repo)
             if (!hit.length) return []
             await store.updateTask(
                 taskId,
                 {
                     deliverables: dl.map((d) =>
-                        hit.includes(d.repo)
+                        targets.includes(d)
                             ? { ...d, disposition: "no_change" }
                             : d
                     ),
@@ -987,9 +1065,12 @@ export function createAgentTools({
             const current = noChange.length
                 ? (await store.getTask(taskId)).task
                 : task
-            const deliverables = (current.deliverables || [])
-                .filter((d) => d.disposition !== "no_change")
-                .map((d) => d.repo)
+            // a repo counts unless its newest deliverable is no_change (a
+            // follow-up marked no change leaves its merged PR before it)
+            const all = current.deliverables || []
+            const deliverables = [...new Set(all.map((d) => d.repo))].filter(
+                (r) => latestDeliverable(all, r).disposition !== "no_change"
+            )
             if (!sameSet(a.work_repos, deliverables)) {
                 const reason = `Work repos differ: reported ${a.work_repos.join(", ")}; deliverables ${deliverables.join(", ") || "none"}`
                 await store.updateTask(

@@ -23,6 +23,7 @@ import { AppError, NotFoundError, ValidationError } from "../util/errors.js"
 import { nullLogger } from "../util/logger.js"
 import { mcpLaunchArgs, quietLaunchArgs } from "./mcpArgs.js"
 import { sameAgent } from "../herdr/agentIdentity.js"
+import { findLimitLine } from "../herdr/usageLimit.js"
 import { freeAgentName } from "../herdr/agentNames.js"
 import { agentName, defaultBranch, folderName } from "./identity.js"
 import {
@@ -40,14 +41,8 @@ import {
     sessionTitle,
 } from "./prompts.js"
 
-// Claude Code's own limit banners, at the start of a line (after box and
-// bullet glyphs): "You've hit your usage limit · resets 5pm", "5-hour limit
-// reached ∙ resets 3pm", "Claude AI usage limit reached|…", "Credit balance
-// is too low", "API Error: 429 … rate_limit_error". The agent's own prose
-// that mentions rate limits (e.g. a question about a gateway's per-IP rate
-// limits) is not a banner and must not match.
-export const USAGE_LIMIT_RE =
-    /^[^\p{L}\p{N}]*(?:you['’]ve hit your (?:usage )?limit\b|you['’]re out of (?:extra )?usage\b|(?:claude(?: ai)?|5-hour|session|weekly|opus weekly|sonnet weekly)(?: usage)? limit reached\b|credit balance is too low\b|api error:.*\b(?:429|rate_limit_error)\b)/iu
+// limit banners: one shared detector (herdr/usageLimit.js)
+export { USAGE_LIMIT_RE } from "../herdr/usageLimit.js"
 export const BLOCKED_REASON = "Agent needs you (blocked)"
 export const UNAVAILABLE_REASON = "Claude unavailable"
 export const START_FAILED_REASON = "Agent failed to start"
@@ -94,8 +89,6 @@ const CONFIRM_MS = 8000
 const SETTLE_MS = 15000
 // A failed revive (herdr down) is retried by resync only after this long.
 const REVIVE_BACKOFF_MS = 5 * 60 * 1000
-// Usage-limit banners are at the bottom of the pane; only these lines count.
-const USAGE_TAIL_LINES = 12
 const WAIT_ACTION =
     "wait for my next message (it follows right after this one) and act on it"
 const MAX_TEXT = 100000
@@ -1195,11 +1188,7 @@ export function createWorkerService({
         } catch {
             return
         }
-        const tail = String(text || "")
-            .split(/\r?\n/)
-            .filter((l) => l.trim())
-            .slice(-USAGE_TAIL_LINES)
-        const line = [...tail].reverse().find((l) => USAGE_LIMIT_RE.test(l))
+        const line = findLimitLine(text)
         if (!line) {
             limited.delete(session.id)
             return

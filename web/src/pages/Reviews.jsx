@@ -41,6 +41,8 @@ export const GROUP_LABELS = {
 }
 
 const ACTIVE_RUN = ["running", "reported"]
+/** Sections whose rows offer Approve (waiting for us, changes requested). */
+const APPROVE_GROUPS = ["new", "rejected"]
 const RUN_OPEN = ["queued", ...ACTIVE_RUN]
 
 /** ?tab=… from a location search string, else the default tab. */
@@ -88,6 +90,7 @@ export function prActions(pr) {
     return {
         review: open && !runOpen,
         reviewLabel: pr.decision ? "Re-review" : "Review",
+        approve: open && !runOpen && APPROVE_GROUPS.includes(pr.group),
         cancel: runOpen || agentLeft,
         cancelLabel: run && run.status === "queued" ? "Cancel" : "Close agent",
         focus: Boolean(run && (ACTIVE_RUN.includes(run.status) || agentLeft)),
@@ -289,9 +292,23 @@ export function ReviewStats({ stats }) {
     )
 }
 
+/**
+ * "claude limited until 5:00 PM → codex": next is the kind new reviews
+ * start with now (the server's next_kind), else "waiting".
+ */
+export function limitedText(kind, until, next) {
+    const at = new Date(until)
+    const time = at.toLocaleTimeString([], {
+        hour: "numeric",
+        minute: "2-digit",
+    })
+    return `${kind} limited until ${time} → ${next || "waiting"}`
+}
+
 function RunInfo({ run }) {
     if (!run) return null
     const parts = []
+    if (run.agent_kind) parts.push(run.agent_kind)
     if (run.verdict) parts.push(run.verdict.replace("_", " "))
     if (Number.isFinite(run.issues))
         parts.push(`${run.issues} issue${run.issues === 1 ? "" : "s"}`)
@@ -316,7 +333,14 @@ function RunInfo({ run }) {
     )
 }
 
-export function PrRow({ pr, onReview, onCancel, onFocus }) {
+export function PrRow({
+    pr,
+    onReview,
+    onApprove,
+    onCancel,
+    onFocus,
+    approving = false,
+}) {
     const status = prStatus(pr)
     const can = prActions(pr)
     const run = pr.run
@@ -407,9 +431,22 @@ export function PrRow({ pr, onReview, onCancel, onFocus }) {
                         type="button"
                         className="btn btn-sm"
                         aria-label={`${can.reviewLabel} ${pr.repo}#${pr.number}`}
+                        disabled={approving}
                         onClick={() => onReview(pr)}
                     >
                         {can.reviewLabel}
+                    </button>
+                ) : null}
+                {can.approve ? (
+                    <button
+                        type="button"
+                        className="btn btn-sm"
+                        aria-label={`Approve ${pr.repo}#${pr.number}`}
+                        title="Approve on GitHub, with no comment"
+                        disabled={approving}
+                        onClick={() => onApprove(pr)}
+                    >
+                        {approving ? "Approving…" : "Approve"}
                     </button>
                 ) : null}
                 {can.focus ? (
@@ -465,6 +502,8 @@ function ReviewsPage({ api }) {
         api,
     })
     const searchRef = useRef(null)
+    // PRs whose approval is on its way (the button is off meanwhile)
+    const [approving, setApproving] = useState(() => new Set())
 
     function setTab(next) {
         setTabState(next)
@@ -492,6 +531,25 @@ function ReviewsPage({ api }) {
             reload()
         } catch (err) {
             toast.error(err)
+        }
+    }
+
+    async function onApprove(pr) {
+        const key = `${pr.repo}#${pr.number}`
+        if (approving.has(key)) return
+        setApproving((s) => new Set(s).add(key))
+        try {
+            await api.approvePr(pr.repo, pr.number, pr.head_sha)
+            toast.success(`${key}: approved`)
+            reload()
+        } catch (err) {
+            toast.error(err)
+        } finally {
+            setApproving((s) => {
+                const next = new Set(s)
+                next.delete(key)
+                return next
+            })
         }
     }
 
@@ -538,8 +596,29 @@ function ReviewsPage({ api }) {
                         <Link to="/settings" className="rv-settings muted">
                             every {settings.poll_minutes} min ·{" "}
                             {settings.parallel} parallel · {settings.agent_kind}
+                            {settings.fallback_kind &&
+                            settings.fallback_kind !== "none"
+                                ? ` → ${settings.fallback_kind}`
+                                : ""}
                         </Link>
                     ) : null}
+                    {settings && settings.limited
+                        ? Object.entries(settings.limited).map(
+                              ([kind, until]) => (
+                                  <span
+                                      key={kind}
+                                      className="chip rv-limited"
+                                      title="Usage limit: reviews use the fallback (or wait) until then"
+                                  >
+                                      {limitedText(
+                                          kind,
+                                          until,
+                                          settings.next_kind
+                                      )}
+                                  </span>
+                              )
+                          )
+                        : null}
                 </div>
                 <div className="rv-head-tools">
                     <input
@@ -647,6 +726,10 @@ function ReviewsPage({ api }) {
                             <PrRow
                                 pr={pr}
                                 onReview={onReview}
+                                onApprove={onApprove}
+                                approving={approving.has(
+                                    `${pr.repo}#${pr.number}`
+                                )}
                                 onCancel={onCancel}
                                 onFocus={onFocus}
                             />

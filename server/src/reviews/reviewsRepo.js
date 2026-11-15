@@ -6,7 +6,7 @@
 // PR reviews tables (docs/09-pr-reviews.md): review_repos, review_prs,
 // review_decisions, review_runs.
 
-import { SETTLED_VERDICT } from "../contracts/reviews.js"
+import { SETTLED_VERDICT, USAGE_LIMIT_ERROR } from "../contracts/reviews.js"
 import { systemClock } from "../util/clock.js"
 
 /** Run states that hold (or wait for) an agent slot. */
@@ -144,9 +144,9 @@ export function createReviewsRepo(db, { clock = systemClock } = {}) {
         ),
         createRun: db.prepare(
             `INSERT INTO review_runs (repo, number, kind, status, trigger_key,
-                manual, head_sha, queued_at)
+                manual, head_sha, agent_kind, retry_of, queued_at)
              VALUES (@repo, @number, @kind, 'queued', @trigger_key, @manual,
-                @head_sha, @queued_at)`
+                @head_sha, @agent_kind, @retry_of, @queued_at)`
         ),
         run: db.prepare("SELECT * FROM review_runs WHERE id = ?"),
         latestRun: db.prepare(
@@ -166,12 +166,18 @@ export function createReviewsRepo(db, { clock = systemClock } = {}) {
                 AND trigger_key = ?
                 AND NOT (status = 'cancelled' AND started_at IS NULL
                     AND COALESCE(error, '') != '${CANCELLED_BY_OWNER}')
+                AND COALESCE(error, '') NOT LIKE '${USAGE_LIMIT_ERROR}%'
                 ORDER BY id DESC LIMIT 1`
         ),
         settledRuns: db.prepare(
             `SELECT repo, number, trigger_key FROM review_runs
              WHERE status = 'done' AND verdict = '${SETTLED_VERDICT}'
                 AND trigger_key IS NOT NULL`
+        ),
+        prLeftOpen: db.prepare(
+            `SELECT * FROM review_runs WHERE repo = ? AND number = ?
+                AND workspace_id IS NOT NULL
+                AND status IN ('done', 'cancelled', 'failed') ORDER BY id`
         ),
         leftOpen: db.prepare(
             `SELECT * FROM review_runs WHERE workspace_id IS NOT NULL
@@ -276,6 +282,8 @@ export function createReviewsRepo(db, { clock = systemClock } = {}) {
             trigger_key = null,
             manual = false,
             head_sha = null,
+            agent_kind = null,
+            retry_of = null,
         }) {
             const info = st.createRun.run({
                 repo,
@@ -284,9 +292,18 @@ export function createReviewsRepo(db, { clock = systemClock } = {}) {
                 trigger_key,
                 manual: manual ? 1 : 0,
                 head_sha,
+                agent_kind,
+                retry_of,
                 queued_at: now(),
             })
             return this.getRun(info.lastInsertRowid)
+        },
+        /** Finish one run and queue its replacement, both or neither. */
+        failAndReplace(id, patch, replacement) {
+            return db.transaction(() => {
+                this.updateRun(id, patch)
+                return this.createRun(replacement)
+            })()
         },
         getRun(id) {
             return toRun(st.run.get(Number(id))) || null
@@ -332,6 +349,10 @@ export function createReviewsRepo(db, { clock = systemClock } = {}) {
          */
         leftOpen() {
             return st.leftOpen.all().map(toRun)
+        },
+        /** One PR's finished runs whose agent is still open (any reason). */
+        prLeftOpen(repo, number) {
+            return st.prLeftOpen.all(repo, Number(number)).map(toRun)
         },
         runsByStatus(statuses) {
             return st

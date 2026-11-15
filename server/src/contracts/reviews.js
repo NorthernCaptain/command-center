@@ -3,8 +3,9 @@
  * MIT license.
  */
 
-// PR review report contract (docs/09-pr-reviews.md): cc_review_report's
-// verdicts, shared by the MCP tool schema and the review service.
+// PR review contract (docs/09-pr-reviews.md): cc_review_report's verdicts,
+// shared by the MCP tool schema and the review service, and stored run
+// values shared by the service and its repo.
 
 /**
  * approved / changes_requested: the GitHub review is submitted. unchanged
@@ -19,3 +20,8 @@ export const REVIEW_VERDICTS = [
 ]
 /** A finished run with this verdict settles the PR state it reviewed. */
 export const SETTLED_VERDICT = "unchanged"
+/**
+ * The error prefix of a run stopped at its agent's usage limit (stored;
+ * such a run never counts as a reviewed state).
+ */
+export const USAGE_LIMIT_ERROR = "usage limit"

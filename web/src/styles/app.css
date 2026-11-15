@@ -4071,3 +4071,10 @@ textarea.chatbar-input {
 .rv-list .rv-group:not(:first-child) {
     margin-top: 10px;
 }
+
+/* a review agent kind at its usage limit */
+.rv-limited {
+    margin-left: 8px;
+    color: var(--red);
+    border-color: currentColor;
+}

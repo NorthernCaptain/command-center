@@ -211,6 +211,12 @@ describe("routes", () => {
             "POST",
             "/api/reviews/prs/mobile/417/review",
         ],
+        [
+            () => api.approvePr("mobile", 417, "abc"),
+            "POST",
+            "/api/reviews/prs/mobile/417/approve",
+            { head_sha: "abc" },
+        ],
         [() => api.cancelReviewRun(12), "POST", "/api/reviews/runs/12/cancel"],
         [() => api.focusReviewRun(12), "POST", "/api/reviews/runs/12/focus"],
         [
@@ -251,6 +257,13 @@ describe("routes", () => {
             "POST",
             "/api/tasks/5/deliverables/aws-lambda",
             { disposition: "no_change" },
+        ],
+        [
+            () =>
+                api.setDeliverable(5, "aws-lambda", "no_change", "2026-11-07"),
+            "POST",
+            "/api/tasks/5/deliverables/aws-lambda",
+            { disposition: "no_change", created_at: "2026-11-07" },
         ],
         [
             () => api.reopenFeedback(5, "gh-rc-1"),

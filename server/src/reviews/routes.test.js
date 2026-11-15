@@ -47,6 +47,7 @@ function makeApp({ viewer = false } = {}) {
             repo,
             number,
         })),
+        approvePr: jest.fn(async () => ({ ok: true })),
         cancelRun: jest.fn(async (id) => ({ id, status: "cancelled" })),
         focusRun: jest.fn(async () => ({ ok: true })),
     }
@@ -164,12 +165,32 @@ describe("mountReviews", () => {
         expect(reviewService.scanAll).toHaveBeenCalled()
     })
 
-    test("review, cancel, focus", async () => {
+    test("review, approve, cancel, focus", async () => {
         const { app, reviewService } = makeApp()
         const r = await request(app).post("/api/reviews/prs/mobile/417/review")
         expect(r.body).toEqual({ run: { id: 1, repo: "mobile", number: 417 } })
         expect(
             (await request(app).post("/api/reviews/prs/mobile/x/review")).status
+        ).toBe(400)
+        const a = await request(app)
+            .post("/api/reviews/prs/mobile/417/approve")
+            .send({ head_sha: "abc" })
+        expect(a.body).toEqual({ ok: true })
+        expect(reviewService.approvePr).toHaveBeenCalledWith(
+            "mobile",
+            417,
+            "abc"
+        )
+        expect(
+            (await request(app).post("/api/reviews/prs/mobile/417/approve"))
+                .status
+        ).toBe(400)
+        expect(
+            (
+                await request(app)
+                    .post("/api/reviews/prs/mo%20bile/1/approve")
+                    .send({ head_sha: "abc" })
+            ).status
         ).toBe(400)
         const c = await request(app).post("/api/reviews/runs/3/cancel")
         expect(c.body).toEqual({ run: { id: 3, status: "cancelled" } })
@@ -189,6 +210,7 @@ describe("mountReviews", () => {
             ["put", "/api/reviews/repos/mobile"],
             ["post", "/api/reviews/scan"],
             ["post", "/api/reviews/prs/mobile/1/review"],
+            ["post", "/api/reviews/prs/mobile/1/approve"],
             ["post", "/api/reviews/runs/1/cancel"],
             ["post", "/api/reviews/runs/1/focus"],
         ])

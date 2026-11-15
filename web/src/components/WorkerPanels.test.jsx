@@ -193,6 +193,7 @@ describe("DeliverablesPanel", () => {
         {
             repo: "web-app",
             branch: "t12-fix",
+            created_at: "2026-11-07T09:00:00Z",
             disposition: "pending",
             pr: null,
         },
@@ -238,7 +239,12 @@ describe("DeliverablesPanel", () => {
         fireEvent.click(
             screen.getByRole("button", { name: "Mark web-app as no change" })
         )
-        await waitFor(() => expect(onNoChange).toHaveBeenCalledWith("web-app"))
+        await waitFor(() =>
+            expect(onNoChange).toHaveBeenCalledWith(
+                "web-app",
+                "2026-11-07T09:00:00Z"
+            )
+        )
         expect(
             screen.getByText("None found on the task branches.")
         ).toBeInTheDocument()
@@ -288,6 +294,33 @@ describe("DeliverablesPanel", () => {
         expect(input).toHaveValue("https://x/pull/9")
         fireEvent.click(submit)
         await waitFor(() => expect(input).toHaveValue(""))
+    })
+
+    it("lists a repo's follow-up PR next to its merged one", () => {
+        const errors = jest.spyOn(console, "error").mockImplementation(() => {})
+        const second = `${PR.replace(/812$/, "828")}`
+        render(
+            <DeliverablesPanel
+                deliverables={[
+                    deliverables[0],
+                    { ...deliverables[0], pr: second, merged_at: null },
+                    // two follow-ups without a PR on the same branch
+                    { ...deliverables[2], repo: "aws-lambda" },
+                    { ...deliverables[1], repo: "aws-lambda" },
+                ]}
+                prs={[]}
+                candidates={[]}
+                onNoChange={jest.fn()}
+                onClaim={jest.fn()}
+            />
+        )
+        expect(
+            screen.getByRole("link", { name: "Pull request #828 on GitHub" })
+        ).toBeInTheDocument()
+        expect(screen.getByText("2 of 4 block Done")).toBeInTheDocument()
+        // distinct keys: no duplicate-key warning
+        expect(errors).not.toHaveBeenCalled()
+        errors.mockRestore()
     })
 
     it("renders with nothing at all", () => {

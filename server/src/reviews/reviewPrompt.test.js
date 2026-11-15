@@ -49,7 +49,7 @@ test("first review prompt", () => {
         run: { id: 12, kind: "new" },
         org: "acme",
         folder: "/r/mobile-pr-417-r12",
-        me: "leok",
+        me: "reviewer",
     })
     expect(p).toContain(
         'Review PR acme/mobile#417: "Fix the `login` flow" by dev1.'
@@ -73,7 +73,7 @@ test("first review prompt", () => {
         run: { id: 12, kind: "new" },
         org: "acme",
         folder: "/r/x",
-        me: "leok",
+        me: "reviewer",
     })
     expect(stacked).toContain("It targets feature-x, not the default branch")
     expect(stacked).toContain("explicit request by PR ID")
@@ -86,10 +86,10 @@ test("re-review prompt names the earlier decision", () => {
         run: { id: 13, kind: "re_review" },
         org: "acme",
         folder: "/r/x",
-        me: "leok",
+        me: "reviewer",
     })
     expect(p).toContain(
-        "This is a RE-REVIEW: leok requested changes before (2026-11-11T10:00:00Z on aaa1111)."
+        "This is a RE-REVIEW: reviewer requested changes before (2026-11-11T10:00:00Z on aaa1111)."
     )
     expect(p).toContain("pay close attention to the comments")
     const bare = reviewPrompt({
@@ -97,10 +97,10 @@ test("re-review prompt names the earlier decision", () => {
         run: { id: 13, kind: "re_review" },
         org: "acme",
         folder: "/r/x",
-        me: "leok",
+        me: "reviewer",
     })
     expect(bare).toContain("by unknown.")
-    expect(bare).toContain("leok requested changes before. Read")
+    expect(bare).toContain("reviewer requested changes before. Read")
     // a re-review Leo asked for on an approved PR
     expect(
         reviewPrompt({
@@ -108,9 +108,34 @@ test("re-review prompt names the earlier decision", () => {
             run: { id: 14, kind: "re_review" },
             org: "acme",
             folder: "/r/x",
-            me: "leok",
+            me: "reviewer",
         })
-    ).toContain("leok approved it before (")
+    ).toContain("reviewer approved it before (")
+})
+
+test("a retry after a usage limit: don't post twice", () => {
+    const p = reviewPrompt({
+        pr,
+        run: { id: 15, kind: "new" },
+        org: "acme",
+        folder: "/r/x",
+        me: "reviewer",
+        retry: { started_at: "2026-11-14T10:00:00Z" },
+    })
+    expect(p).toContain(
+        "An earlier attempt at this review (started 2026-11-14T10:00:00Z) stopped at a usage limit"
+    )
+    expect(p).toContain("do not post them again")
+    expect(
+        reviewPrompt({
+            pr,
+            run: { id: 15, kind: "new" },
+            org: "acme",
+            folder: "/r/x",
+            me: "reviewer",
+            retry: {},
+        })
+    ).toContain("(started earlier)")
 })
 
 test("nudge", () => {

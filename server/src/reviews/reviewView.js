@@ -21,6 +21,7 @@ const RUN_FIELDS = [
     "kind",
     "status",
     "agent_name",
+    "agent_kind",
     "queued_at",
     "started_at",
     "finished_at",
@@ -77,6 +78,7 @@ export function prRow(pr, run, repo, keys = null) {
         decision: pr.decision,
         decided_at: pr.decided_at,
         decided_sha: pr.decided_sha,
+        head_sha: pr.head_sha,
         first_review_at: pr.first_review_at,
         attempts: pr.attempts,
         // a re-review of this very state ended "unchanged": our change

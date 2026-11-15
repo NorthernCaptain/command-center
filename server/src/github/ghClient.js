@@ -356,10 +356,28 @@ export function createGhClient({
         return typeof out === "string" ? out.trim() : out
     }
 
+    /**
+     * Approve a PR as the gh user, with no comment. headSha: the review is
+     * on that commit (the one the owner saw), not on whatever came later.
+     */
+    async function approvePr(repo, number, { headSha } = {}) {
+        const args = [
+            "api",
+            "-X",
+            "POST",
+            `repos/${full(repo)}/pulls/${Number(number)}/reviews`,
+            "-f",
+            "event=APPROVE",
+        ]
+        if (headSha) args.push("-f", `commit_id=${headSha}`)
+        return run(args, "approve")
+    }
+
     return {
         graphql,
         login,
         mergePr,
+        approvePr,
         org: org || null,
         listPrsByHead,
         getPr,

@@ -18,6 +18,7 @@ const RepoFlags = z
     })
     .strict()
 const ScanBody = z.object({ repo: z.string().min(1).max(100).optional() })
+const ApproveBody = z.object({ head_sha: z.string().min(1).max(100) })
 const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/
 
 function toNumber(raw, what) {
@@ -117,6 +118,18 @@ export function mountReviews(
             toNumber(req.params.number, "number")
         )
         res.json({ run })
+    })
+
+    api.post("/reviews/prs/:repo/:number/approve", async (req, res) => {
+        ownerOnly(req)
+        const { head_sha } = parse(ApproveBody, req.body || {}, "approve")
+        res.json(
+            await reviewService.approvePr(
+                toRepo(req.params.repo),
+                toNumber(req.params.number, "number"),
+                head_sha
+            )
+        )
     })
 
     api.post("/reviews/runs/:id/cancel", async (req, res) => {

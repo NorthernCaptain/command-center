@@ -919,10 +919,10 @@ describe("discovery and claims", () => {
             ok: true,
             existing: true,
         })
-        // another PR for the same deliverable
+        // another PR in the repo: a follow-up, read from GitHub first
         expect(
             await watcher.claim(1, `https://github.com/${ORG}/${REPO}/pull/9`)
-        ).toEqual({ ok: false, reason: "deliverable_has_pr" })
+        ).toMatchObject({ ok: false, reason: "pr_unavailable" })
         // claimed by another task
         claims.claim({
             url: `https://github.com/${ORG}/${REPO}/pull/10`,
@@ -1075,6 +1075,388 @@ async function claimedSetup(extra = {}) {
     })
     return ctx
 }
+
+describe("follow-up PRs in a repo whose PR is claimed", () => {
+    const URL2 = `https://github.com/${ORG}/${REPO}/pull/828`
+    const merged = deliv(REPO, {
+        disposition: "pr",
+        pr: PR_URL,
+        claimed_at: "2026-11-07T11:05:00.000Z",
+        merged_at: "2026-11-08T09:00:00.000Z",
+    })
+    const followUp = (over = {}) =>
+        fullPr({
+            number: 828,
+            url: URL2,
+            createdAt: "2026-11-09T10:00:00Z",
+            ...over,
+        })
+
+    test("an agent-reported PR after the first merged is a deliverable of its own", async () => {
+        const { gh, watcher, asanaService } = await setup({
+            deliverables: [merged, deliv(REPO2)],
+            status: "pr_open",
+        })
+        gh.prs[`${REPO}#828`] = followUp()
+        const res = await watcher.claim(1, URL2, {
+            reported: true,
+            actor: "agent:t1-fix",
+        })
+        expect(res).toMatchObject({
+            ok: true,
+            deliverable: {
+                repo: REPO,
+                branch: "t1-fix",
+                disposition: "pr",
+                pr: URL2,
+                merged_at: null,
+            },
+        })
+        const t = await getTask()
+        expect(t.deliverables).toHaveLength(3)
+        // the merged one is left as it was
+        expect(t.deliverables[0]).toMatchObject({
+            pr: PR_URL,
+            merged_at: "2026-11-08T09:00:00.000Z",
+        })
+        expect(t.deliverables[2]).toMatchObject({ repo: REPO, pr: URL2 })
+        expect(t.status).toBe("pr_open")
+        expect(t.links.filter((l) => l.type === "pr")).toEqual([
+            expect.objectContaining({ url: URL2, label: `${REPO}#828` }),
+        ])
+        // it blocks Done until it merges
+        expect(openDeliverables(t).map((d) => d.pr || d.repo)).toEqual([
+            REPO2,
+            URL2,
+        ])
+        expect(watcher.prs(1)).toEqual([
+            expect.objectContaining({ repo: REPO, number: 828 }),
+        ])
+        expect(asanaService.comment).toHaveBeenCalledWith(
+            "99",
+            `PR opened: ${URL2}`
+        )
+        // again: the same deliverable, nothing added
+        expect(await watcher.claim(1, URL2, { reported: true })).toMatchObject({
+            ok: true,
+            existing: true,
+            deliverable: { pr: URL2 },
+        })
+        expect((await getTask()).deliverables).toHaveLength(3)
+        // the first one is still its own
+        expect(await watcher.claim(1, PR_URL)).toMatchObject({
+            ok: true,
+            existing: true,
+            deliverable: { pr: PR_URL },
+        })
+    })
+
+    test("a follow-up on another branch leaves the task branch and the first deliverable alone", async () => {
+        const { gh, watcher } = await setup({
+            deliverables: [{ ...merged, merged_at: null }],
+            status: "pr_open",
+        })
+        gh.prs[`${REPO}#812`] = fullPr() // still open
+        gh.prs[`${REPO}#828`] = followUp({
+            headRefName: "t1-more",
+            state: "MERGED",
+            mergedAt: "2026-11-10T08:00:00Z",
+        })
+        const res = await watcher.claim(1, URL2, { manual: true })
+        expect(res.ok).toBe(true)
+        const t = await getTask()
+        expect(t.branch).toBe("t1-fix")
+        expect(
+            t.deliverables.map((d) => [d.branch, d.pr, d.merged_at])
+        ).toEqual([
+            ["t1-fix", PR_URL, null],
+            ["t1-more", URL2, "2026-11-10T08:00:00.000Z"],
+        ])
+        expect(await eventsOf("pr_merged")).toHaveLength(1)
+    })
+
+    test("an open follow-up in the main repo moves the task branch; a merged one does not", async () => {
+        const { gh, watcher } = await setup({
+            deliverables: [merged],
+            status: "pr_open",
+        })
+        await store.updateTask(
+            1,
+            { repos: [{ name: REPO, role: "main" }] },
+            { actor: "me" }
+        )
+        gh.prs[`${REPO}#828`] = followUp({ headRefName: "t1-next" })
+        expect((await watcher.claim(1, URL2, { manual: true })).ok).toBe(true)
+        expect((await getTask()).branch).toBe("t1-next")
+        const URL3 = `https://github.com/${ORG}/${REPO}/pull/829`
+        gh.prs[`${REPO}#829`] = followUp({
+            number: 829,
+            url: URL3,
+            headRefName: "t1-old",
+            state: "MERGED",
+            mergedAt: "2026-11-10T08:00:00Z",
+        })
+        expect((await watcher.claim(1, URL3, { manual: true })).ok).toBe(true)
+        expect((await getTask()).branch).toBe("t1-next")
+    })
+
+    test("discovery checks for a follow-up use the repo's current deliverable", async () => {
+        const { gh, watcher } = await setup({
+            deliverables: [merged],
+            status: "pr_open",
+        })
+        gh.prs[`${REPO}#828`] = followUp({ headRefName: "elsewhere" })
+        expect(await watcher.claim(1, URL2)).toEqual({
+            ok: false,
+            reason: "branch_mismatch",
+        })
+        expect(watcher.candidates(1)).toEqual([
+            expect.objectContaining({ url: URL2, reason: "branch_mismatch" }),
+        ])
+        gh.prs[`${REPO}#828`] = followUp()
+        expect((await watcher.claim(1, URL2)).ok).toBe(true)
+        expect((await getTask()).deliverables).toHaveLength(2)
+    })
+
+    test("no change set while the PR is read wins; a claim it held stays", async () => {
+        const { gh, watcher, claims } = await setup({ status: "pr_open" })
+        const markNoChange = async () => {
+            await store.updateTask(
+                1,
+                { deliverables: [deliv(REPO, { disposition: "no_change" })] },
+                { actor: "me" }
+            )
+            return fullPr()
+        }
+        gh.prs[`${REPO}#812`] = markNoChange
+        expect(await watcher.claim(1, PR_URL, { manual: true })).toEqual({
+            ok: false,
+            reason: "deliverable_no_change",
+        })
+        expect(claims.claimOf(PR_URL)).toBeNull()
+        expect((await getTask()).deliverables[0].disposition).toBe("no_change")
+        // a claim the task already held is not released
+        await store.updateTask(
+            1,
+            { deliverables: [deliv(REPO)] },
+            { actor: "me" }
+        )
+        claims.claim({
+            url: PR_URL,
+            task_id: 1,
+            repo: REPO,
+            number: 812,
+            branch: "t1-fix",
+        })
+        expect(await watcher.claim(1, PR_URL, { manual: true })).toMatchObject({
+            ok: false,
+            reason: "deliverable_no_change",
+        })
+        expect(claims.claimOf(PR_URL).task_id).toBe(1)
+    })
+
+    test("a PR closed without merge stays; a new one is added next to it", async () => {
+        const { gh, watcher } = await claimedSetup()
+        db.prepare(
+            `INSERT INTO pr_watch (task_id, repo, number, url, state, closed_at)
+             VALUES (1, ?, 812, ?, 'CLOSED', '2026-11-08T00:00:00Z')`
+        ).run(REPO, PR_URL)
+        gh.prs[`${REPO}#828`] = followUp()
+        expect((await watcher.claim(1, URL2, { manual: true })).ok).toBe(true)
+        expect((await getTask()).deliverables.map((d) => d.pr)).toEqual([
+            PR_URL,
+            URL2,
+        ])
+    })
+
+    test("a task closed while the PR is read takes no claim", async () => {
+        const { gh, watcher, claims } = await claimedSetup()
+        gh.prs[`${REPO}#812`] = fullPr()
+        gh.prs[`${REPO}#828`] = async () => {
+            await store.updateTask(1, { status: "cancelled" }, { actor: "me" })
+            return followUp()
+        }
+        expect(await watcher.claim(1, URL2, { manual: true })).toEqual({
+            ok: false,
+            reason: "task_closed",
+        })
+        expect(claims.claimOf(URL2)).toBeNull()
+        expect((await getTask()).deliverables).toHaveLength(1)
+        expect(await eventsOf("pr_claimed")).toHaveLength(0)
+    })
+
+    test("a follow-up marked no change takes no PR, before or while it is read", async () => {
+        const { gh, watcher, claims } = await setup({
+            deliverables: [merged, deliv(REPO, { disposition: "no_change" })],
+            status: "pr_open",
+        })
+        gh.prs[`${REPO}#828`] = followUp()
+        expect(await watcher.claim(1, URL2, { manual: true })).toEqual({
+            ok: false,
+            reason: "deliverable_no_change",
+        })
+        expect(gh.getPr).not.toHaveBeenCalled()
+        // pending while checked, no change by the time it is recorded
+        await store.updateTask(
+            1,
+            { deliverables: [merged, deliv(REPO)] },
+            { actor: "me" }
+        )
+        gh.prs[`${REPO}#828`] = async () => {
+            await store.updateTask(
+                1,
+                {
+                    deliverables: [
+                        merged,
+                        deliv(REPO, { disposition: "no_change" }),
+                    ],
+                },
+                { actor: "me" }
+            )
+            return followUp()
+        }
+        expect(await watcher.claim(1, URL2, { manual: true })).toEqual({
+            ok: false,
+            reason: "deliverable_no_change",
+        })
+        expect(claims.claimOf(URL2)).toBeNull()
+        expect((await getTask()).deliverables).toHaveLength(2)
+    })
+
+    test("not on a done or cancelled task", async () => {
+        for (const status of ["done", "cancelled"]) {
+            const { gh, watcher } = await setup({
+                deliverables: [merged],
+                status,
+            })
+            gh.prs[`${REPO}#828`] = followUp()
+            expect(await watcher.claim(1, URL2, { manual: true })).toEqual({
+                ok: false,
+                reason: "task_closed",
+            })
+            expect(gh.getPr).not.toHaveBeenCalled()
+            // its own PR is still answered
+            expect(await watcher.claim(1, PR_URL)).toMatchObject({
+                ok: true,
+                existing: true,
+            })
+            db.close()
+            db = openDb(":memory:")
+            fs.rmSync(path.join(tmp, "tasks"), { recursive: true, force: true })
+            store = createStore({
+                tasksDir: path.join(tmp, "tasks"),
+                db,
+                bus,
+                clock,
+            })
+        }
+    })
+
+    test("no follow-up on a task the watcher does not poll (inbox)", async () => {
+        const { gh, watcher } = await setup({
+            deliverables: [merged],
+            status: "inbox",
+        })
+        gh.prs[`${REPO}#828`] = followUp()
+        expect(await watcher.claim(1, URL2, { manual: true })).toEqual({
+            ok: false,
+            reason: "not_watched",
+        })
+        expect(gh.getPr).not.toHaveBeenCalled()
+        // moved there while the PR was read: refused under the lock
+        await store.updateTask(1, { status: "ready" }, { actor: "me" })
+        gh.prs[`${REPO}#828`] = async () => {
+            await store.updateTask(1, { status: "inbox" }, { actor: "me" })
+            return followUp()
+        }
+        expect(await watcher.claim(1, URL2, { manual: true })).toEqual({
+            ok: false,
+            reason: "not_watched",
+        })
+        expect((await getTask()).deliverables).toHaveLength(1)
+        // a pending (follow-up) deliverable is not filled there either
+        await store.updateTask(
+            1,
+            { deliverables: [merged, deliv(REPO, { branch: "t1-next" })] },
+            { actor: "me" }
+        )
+        gh.prs[`${REPO}#828`] = followUp({ headRefName: "t1-next" })
+        expect(await watcher.claim(1, URL2, { manual: true })).toEqual({
+            ok: false,
+            reason: "not_watched",
+        })
+    })
+
+    test("discovery fills only the deliverable it searched (not one added meanwhile)", async () => {
+        const { gh, watcher } = await setup()
+        const next = deliv(REPO, {
+            branch: "t1-next",
+            created_at: "2026-11-08T10:00:00.000Z",
+        })
+        gh.listPrsByHead.mockImplementationOnce(async () => {
+            // marked no change and a follow-up registered while listing
+            await store.updateTask(
+                1,
+                {
+                    deliverables: [
+                        deliv(REPO, { disposition: "no_change" }),
+                        next,
+                    ],
+                },
+                { actor: "me" }
+            )
+            return [listPr()]
+        })
+        await watcher.pollTask(1)
+        const t = await getTask()
+        expect(t.deliverables[1]).toMatchObject({
+            branch: "t1-next",
+            disposition: "pending",
+            pr: null,
+        })
+        expect(watcher.candidates(1)).toEqual([
+            expect.objectContaining({
+                url: PR_URL,
+                reason: "deliverable_changed",
+            }),
+        ])
+    })
+
+    test("No change by creation time: only the one clicked", async () => {
+        const NEXT_AT = "2026-11-09T10:00:00.000Z"
+        // the follow-up reuses the first one's branch
+        const { watcher } = await setup({
+            deliverables: [merged, deliv(REPO, { created_at: NEXT_AT })],
+            status: "pr_open",
+        })
+        // a stale click on the first deliverable (it has its PR now)
+        await expect(
+            watcher.setNoChange(1, REPO, merged.created_at)
+        ).rejects.toMatchObject({ code: "deliverable_changed", status: 409 })
+        expect((await getTask()).deliverables[1].disposition).toBe("pending")
+        await watcher.setNoChange(1, REPO, NEXT_AT)
+        expect((await getTask()).deliverables[1].disposition).toBe("no_change")
+        // again: already no change, still fine
+        await watcher.setNoChange(1, REPO, NEXT_AT)
+        expect((await getTask()).deliverables[1].disposition).toBe("no_change")
+        await expect(
+            watcher.setNoChange(1, "web", NEXT_AT)
+        ).rejects.toMatchObject({ status: 404 })
+    })
+
+    test("No change goes to the repo's pending deliverable", async () => {
+        const { watcher } = await setup({
+            deliverables: [merged, deliv(REPO, { branch: "t1-next" })],
+            status: "pr_open",
+        })
+        await watcher.setNoChange(1, REPO)
+        const t = await getTask()
+        expect(t.deliverables.map((d) => d.disposition)).toEqual([
+            "pr",
+            "no_change",
+        ])
+    })
+})
 
 describe("feedback rounds", () => {
     test("a PR the agent opens while active is discovered and claimed", async () => {

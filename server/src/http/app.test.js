@@ -2025,6 +2025,25 @@ describe("owner: settings and devices", () => {
         expect(events[0].data.settings["center.provider"]).toBe("codex")
     })
 
+    test.each(["none", "claude", "codex"])(
+        "reviews.fallback_kind %s is accepted and stored",
+        async (kind) => {
+            const res = await patch({ "reviews.fallback_kind": kind })
+            expect(res.status).toBe(200)
+            expect(res.body.settings["reviews.fallback_kind"]).toBe(kind)
+            expect(h.settingsRepo.get("reviews.fallback_kind")).toBe(kind)
+        }
+    )
+
+    test("reviews.fallback_kind rejects other values, sets nothing", async () => {
+        h.settingsRepo.set("reviews.fallback_kind", "codex")
+        for (const bad of ["gpt", "", null, 1]) {
+            const res = await patch({ "reviews.fallback_kind": bad })
+            expect(res.status).toBe(400)
+        }
+        expect(h.settingsRepo.get("reviews.fallback_kind")).toBe("codex")
+    })
+
     test("center.models merges per provider", async () => {
         h.settingsRepo.set("center.models", {
             codex: { light: "a", heavy: "b" },

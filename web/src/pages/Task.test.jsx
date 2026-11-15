@@ -1650,6 +1650,7 @@ describe("Task page: worker flow (phase 2)", () => {
                         repo: "web-app",
                         branch: "t12-fix",
                         role: "work",
+                        created_at: "2026-11-07T09:00:00.000Z",
                         disposition: "pending",
                         pr: null,
                     },
@@ -1985,7 +1986,10 @@ describe("Task page: worker flow (phase 2)", () => {
         ).toBeInTheDocument()
         expect(
             f.find("POST", "/api/tasks/12/deliverables/web-app")[0].body
-        ).toEqual({ disposition: "no_change" })
+        ).toEqual({
+            disposition: "no_change",
+            created_at: "2026-11-07T09:00:00.000Z",
+        })
 
         const claim = () =>
             fireEvent.click(

@@ -16,6 +16,8 @@ import {
     withSnoozeFlags,
     openDeliverables,
     canCreatePr,
+    currentDeliverable,
+    latestDeliverable,
 } from "./lifecycle.js"
 
 const base = {
@@ -173,6 +175,33 @@ describe("openDeliverables", () => {
         expect(openDeliverables({ deliverables: [a, m, n] })).toEqual([a])
         expect(openDeliverables({})).toEqual([])
         expect(openDeliverables(null)).toEqual([])
+    })
+})
+
+describe("currentDeliverable", () => {
+    const m = { repo: "a", disposition: "pr", pr: "1", merged_at: "t" }
+    const o = { repo: "a", disposition: "pr", pr: "2", merged_at: null }
+    const p = { repo: "a", disposition: "pending" }
+    const other = { repo: "b", disposition: "pending" }
+    test("pending, else newest unmerged, else null", () => {
+        expect(currentDeliverable([m, o, p, other], "a")).toBe(p)
+        expect(currentDeliverable([o, m, { ...o, pr: "3" }], "a").pr).toBe("3")
+        const m2 = { ...m, pr: "4" }
+        expect(currentDeliverable([m, m2], "a")).toBeNull()
+        // no_change is done too
+        const n = { repo: "a", disposition: "no_change" }
+        expect(currentDeliverable([o, n], "a")).toBe(o)
+        expect(currentDeliverable([m, n], "a")).toBeNull()
+        expect(currentDeliverable([other], "a")).toBeNull()
+        expect(currentDeliverable(undefined, "a")).toBeNull()
+        expect(latestDeliverable([m, m2, other], "a")).toBe(m2)
+        expect(latestDeliverable(undefined, "a")).toBeNull()
+    })
+    test("repo names compared with eq", () => {
+        const eq = (x, y) => x.toLowerCase() === y.toLowerCase()
+        expect(currentDeliverable([other], "B", eq)).toBe(other)
+        expect(currentDeliverable([other], "B")).toBeNull()
+        expect(latestDeliverable([other], "B", eq)).toBe(other)
     })
 })
 

@@ -60,6 +60,7 @@ export const SETTINGS_DEFAULTS = {
     "reviews.poll_minutes": 20,
     "reviews.parallel": 4,
     "reviews.agent_kind": "claude",
+    "reviews.fallback_kind": "none",
     "digest.enabled": true,
     "digest.time": "08:30",
     "stale.days": 7,

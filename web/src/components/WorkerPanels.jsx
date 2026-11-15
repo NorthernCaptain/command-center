@@ -181,6 +181,10 @@ export function AgentPanel({ agent, outbox, task, onAction }) {
 
 // --- Deliverables ----------------------------------------------------------
 
+/** A repo can have several deliverables (follow-ups): key by repo, PR or
+ * branch and disposition, plus the position (the list only grows). */
+const dlvKey = (d, i) => `${i}:${d.repo}:${d.pr || d.branch}:${d.disposition}`
+
 /**
  * "Can I press Done?" for the deliverables (the server's close rule) and,
  * on a SOC2-area task, its change record (changeRecord: the task payload's
@@ -201,8 +205,8 @@ export function DeliverablesSummary({ deliverables, prs, changeRecord }) {
                         : "The SOC2 change record blocks Done"}
                 </strong>
                 <ul>
-                    {blocking.map((d) => (
-                        <li key={d.repo}>
+                    {blocking.map((d, i) => (
+                        <li key={dlvKey(d, i)}>
                             <code>{d.repo}</code>:{" "}
                             {deliverableState(d, watchFor(prs, d)).reason}
                         </li>
@@ -229,7 +233,7 @@ export function DeliverablesSummary({ deliverables, prs, changeRecord }) {
 /**
  * deliverables: task.deliverables; prs: pr_watch rows; candidates:
  * [{ repo, url, reason }] (unclaimed PRs on the branch).
- * onNoChange(repo), onClaim(url) -> Promise.
+ * onNoChange(repo, created_at), onClaim(url) -> Promise.
  */
 export function DeliverablesPanel({
     deliverables,
@@ -265,12 +269,12 @@ export function DeliverablesPanel({
             />
             {list.length ? (
                 <ul className="dlv-list">
-                    {list.map((d) => {
+                    {list.map((d, i) => {
                         const w = watchFor(prs, d)
                         const st = deliverableState(d, w)
                         return (
                             <li
-                                key={d.repo}
+                                key={dlvKey(d, i)}
                                 className={`dlv dlv-${d.disposition} ${st.done ? "is-done" : "is-blocking"}`}
                             >
                                 <div className="dlv-head">
@@ -330,7 +334,10 @@ export function DeliverablesPanel({
                                             disabled={busy !== null}
                                             onClick={() =>
                                                 run(`nc-${d.repo}`, () =>
-                                                    onNoChange(d.repo)
+                                                    onNoChange(
+                                                        d.repo,
+                                                        d.created_at
+                                                    )
                                                 )
                                             }
                                         >

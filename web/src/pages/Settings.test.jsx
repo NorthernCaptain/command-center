@@ -715,6 +715,12 @@ describe("Settings: phase 2/3", () => {
         fireEvent.change(screen.getByLabelText("Review agent"), {
             target: { value: "codex" },
         })
+        expect(screen.getByLabelText("Fallback review agent")).toHaveValue(
+            "none"
+        )
+        fireEvent.change(screen.getByLabelText("Fallback review agent"), {
+            target: { value: "claude" },
+        })
         fireEvent.click(save)
         await screen.findByText("Settings saved")
         expect(f.find("PATCH", "/api/settings")[0].body).toEqual({
@@ -722,6 +728,7 @@ describe("Settings: phase 2/3", () => {
             "reviews.poll_minutes": 30,
             "reviews.parallel": 2,
             "reviews.agent_kind": "codex",
+            "reviews.fallback_kind": "claude",
         })
     })
 

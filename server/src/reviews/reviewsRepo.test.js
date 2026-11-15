@@ -115,6 +115,27 @@ describe("prs and decisions", () => {
 })
 
 describe("runs", () => {
+    test("prLeftOpen: one PR's finished runs with an open agent", () => {
+        const mk = (number, patch) => {
+            const r = repo.createRun({ repo: "mobile", number, kind: "new" })
+            return repo.updateRun(r.id, patch)
+        }
+        const a = mk(1, {
+            status: "failed",
+            error: "no report",
+            workspace_id: "w1",
+        })
+        const b = mk(1, { status: "cancelled", workspace_id: "w2" })
+        mk(1, { status: "done", workspace_id: null })
+        mk(1, { status: "running", workspace_id: "w3" })
+        mk(2, { status: "failed", workspace_id: "w4" })
+        expect(repo.prLeftOpen("mobile", "1").map((r) => r.id)).toEqual([
+            a.id,
+            b.id,
+        ])
+        expect(repo.prLeftOpen("web", 1)).toEqual([])
+    })
+
     test("create, patch, latest, by key and status", () => {
         const r1 = repo.createRun({
             repo: "mobile",

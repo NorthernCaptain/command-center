@@ -103,6 +103,7 @@ export const SETTINGS_SCHEMAS = {
     "reviews.poll_minutes": z.number().int().min(5).max(1440),
     "reviews.parallel": z.number().int().min(1).max(10),
     "reviews.agent_kind": z.enum(WORKER_KINDS),
+    "reviews.fallback_kind": z.enum(["none", ...WORKER_KINDS]),
     "digest.enabled": z.boolean(),
     "digest.time": z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
     "stale.days": z.number().int().min(1).max(90),

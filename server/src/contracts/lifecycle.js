@@ -199,6 +199,46 @@ export function openDeliverables(task) {
     )
 }
 
+const sameName = (a, b) => a === b
+
+/**
+ * Statuses that take a new PR claim or a follow-up deliverable (a repo's
+ * next PR, or the pending one a new branch adds): the PR watcher polls a
+ * task there while it has an open claimed PR or a pending deliverable
+ * (prWatcher isWatched).
+ * Not done / cancelled, and not inbox, where nothing watches it.
+ */
+export const FOLLOW_UP_STATUSES = [
+    "ready_for_pr",
+    "pr_open",
+    "pr_feedback",
+    "review",
+    "ready",
+    "active",
+    "waiting",
+]
+
+/**
+ * The deliverable of `repo` still being worked on, when the repo can have
+ * several (a follow-up PR adds one): the pending one, else the newest one
+ * with an unmerged PR. null when every one is done, merged or no_change (or
+ * there is none): a done deliverable keeps its branch. eq compares repo
+ * names.
+ */
+export function currentDeliverable(deliverables, repo, eq = sameName) {
+    const of = (deliverables || []).filter((d) => eq(d.repo, repo))
+    return (
+        of.find((d) => d.disposition === "pending") ||
+        of.filter((d) => d.disposition === "pr" && !d.merged_at).pop() ||
+        null
+    )
+}
+
+/** The newest deliverable of `repo` (merged or not), or null. */
+export function latestDeliverable(deliverables, repo, eq = sameName) {
+    return (deliverables || []).filter((d) => eq(d.repo, repo)).pop() || null
+}
+
 /**
  * Create PR is offered while a PR still has to be opened: status
  * ready_for_pr, or a PR state (pr_open / pr_feedback) with a deliverable that

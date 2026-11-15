@@ -278,6 +278,11 @@ export const MIGRATIONS = [
     `
     ALTER TABLE review_prs ADD COLUMN trigger_key TEXT;
     `,
+    // 7: a review run queued again after its agent hit a usage limit
+    // points at the stopped run
+    `
+    ALTER TABLE review_runs ADD COLUMN retry_of INTEGER;
+    `,
 ]
 
 /** Apply pending migrations. Returns the resulting schema version. */

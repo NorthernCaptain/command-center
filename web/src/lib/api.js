@@ -213,9 +213,15 @@ export function createApi({ fetch: fetchImpl, base = "" } = {}) {
         checkSlackNotice: (id) =>
             request("POST", `${t(id)}/slack-notice/check`),
         claimPr: (id, url) => request("POST", `${t(id)}/prs/claim`, { url }),
-        setDeliverable: (id, repo, disposition = "no_change") =>
+        setDeliverable: (
+            id,
+            repo,
+            disposition = "no_change",
+            createdAt = null
+        ) =>
             request("POST", `${t(id)}/deliverables/${enc(repo)}`, {
                 disposition,
+                ...(createdAt ? { created_at: createdAt } : {}),
             }),
         reopenFeedback: (id, itemId) =>
             request("PATCH", `${t(id)}/feedback/${enc(itemId)}`, {
@@ -260,6 +266,13 @@ export function createApi({ fetch: fetchImpl, base = "" } = {}) {
             request(
                 "POST",
                 `/api/reviews/prs/${enc(repo)}/${enc(number)}/review`
+            ),
+        /** Approve one PR's head as the owner, no comment -> { ok }. */
+        approvePr: (repo, number, headSha) =>
+            request(
+                "POST",
+                `/api/reviews/prs/${enc(repo)}/${enc(number)}/approve`,
+                { head_sha: headSha }
             ),
         cancelReviewRun: (id) =>
             request("POST", `/api/reviews/runs/${enc(id)}/cancel`),

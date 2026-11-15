@@ -13,9 +13,18 @@
 
 import nodeFs from "node:fs"
 import path from "node:path"
-import { REVIEW_VERDICTS, SETTLED_VERDICT } from "../contracts/reviews.js"
+import {
+    REVIEW_VERDICTS,
+    SETTLED_VERDICT,
+    USAGE_LIMIT_ERROR,
+} from "../contracts/reviews.js"
 import { sameAgent } from "../herdr/agentIdentity.js"
 import { freeAgentName } from "../herdr/agentNames.js"
+import {
+    findLimitLine,
+    findLimitText,
+    limitResetAt,
+} from "../herdr/usageLimit.js"
 import { expandHome } from "../herdr/herdrClient.js"
 import { AppError, NotFoundError, ValidationError } from "../util/errors.js"
 import { systemClock } from "../util/clock.js"
@@ -50,7 +59,10 @@ export const REVIEW_SETTINGS = {
     poll_minutes: { key: "reviews.poll_minutes", fallback: 20 },
     parallel: { key: "reviews.parallel", fallback: 4 },
     agent_kind: { key: "reviews.agent_kind", fallback: "claude" },
+    fallback_kind: { key: "reviews.fallback_kind", fallback: "none" },
 }
+/** Settings key the limit deadlines are kept under (across restarts). */
+export const LIMITS_KEY = "reviews.limited_until"
 export const VERDICTS = REVIEW_VERDICTS
 /** Where review agents start (config reviews.dir). */
 export const DEFAULT_REVIEWS_DIR = "~/work/reviews"
@@ -79,7 +91,11 @@ export function reviewSandboxArgs(kind) {
 const UPDATED = "reviews.updated"
 /** A queued automatic run whose state was reviewed (or failed) before. */
 const REVIEWED_BEFORE = "this state was reviewed before"
+/** A queued automatic run cancelled because auto-review went off. */
+const AUTO_OFF = "auto-review switched off"
 const MAX_GONE_LOOKUP = 50
+/** The longest setTimeout delay Node keeps (2^31 - 1 ms). */
+const MAX_TIMER_MS = 2147483647
 /** PRs per details query (by number). */
 export const DETAIL_BATCH = 10
 /** Unchanged open PRs are refreshed anyway after this long (CI, conflicts). */
@@ -134,6 +150,13 @@ export function createReviewService({
     const scans = new Map() // repo -> promise
     const background = new Set()
     const launching = new Set() // run ids whose agent is being started
+    const limitedUntil = new Map() // agent kind -> ms its usage limit lifts
+    let holdTimer = null // the queue waits for a usage limit to lift
+    const repoLocks = new Map() // repo -> tail of its scans / fetches
+    const reconciling = new Set()
+    const retryAfter = new Map() // retry run id -> ms of its next fetch
+    let holdAt = 0 // when holdTimer fires (ms)
+    let unsubscribe = null
     // run ids a cancel is cleaning up (still "running" until it is done):
     // their launch must not start or prompt the agent
     const cancelling = new Set()
@@ -169,10 +192,46 @@ export function createReviewService({
     }
 
     function settings() {
+        const t = nowMs()
+        const limited = {}
+        for (const [kind, until] of limitedUntil)
+            if (until > t) limited[kind] = new Date(until).toISOString()
         return {
             poll_minutes: Number(setting("poll_minutes")) || 20,
             parallel: Math.max(1, Number(setting("parallel")) || 4),
             agent_kind: setting("agent_kind"),
+            fallback_kind: setting("fallback_kind"),
+            limited,
+        }
+    }
+
+    /** settings() plus the kind a new review starts with now (or null). */
+    function settingsView() {
+        return { ...settings(), next_kind: kindForRun({}).kind || null }
+    }
+
+    /**
+     * The kind a run starts with: its own (a fallback retry) or the review
+     * agent kind, else the fallback while that one is at its usage limit.
+     * { kind } or, every allowed kind limited, { kind: null, until }.
+     */
+    function kindForRun(run) {
+        const s = settings()
+        const t = nowMs()
+        const free = (k) => !((limitedUntil.get(k) || 0) > t)
+        const fallback =
+            s.fallback_kind && s.fallback_kind !== "none"
+                ? s.fallback_kind
+                : null
+        // a retry's saved kind only while it is still the main or fallback
+        const allowed = [s.agent_kind, fallback].filter(Boolean)
+        const own = allowed.includes(run.agent_kind) ? run.agent_kind : null
+        const options = [own, ...allowed].filter(Boolean)
+        const kind = options.find(free)
+        if (kind) return { kind }
+        return {
+            kind: null,
+            until: Math.min(...options.map((k) => limitedUntil.get(k))),
         }
     }
 
@@ -188,14 +247,37 @@ export function createReviewService({
 
     // ---- scan ----------------------------------------------------------
 
+    /**
+     * Store a fetched PR -> { row, c }, or null when it is not storable (no
+     * author, ours). A stored row of such a PR keeps its history but takes
+     * the fetched state and waits for nothing, so no review is queued from
+     * the stale row.
+     */
     function storePr(repo, node, defaultBranch, login) {
         const pr = normalizeNode(node)
-        if (!pr.author || pr.author.toLowerCase() === login.toLowerCase())
+        const prev = reviews.getPr(repo, pr.number)
+        if (!pr.author || pr.author.toLowerCase() === login.toLowerCase()) {
+            if (prev)
+                reviews.upsertPr({
+                    ...prev,
+                    // the author as GitHub has it now (null: the account is
+                    // gone): such a PR is never reviewed (requestReview,
+                    // claimRun)
+                    author: pr.author,
+                    author_bot: pr.author_bot,
+                    state: pr.state,
+                    merged_at: pr.merged_at,
+                    closed_at: pr.closed_at,
+                    needs_review: null,
+                    trigger_key: null,
+                    last_scanned_at: now(),
+                })
             return null
+        }
         const c = classifyPr(pr, {
             me: login,
             defaultBranch,
-            prev: reviews.getPr(repo, pr.number),
+            prev,
         })
         const row = reviews.upsertPr({
             ...pr,
@@ -234,7 +316,13 @@ export function createReviewService({
         }
         for (const row of reviews.openPrs(repo)) {
             const run = active.get(row.number)
-            const wanted = auto && row.needs_review && !ineligibleReason(row)
+            // a queued automatic retry: the stopped agent's partial comment
+            // doesn't end it (judged as in claimRun)
+            const retry =
+                run && run.status === "queued" && !run.manual && run.retry_of
+            const wanted = retry
+                ? retryStillWanted(run, row)
+                : auto && row.needs_review && !ineligibleReason(row)
             // reviewed meanwhile (e.g. by hand) or no longer eligible: an
             // automatic run that has not started is dropped
             if (run && run.status === "queued" && !run.manual && !wanted) {
@@ -250,6 +338,7 @@ export function createReviewService({
             if (
                 run &&
                 wanted &&
+                row.needs_review &&
                 run.status === "queued" &&
                 !run.manual &&
                 run.trigger_key !== row.trigger_key
@@ -269,6 +358,26 @@ export function createReviewService({
                     })
                 continue
             }
+            // an automatic review a usage limit stopped while auto-review
+            // was off (no hand-over, or its queued retry cancelled): with
+            // auto-review back, its retry is queued as the hand-over would
+            // have (the state was never reviewed to its end)
+            const dropped = !run && auto ? droppedRetry(repo, row.number) : null
+            if (
+                dropped &&
+                retryStillWanted({ repo, retry_of: dropped.id }, row)
+            ) {
+                reviews.createRun({
+                    repo,
+                    number: row.number,
+                    kind: dropped.kind,
+                    trigger_key: dropped.trigger_key,
+                    head_sha: dropped.head_sha,
+                    retry_of: dropped.id,
+                })
+                queued++
+                continue
+            }
             if (!wanted || run) continue
             // this exact state was reviewed (or failed) before: never again
             // automatically
@@ -284,6 +393,22 @@ export function createReviewService({
             queued++
         }
         return queued
+    }
+
+    /**
+     * The PR's last run when it is an automatic review whose usage-limit
+     * retry auto-review being off dropped: failed at the limit with no
+     * replacement, or a queued retry cancelled when auto-review went off.
+     */
+    function droppedRetry(repo, number) {
+        const last = reviews.latestRun(repo, number)
+        if (!last || last.manual) return null
+        const limited = last.status === "failed" && limitMarked(last)
+        const cancelled =
+            last.status === "cancelled" &&
+            last.retry_of &&
+            last.error === AUTO_OFF
+        return limited || cancelled ? last : null
     }
 
     /**
@@ -408,6 +533,19 @@ export function createReviewService({
         const mine = (n) =>
             !n.author ||
             String(n.author.login || "").toLowerCase() === login.toLowerCase()
+        // listed but not storable any more (the author's account is gone):
+        // a stored row of it waits for nothing from now on (storePr), and a
+        // run still queued for it (automatic, manual or a retry) is dropped
+        for (const n of listed)
+            if (mine(n) && reviews.getPr(repo, n.number)) {
+                storePr(repo, n, def, login)
+                for (const run of reviews.runsByStatus(["queued"]))
+                    if (run.repo === repo && run.number === n.number)
+                        finishRun(run, {
+                            status: "cancelled",
+                            error: "PR is not reviewable",
+                        })
+            }
         const changed = listed
             .filter((n) => !mine(n))
             .filter((n) => stale(reviews.getPr(repo, n.number), n, full))
@@ -511,7 +649,18 @@ export function createReviewService({
         if (!failed) reviews.markBackfilled(repo)
     }
 
-    /** Scan one repo now (one at a time per repo). */
+    /** Run fn after earlier reads-and-writes of the repo (scans, fetches). */
+    function withRepoLock(repo, fn) {
+        const prev = repoLocks.get(repo) || Promise.resolve()
+        const run = prev.then(fn)
+        const tail = run.catch(() => {})
+        repoLocks.set(repo, tail)
+        tail.then(() => {
+            if (repoLocks.get(repo) === tail) repoLocks.delete(repo)
+        })
+        return run
+    }
+
     /**
      * Scan one repo now (one at a time per repo). full: refresh every open
      * PR, not only the changed ones (newly tracked, auto-review switched
@@ -522,7 +671,9 @@ export function createReviewService({
         const p = (async () => {
             let classified = []
             try {
-                classified = await scanInner(repo, { full })
+                classified = await withRepoLock(repo, () =>
+                    scanInner(repo, { full })
+                )
                 reviews.markScanned(repo, null)
             } catch (err) {
                 log.warn({ err: errMessage(err), repo }, "review scan failed")
@@ -665,7 +816,45 @@ export function createReviewService({
         ensureMonitor()
     }
 
-    /** Take a slot for a queued run (on the chain); null: not startable. */
+    /** Does an automatic retry after a usage limit still qualify? */
+    function retryStillWanted(run, pr) {
+        const repo = reviews.getRepo(run.repo)
+        if (!repo || !repo.track || !repo.auto_review || ineligibleReason(pr))
+            return false
+        // something to review after our latest word (also after a decision
+        // the stopped agent landed: a new head, an answer)
+        if (pr.needs_review) return true
+        // A decision of ours landed after the stopped attempt began and the
+        // PR needs no review under the re-review rule (docs/09): dropped,
+        // as an uninterrupted review would end. By design this includes an
+        // approval followed by a new head: an approved PR is never
+        // re-reviewed automatically (classifyPr). Attempts run one at a
+        // time, so a decision before the stopped attempt began is an
+        // earlier one: that attempt was started for something after it (an
+        // answer) and its own partial comment must not end the retries.
+        // An answer that came in while the stopped attempt was still at work
+        // after its own decision, followed by its comment, ends like the
+        // uninterrupted review would: our word is the latest (classifyPr).
+        const stopped = lastStarted(run)
+        if (!stopped || !pr.decided_at) return true
+        // GitHub's times are whole seconds: only a later second counts as
+        // after the start (the same second keeps the retry)
+        const sec = (iso) => Math.floor(Date.parse(iso) / 1000)
+        return !(sec(pr.decided_at) > sec(stopped.started_at))
+    }
+
+    /** The newest earlier attempt of a retry chain that started, if any. */
+    function lastStarted(run) {
+        let cur = run
+        const seen = new Set()
+        while (cur && cur.retry_of && !seen.has(cur.id)) {
+            seen.add(cur.id)
+            cur = reviews.getRun(cur.retry_of)
+            if (cur && cur.started_at) return cur
+        }
+        return null
+    }
+
     /** Does an automatic run still qualify (tracking, PR state)? */
     function autoStillWanted(run, pr) {
         const repo = reviews.getRepo(run.repo)
@@ -678,14 +867,35 @@ export function createReviewService({
         )
     }
 
-    function claimRun(run) {
+    /** Take a slot for a queued run (on the chain); null: not startable. */
+    function claimRun(run, kind) {
         const pr = reviews.getPr(run.repo, run.number)
         if (!pr || pr.state !== "OPEN") {
             finishRun(run, { status: "cancelled", error: "PR is not open" })
             return null
         }
-        // auto-review switched off, reviewed meanwhile, …: drop it
-        if (!run.manual && !autoStillWanted(run, pr)) {
+        // its author's account is gone (a scan or fetch stored that)
+        if (!pr.author) {
+            finishRun(run, {
+                status: "cancelled",
+                error: "PR is not reviewable",
+            })
+            return null
+        }
+        // a retry after a usage limit: the PR was fetched fresh just now,
+        // so an automatic one is judged on the current state below (dropped
+        // when the stopped agent's review landed); a manual one goes on,
+        // its prompt says to check what was already posted
+        // auto-review switched off, reviewed meanwhile, …: drop it. An
+        // automatic retry: only when tracking stopped or a review decision
+        // of ours landed after its first attempt began (the stopped agent's
+        // partial comments don't end it)
+        if (
+            !run.manual &&
+            !(run.retry_of
+                ? retryStillWanted(run, pr)
+                : autoStillWanted(run, pr))
+        ) {
             finishRun(run, {
                 status: "cancelled",
                 error: "no review needed any more",
@@ -705,16 +915,18 @@ export function createReviewService({
         return reviews.updateRun(run.id, {
             status: "running",
             started_at: now(),
-            agent_kind: settings().agent_kind,
+            agent_kind: kind,
             folder: path.join(
                 dir,
                 reviewFolderName(run.repo, run.number, run.id)
             ),
             head_sha: pr.head_sha,
             // the run stands for the state it reviews now (a manual one
-            // keeps its kind, but records the state too: it may settle it)
-            trigger_key: pr.trigger_key,
-            ...(run.manual ? {} : { kind: pr.needs_review }),
+            // keeps its kind, but records the state too: it may settle it).
+            // A retry the stopped agent's partial comment made look
+            // reviewed keeps its own kind and state
+            trigger_key: pr.trigger_key || run.trigger_key,
+            ...(run.manual ? {} : { kind: pr.needs_review || run.kind }),
         })
     }
 
@@ -780,6 +992,7 @@ export function createReviewService({
                         org: gh.org,
                         folder,
                         me: login,
+                        retry: cur.retry_of ? firstAttempt(cur) : null,
                     }),
                     { wait: false }
                 )
@@ -800,6 +1013,14 @@ export function createReviewService({
                     emit()
                     return
                 }
+                // stopped at its usage limit while starting (a blocked or
+                // timed-out start): the same hand-over as later on
+                if (
+                    latest.agent_name &&
+                    latest.workspace_id &&
+                    (await checkLimit(latest))
+                )
+                    return
                 await failRun(cur, `start failed: ${errMessage(err)}`, {
                     close: true,
                 })
@@ -823,21 +1044,363 @@ export function createReviewService({
      */
     function pump() {
         if (!running) return Promise.resolve()
-        return serial(() => {
-            // stopped while this waited on the chain: start nothing
-            if (!running) return
-            const claimed = []
-            for (;;) {
-                const busy = reviews.runsByStatus(SLOT_RUN_STATUSES).length
-                if (busy >= settings().parallel) break
-                const next = reviews.runsByStatus(["queued"])[0]
-                if (!next) break
-                const run = claimRun(next)
-                if (run) claimed.push(run)
+        // retries' GitHub reads first, off the chain; stop() waits for them
+        // ordinary runs start at once (slots are kept for the retries
+        // ahead of them); each retry is claimed right after its own fetch,
+        // and one whose slot went to another run is fetched again next time
+        const p = serial(() => claimQueued())
+            .then(() => prepareRetries())
+            .catch((err) =>
+                log.warn({ err: errMessage(err) }, "review retry prepare")
+            )
+            .then(() => serial(() => claimQueued({ repump: true })))
+        background.add(p)
+        p.finally(() => background.delete(p))
+        return p
+    }
+
+    /**
+     * Retries after a usage limit that could start now (a free slot, a
+     * free kind): fetch their PRs fresh, off the run-state chain, and
+     * claim each right after its fetch (no stale state while other fetches
+     * run). One GitHub can't read waits a minute before it is tried again.
+     */
+    async function prepareRetries() {
+        let room =
+            settings().parallel - reviews.runsByStatus(SLOT_RUN_STATUSES).length
+        for (const run of reviews.runsByStatus(["queued"])) {
+            if (!running || room <= 0) return
+            // every allowed kind limited: wake up when the first one lifts
+            const pick = kindForRun(run)
+            if (!pick.kind) {
+                holdUntil(pick.until)
+                return
             }
-            if (claimed.length) emit()
+            // a retry waiting out its delay, or fetched by another pump
+            // right now, takes no slot from the ones behind it
+            if (run.retry_of) {
+                if (reconciling.has(run.id)) continue
+                if ((retryAfter.get(run.id) || 0) > nowMs()) {
+                    // wake up when its delay ends
+                    holdUntil(retryAfter.get(run.id))
+                    continue
+                }
+            }
+            room--
+            if (!run.retry_of) continue
+            reconciling.add(run.id)
+            try {
+                const got = await reconcileRetry(run)
+                if (got && got.drop) {
+                    retryAfter.delete(run.id)
+                    await serial(() => {
+                        const cur = reviews.getRun(run.id)
+                        if (cur.status !== "queued") return
+                        finishRun(cur, { status: "cancelled", error: got.drop })
+                        emit()
+                    })
+                    // its slot goes to the next one
+                    room++
+                } else if (got) {
+                    retryAfter.delete(run.id)
+                    await serial(() =>
+                        claimQueued({ fetched: new Set([run.id]) })
+                    )
+                    // dropped at its start: its slot goes to the next one
+                    if (reviews.getRun(run.id).status === "cancelled") room++
+                } else {
+                    retryAfter.set(run.id, nowMs() + 60000)
+                    holdUntil(nowMs() + 60000)
+                    // its kept slot is free again: a retry fetched meanwhile
+                    // by another pass may take it (this one waits out its
+                    // delay, so no loop)
+                    if (
+                        reviews
+                            .runsByStatus(["queued"])
+                            .some((r) => r.id !== run.id)
+                    )
+                        pump()
+                    // not startable now: its slot goes to the next one
+                    room++
+                }
+            } finally {
+                reconciling.delete(run.id)
+            }
+        }
+    }
+
+    /**
+     * Claim queued runs into free slots (on the chain, no awaits). A retry
+     * only when its PR was fetched just now (`fetched`); an unfetched one
+     * (not waiting out its delay) keeps a slot from the runs behind it.
+     * `repump`: pump again when a dropped run freed a slot a skipped retry
+     * could use.
+     */
+    function claimQueued({ fetched = new Set(), repump = false } = {}) {
+        // stopped meanwhile: start nothing
+        if (!running) return
+        {
+            const claimed = []
+            let changed = false
+            let unfetched = false
+            let reserved = 0
+            for (const next of reviews.runsByStatus(["queued"])) {
+                const busy = reviews.runsByStatus(SLOT_RUN_STATUSES).length
+                if (busy + reserved >= settings().parallel) break
+                // every allowed kind at its usage limit: the queue waits
+                const pick = kindForRun(next)
+                if (!pick.kind) {
+                    holdUntil(pick.until)
+                    break
+                }
+                // a retry starts only after its PR was fetched fresh
+                if (next.retry_of && !fetched.has(next.id)) {
+                    unfetched = true
+                    if (!((retryAfter.get(next.id) || 0) > nowMs())) reserved++
+                    continue
+                }
+                const run = claimRun(next, pick.kind)
+                // null: claimRun dropped it (cancelled)
+                if (run) claimed.push(run)
+                else changed = true
+            }
+            if (claimed.length || changed) emit()
             for (const run of claimed) bg(launchRun(run), "review launch")
-        })
+            // a dropped run freed the slot a skipped retry could use: fetch
+            // it now (each pass drops a run, so this ends)
+            if (repump && changed && unfetched) pump()
+        }
+    }
+
+    /** Start the queue again once a usage limit lifts. */
+    function holdUntil(until) {
+        if (!running) return
+        const at = Math.max(nowMs() + 1000, until + 1000)
+        // already waking up earlier: keep that one
+        if (holdTimer && holdAt <= at) return
+        if (holdTimer) clock.clearTimeout(holdTimer)
+        // timers can't wait longer than ~24.8 days: wake up then and look
+        // again
+        const delay = Math.min(at - nowMs(), MAX_TIMER_MS)
+        holdAt = nowMs() + delay
+        holdTimer = clock.setTimeout(() => {
+            holdTimer = null
+            // a limit may have lifted: the page's badge follows
+            emit()
+            wakeAtNextLimit()
+            pump()
+        }, delay)
+    }
+
+    /** Wake up when the next usage limit lifts (also with nothing queued). */
+    function wakeAtNextLimit() {
+        const t = nowMs()
+        const next = [...limitedUntil.values()].filter((u) => u > t)
+        if (next.length) holdUntil(Math.min(...next))
+    }
+
+    /** Limit deadlines: kept in the settings table across restarts. */
+    function saveLimits() {
+        if (!settingsRepo || !settingsRepo.set) return
+        const t = nowMs()
+        const out = {}
+        for (const [k, until] of limitedUntil) if (until > t) out[k] = until
+        try {
+            settingsRepo.set(LIMITS_KEY, out)
+        } catch (err) {
+            log.warn({ err: errMessage(err) }, "review limits not saved")
+        }
+    }
+
+    function loadLimits() {
+        let saved = null
+        try {
+            saved = settingsRepo ? settingsRepo.get(LIMITS_KEY, null) : null
+        } catch {
+            saved = null
+        }
+        const t = nowMs()
+        for (const [k, until] of Object.entries(saved || {}))
+            if (Number(until) > t) limitedUntil.set(k, Number(until))
+    }
+
+    /**
+     * The agent stopped at its usage limit (banner on its visible screen)?
+     * Its kind is limited until the banner's reset time, the run is noted,
+     * its agent closed, and replaceLimited hands its review over.
+     */
+    /** Stopped at a usage limit (noted on the run before its close)? */
+    function limitMarked(run) {
+        return String(run.error || "").startsWith(USAGE_LIMIT_ERROR)
+    }
+
+    /**
+     * The visible screen of the run's agent; by its pane when herdr does
+     * not know the name (a start that timed out before it took the name).
+     */
+    async function readScreen(run) {
+        const opts = { lines: 40, source: "visible" }
+        try {
+            return await herdr.agentRead(run.agent_name, opts)
+        } catch (err) {
+            if (!run.pane_id) throw err
+            return herdr.agentRead(run.pane_id, opts)
+        }
+    }
+
+    async function checkLimit(run) {
+        // marked before and its close refused: only the close is retried,
+        // whatever the screen shows now (the same banner read again must
+        // not move the deadline)
+        if (limitMarked(run)) {
+            if (await closeAgent(run)) replaceLimited(run)
+            return true
+        }
+        let text
+        try {
+            // the screen as it is now: an old banner in the scrollback of an
+            // agent that went on since must not count
+            text = await readScreen(run)
+        } catch {
+            return false
+        }
+        const line = findLimitLine(text)
+        if (!line) return false
+        const kind = run.agent_kind
+        // the reset time may be wrapped onto the next line
+        const until = limitResetAt(findLimitText(text), nowMs())
+        if (until > (limitedUntil.get(kind) || 0)) {
+            limitedUntil.set(kind, until)
+            saveLimits()
+            wakeAtNextLimit()
+        }
+        log.warn({ run: run.id, kind, line }, "review agent at its usage limit")
+        // noted on the run first: a stop between the close and the hand-
+        // over is finished after a restart (the agent-gone path)
+        const error = `${USAGE_LIMIT_ERROR} (${kind}): ${String(line).trim().slice(0, 200)}`
+        const marked = reviews.updateRun(run.id, { error })
+        // the page's limit badge, whether or not the close goes through
+        emit()
+        // herdr refused the close: the run stays as it is (the next tick
+        // sees the banner again and retries); no second agent meanwhile
+        if (!(await closeAgent(marked))) return true
+        replaceLimited(marked)
+        return true
+    }
+
+    /**
+     * Fail a run stopped by a usage limit and queue its replacement in one
+     * transaction: the review is never lost. On the fallback kind when
+     * there is one other than this one, else whatever kind is free when it
+     * starts (it waits for the limit to lift). It waits for a fresh scan of
+     * its repo and is dropped if the stopped agent's review landed.
+     */
+    function replaceLimited(run) {
+        const fallback = settings().fallback_kind
+        const repo = reviews.getRepo(run.repo)
+        // auto-review switched off meanwhile: no automatic replacement (the
+        // state is not spent; syncQueue queues its retry once auto-review
+        // is back: droppedRetry)
+        if (!run.manual && !(repo && repo.track && repo.auto_review)) {
+            finishRun(run, { status: "failed", error: run.error })
+            emit()
+            return
+        }
+        reviews.failAndReplace(
+            run.id,
+            { status: "failed", finished_at: now(), error: run.error },
+            {
+                repo: run.repo,
+                number: run.number,
+                kind: run.kind,
+                trigger_key: run.trigger_key,
+                manual: run.manual,
+                head_sha: run.head_sha,
+                agent_kind:
+                    fallback &&
+                    fallback !== "none" &&
+                    fallback !== run.agent_kind
+                        ? fallback
+                        : null,
+                retry_of: run.id,
+            }
+        )
+        emit()
+    }
+
+    /**
+     * A retry after a usage limit: fetch its PR fresh before it starts
+     * (the stopped agent may have submitted its review), so claimRun judges
+     * the current state. False when GitHub could not be read: it stays
+     * queued and is tried again in a minute. { drop: reason } when the PR
+     * can never be reviewed (closed, no author, ours).
+     */
+    async function reconcileRetry(run) {
+        // scans and retry fetches of a repo take turns: a slower read never
+        // overwrites a newer one
+        return withRepoLock(run.repo, () => reconcileRetryInner(run))
+    }
+
+    /**
+     * Fetch one PR and store it (call it under the repo lock) ->
+     * { node, stored }: stored is null when the PR is not storable (no
+     * author, ours). Throws when the PR can't be read.
+     */
+    async function fetchPr(repo, number) {
+        const pr = reviews.getPr(repo, number)
+        const login = await whoami()
+        const res = await gh.graphql(
+            prsByNumberQuery([{ number, author: pr && pr.author }]),
+            { owner: gh.org, name: repo, me: login },
+            { partial: true }
+        )
+        const r = (res.data && res.data.repository) || {}
+        const node = r[`p${number}`]
+        if (!node || res.errors.length) throw new Error("PR not readable")
+        await olderOwnReviews(gh.org, repo, node, login)
+        await olderComments(gh.org, repo, node, login)
+        const stored = storePr(
+            repo,
+            node,
+            (r.defaultBranchRef && r.defaultBranchRef.name) || null,
+            login
+        )
+        return { node, stored }
+    }
+
+    async function reconcileRetryInner(run) {
+        try {
+            const { node, stored } = await fetchPr(run.repo, run.number)
+            // readable but not storable (the author's account is gone, or
+            // it is ours): never reviewable, the retry is dropped
+            if (!stored)
+                return {
+                    drop:
+                        node.state && node.state !== "OPEN"
+                            ? "PR is not open"
+                            : "PR is not reviewable",
+                }
+            return true
+        } catch (err) {
+            log.warn(
+                { err: errMessage(err), run: run.id },
+                "review retry: PR not reconciled"
+            )
+            return false
+        }
+    }
+
+    /** The first run of a retry chain (where the review began). */
+    function firstAttempt(run) {
+        let cur = run
+        const seen = new Set()
+        while (cur && cur.retry_of && !seen.has(cur.id)) {
+            seen.add(cur.id)
+            const prev = reviews.getRun(cur.retry_of)
+            if (!prev) break
+            cur = prev
+        }
+        return cur
     }
 
     async function checkRun(run) {
@@ -861,7 +1424,13 @@ export function createReviewService({
         if (info && !sameAgent(run, info)) info = null
         if (info === null) {
             // its workspace may still be there (a closed agent leaves it)
-            await closeAgent(run)
+            const closed = await closeAgent(run)
+            // stopped by a usage limit, the hand-over was interrupted: once
+            // its workspace is gone (else the next tick tries again)
+            if (run.status === "running" && limitMarked(run)) {
+                if (closed) replaceLimited(reviews.getRun(run.id))
+                return
+            }
             if (run.status === "reported") finishRun(run, { status: "done" })
             else
                 finishRun(run, {
@@ -873,6 +1442,13 @@ export function createReviewService({
             return
         }
         const state = info.status
+        // stopped at its usage limit (idle or at a dialog): fall back
+        if (
+            run.status === "running" &&
+            (state !== "working" || limitMarked(run)) &&
+            (await checkLimit(run))
+        )
+            return
         if (state === "working" || state === "blocked") {
             if (!run.seen_working || run.idle_since)
                 reviews.updateRun(run.id, {
@@ -911,6 +1487,7 @@ export function createReviewService({
                       org: gh.org,
                       folder: run.folder,
                       me: await whoami(),
+                      retry: run.retry_of ? firstAttempt(run) : null,
                   })
                 : reviewNudgePrompt(run)
             try {
@@ -1045,6 +1622,14 @@ export function createReviewService({
                         status: 409,
                     }
                 )
+            // its author's account is gone (a scan stored that): never
+            // reviewed
+            if (!pr.author)
+                throw new AppError(
+                    "pr_not_reviewable",
+                    `PR ${repo}#${number} has no author any more`,
+                    { status: 409 }
+                )
             const active = reviews
                 .runsByStatus(ACTIVE_RUN_STATUSES)
                 .find((r) => r.repo === repo && r.number === Number(number))
@@ -1067,39 +1652,197 @@ export function createReviewService({
         })
     }
 
+    /**
+     * "Approve" from the dashboard: an approving review without a comment,
+     * as the gh user, on headSha (the head the dashboard showed). Not
+     * while a review run is open (its agent would decide too); every
+     * finished run's leftover agent is closed first. All of it runs on the chain,
+     * so no review is queued or started between the checks and the stored
+     * approval; the GitHub part holds the repo lock (approveLive).
+     */
+    function approvePr(repo, number, headSha) {
+        const n = Number(number)
+        return serial(async () => {
+            if (!reviews.getPr(repo, n))
+                throw new NotFoundError(`PR ${repo}#${n}`)
+            const refuse = (code, message) => {
+                throw new AppError(code, `PR ${repo}#${n} ${message}`, {
+                    status: 409,
+                })
+            }
+            if (!headSha) refuse("pr_changed", "head commit not given")
+            const active = reviews
+                .runsByStatus(ACTIVE_RUN_STATUSES)
+                .some((r) => r.repo === repo && r.number === n)
+            if (active)
+                refuse("review_running", "has a review run: cancel it first")
+            // finished runs that left their agent open (a failed one kept
+            // for a look, a refused close): none may decide later
+            for (const left of reviews.prLeftOpen(repo, n))
+                await mustClose(left)
+            let fresh
+            try {
+                fresh = await withRepoLock(repo, () =>
+                    approveLive(repo, n, headSha, refuse)
+                )
+            } finally {
+                // a refusal may follow a fresh read: the page shows it
+                emit()
+            }
+            if (!fresh) bg(scanRepo(repo), "review rescan")
+            syncQueue(repo)
+            emit()
+            return { ok: true }
+        }).then((out) => {
+            pump()
+            return out
+        })
+    }
+
+    /**
+     * The GitHub part of an approval (under the repo lock, so a scan in
+     * progress has stored its read first and none overwrites ours):
+     * read the live PR (a push since the last scan must not be approved
+     * unseen), approve headSha, store the approval at once, read the PR
+     * again. -> false when that last read failed (the stored approval
+     * stands until the next scan). The review is on headSha even if a push
+     * lands meanwhile: the owner approved what they saw.
+     */
+    async function approveLive(repo, n, headSha, refuse) {
+        let live
+        try {
+            live = await fetchPr(repo, n)
+        } catch (err) {
+            throw new AppError(
+                "pr_unreadable",
+                `PR ${repo}#${n} could not be read from GitHub: ${errMessage(err)}`,
+                { status: 502 }
+            )
+        }
+        const pr = live.stored && live.stored.row
+        if ((pr ? pr.state : live.node.state) !== "OPEN")
+            refuse("pr_not_open", "is not open")
+        if (!pr) refuse("pr_not_reviewable", "is not reviewed here")
+        if (pr.head_sha !== headSha)
+            refuse("pr_changed", "has new commits: reload and look again")
+        const res = await gh.approvePr(repo, n, { headSha })
+        storeApproval(repo, n, headSha, res)
+        try {
+            await fetchPr(repo, n)
+            return true
+        } catch (err) {
+            log.warn(
+                { err: errMessage(err), repo, number: n },
+                "approve: PR not refreshed"
+            )
+            return false
+        }
+    }
+
+    /**
+     * Our approval as GitHub accepted it (res: the REST review), stored
+     * the way a scan would: decided, nothing waits. Its node_id is the id
+     * a scan stores the same review under.
+     */
+    function storeApproval(repo, number, headSha, res) {
+        const pr = reviews.getPr(repo, number)
+        const at = (res && res.submitted_at) || now()
+        reviews.upsertPr({
+            ...pr,
+            decision: "approved",
+            decided_at: at,
+            decided_sha: headSha,
+            first_review_at: pr.first_review_at || at,
+            attempts: (pr.attempts || 0) + 1,
+            needs_review: null,
+            trigger_key: null,
+        })
+        if (res && res.node_id)
+            reviews.addDecisions(repo, number, [
+                {
+                    id: res.node_id,
+                    state: "APPROVED",
+                    submittedAt: at,
+                    commit: headSha,
+                },
+            ])
+    }
+
     /** Cancel a queued run, or close a run's agent (running / failed). */
     function cancelRun(id) {
         return serial(async () => {
             const run = reviews.getRun(id)
             if (!run) throw new NotFoundError(`review run ${id}`)
-            let next = run
-            if (run.status === "queued")
-                next = finishRun(run, {
-                    status: "cancelled",
-                    error: CANCELLED_BY_OWNER,
-                })
-            else if (SLOT_RUN_STATUSES.includes(run.status)) {
-                // a launch still in progress sees this and stops
-                cancelling.add(run.id)
-                try {
-                    await mustClose(run)
-                } finally {
-                    cancelling.delete(run.id)
-                }
-                next = finishRun(run, {
-                    status: "cancelled",
-                    error: CANCELLED_BY_OWNER,
-                })
-            } else if (run.workspace_id) {
-                await mustClose(run)
-                next = reviews.getRun(run.id)
+            // handed over at a usage limit before this ran (the hand-over
+            // and the cancel take turns on the chain): the cancel is meant
+            // for the review, so it goes to the replacement
+            const replacement = activeRetry(run)
+            if (replacement) {
+                await cancelOne(replacement)
+                emit()
+                return reviews.getRun(run.id)
             }
+            const next = await cancelOne(run)
             emit()
             return next
         }).then((run) => {
             pump()
             return run
         })
+    }
+
+    /**
+     * The active run a usage-limit retry chain from `run` ended in: each
+     * limited attempt's replacement, followed while it failed at a limit
+     * too (handed over again before the cancel). null: none active.
+     */
+    function activeRetry(run) {
+        let cur = run
+        const seen = new Set()
+        while (
+            cur &&
+            cur.status === "failed" &&
+            limitMarked(cur) &&
+            !seen.has(cur.id)
+        ) {
+            seen.add(cur.id)
+            const id = cur.id
+            const active = reviews
+                .runsByStatus(ACTIVE_RUN_STATUSES)
+                .find((r) => r.retry_of === id)
+            if (active) return active
+            cur = reviews
+                .runsByStatus(["failed"])
+                .find((r) => r.retry_of === id)
+        }
+        return null
+    }
+
+    /** Cancel one run (on the chain): queued, running, or close its agent. */
+    async function cancelOne(run) {
+        let next = run
+        if (run.status === "queued")
+            next = finishRun(run, {
+                status: "cancelled",
+                error: CANCELLED_BY_OWNER,
+            })
+        else if (SLOT_RUN_STATUSES.includes(run.status)) {
+            // a launch still in progress sees this and stops
+            cancelling.add(run.id)
+            try {
+                await mustClose(run)
+            } finally {
+                cancelling.delete(run.id)
+            }
+            next = finishRun(run, {
+                status: "cancelled",
+                error: CANCELLED_BY_OWNER,
+            })
+        } else if (run.workspace_id) {
+            await mustClose(run)
+            next = reviews.getRun(run.id)
+        }
+        return next
     }
 
     async function focusRun(id) {
@@ -1145,7 +1888,7 @@ export function createReviewService({
                 if (r.repo === name && !r.manual)
                     finishRun(r, {
                         status: "cancelled",
-                        error: "auto-review switched off",
+                        error: AUTO_OFF,
                     })
         emit()
         // newly tracked or auto-review switched on: scan now
@@ -1165,6 +1908,17 @@ export function createReviewService({
     function start() {
         if (running) return
         running = true
+        loadLimits()
+        wakeAtNextLimit()
+        // a changed review agent / fallback may free the waiting queue
+        if (bus && bus.subscribe)
+            unsubscribe = bus.subscribe((ev) => {
+                if (ev && ev.type === "settings.updated") {
+                    // the page's agent / fallback label follows
+                    emit()
+                    pump()
+                }
+            })
         scanTimer = clock.setTimeout(scanTick, startDelayMs)
         ensureMonitor(startDelayMs)
         pump()
@@ -1178,8 +1932,12 @@ export function createReviewService({
         running = false
         if (scanTimer) clock.clearTimeout(scanTimer)
         if (monitorTimer) clock.clearTimeout(monitorTimer)
+        if (holdTimer) clock.clearTimeout(holdTimer)
+        if (unsubscribe) unsubscribe()
+        unsubscribe = null
         scanTimer = null
         monitorTimer = null
+        holdTimer = null
         for (;;) {
             const tail = chain
             await Promise.allSettled([...scans.values(), ...background, tail])
@@ -1204,11 +1962,12 @@ export function createReviewService({
         scanAll,
         report,
         requestReview,
+        approvePr,
         cancelRun,
         focusRun,
         listRepos,
         setRepo,
-        settings,
+        settings: settingsView,
         whoami: () => me,
         monitorTick,
         pump,

@@ -19,7 +19,13 @@
 // take store.withTaskLock. Errors are per task and never stop pollAll.
 
 import crypto from "node:crypto"
-import { canTransition, openDeliverables } from "../contracts/lifecycle.js"
+import {
+    canTransition,
+    currentDeliverable,
+    FOLLOW_UP_STATUSES,
+    latestDeliverable,
+    openDeliverables,
+} from "../contracts/lifecycle.js"
 import { enqueueCloseOut as defaultEnqueueCloseOut } from "../agent/jobs/close_out.js"
 import { currentRound, feedbackDedupeKey } from "../contracts/feedback.js"
 import { AppError, NotFoundError } from "../util/errors.js"
@@ -70,6 +76,8 @@ export function isWatched(task) {
         (hasOpenClaimedPr(task) || awaitsPr(task))
     )
 }
+/** A task there is over: a PR is no longer claimed for it. */
+const CLOSED_STATUSES = ["done", "cancelled"]
 /** Now reason set by cc_report(ready_for_pr); cleared once the PRs exist. */
 export const READY_REASON = "Ready for PR"
 const RESOLVED = new Set(["fixed", "answered", "declined"])
@@ -613,6 +621,40 @@ export function createPrWatcher({
         return Boolean(main && same(main.name, repo))
     }
 
+    /**
+     * Where the PR `url` goes among repo's deliverables: { index } of the
+     * deliverable it fills (existing: it is already that one's PR), index -1
+     * to add a deliverable (a follow-up PR), or { reason } when it can't go
+     * anywhere. A pending deliverable comes first. A repo whose newest
+     * deliverable is no_change takes no PR (that decision stands).
+     */
+    function slotFor(deliverables, repo, url) {
+        const at = (pred) =>
+            deliverables.findIndex((x) => same(x.repo, repo) && pred(x))
+        const has = at((x) => x.disposition === "pr" && x.pr === url)
+        if (has >= 0) return { index: has, existing: true }
+        if (at(() => true) < 0) return { reason: "no_deliverable" }
+        const pending = at((x) => x.disposition === "pending")
+        if (pending >= 0) return { index: pending }
+        const latest = latestDeliverable(deliverables, repo, same)
+        if (latest.disposition === "no_change")
+            return { reason: "deliverable_no_change" }
+        return { index: -1 }
+    }
+
+    /**
+     * Why the task's status takes no new claim, or null: done / cancelled
+     * takes none (task_closed); otherwise only a status where the watcher
+     * polls a task with a claimed PR (not_watched, e.g. inbox: its PR would
+     * never be followed to its merge).
+     */
+    function statusRefusal(task, slot) {
+        if (slot.existing) return null
+        if (CLOSED_STATUSES.includes(task.status)) return "task_closed"
+        if (!FOLLOW_UP_STATUSES.includes(task.status)) return "not_watched"
+        return null
+    }
+
     /** True when this task holds a PR claim in repo whose head is branch. */
     function ownsBranch(taskId, repo, branch) {
         return claims
@@ -620,8 +662,14 @@ export function createPrWatcher({
             .some((c) => same(c.repo, repo) && c.branch === branch)
     }
 
-    /** Record a claim: pr_claims, deliverable, link, status, pr_watch. */
-    async function applyClaim(taskId, repo, pr, { manual, actor }) {
+    /**
+     * Record a claim: pr_claims, deliverable, link, status, pr_watch.
+     * expected: what the PR was checked against, re-checked under the lock
+     * (deliverable_changed otherwise): { branch, created_at } of the
+     * pending deliverable it fills, or "append" for a follow-up.
+     */
+    async function applyClaim(taskId, repo, pr, { manual, actor, expected }) {
+        const held = claims.claimOf(pr.url)
         const res = claims.claim({
             url: pr.url,
             task_id: taskId,
@@ -640,74 +688,152 @@ export function createPrWatcher({
             : null
         let deliverable = null
         let gid = null
-        await mutateTask(
-            taskId,
-            (task) => {
-                gid = task.asana && task.asana.gid
-                // A claimed PR on another branch (an agent working on an
-                // existing PR, or Leo's manual claim) moves the deliverable
-                // onto the PR's head branch: that is the branch pushed.
-                const head = pr.headRefName || null
-                let movedFrom = null
-                const deliverables = task.deliverables.map((d) =>
-                    same(d.repo, repo)
-                        ? (deliverable = {
-                              ...d,
-                              ...(head && head !== d.branch
-                                  ? ((movedFrom = d.branch), { branch: head })
-                                  : {}),
-                              disposition: "pr",
-                              pr: pr.url,
-                              claimed_at: at,
-                              // claimed after it merged (e.g. Leo attached
-                              // a PR from another branch): merged now
-                              ...(mergedAt ? { merged_at: mergedAt } : {}),
-                          })
-                        : d
-                )
-                const links = [...task.links]
-                if (!links.some((l) => l.type === "pr" && l.url === pr.url))
-                    links.push({
-                        id: newLinkId(),
-                        type: "pr",
-                        url: pr.url,
-                        label: `${repo}#${pr.number}`,
-                        role: null,
-                        added_by: actor,
-                        at,
-                    })
-                const patch = { deliverables, links }
-                if (
-                    movedFrom &&
-                    task.branch === movedFrom &&
-                    isMainRepo(task, repo)
-                )
-                    patch.branch = head
-                // The branch that was refused as taken is this PR's head:
-                // the conflict is resolved by the claim.
-                if (
-                    head &&
-                    task.flags &&
-                    task.flags.now_reason ===
-                        `Branch conflict: ${head} in ${repo}`
-                )
-                    patch.flags = { now: false, now_reason: null }
-                if (task.status === "ready_for_pr") patch.status = "pr_open"
-                // Every deliverable has its PR (or needs none): the "Ready
-                // for PR" ask is done. Other Now reasons stay.
-                const allOpened = deliverables.every(
-                    (d) => d.disposition !== "pending"
-                )
-                if (
-                    allOpened &&
-                    task.flags &&
-                    task.flags.now_reason === READY_REASON
-                )
-                    patch.flags = { now: false, now_reason: null }
-                return patch
-            },
-            { actor, reason: `PR claimed: ${pr.url}` }
-        )
+        const refused = { reason: null }
+        try {
+            await mutateTask(
+                taskId,
+                (task) => {
+                    gid = task.asana && task.asana.gid
+                    const head = pr.headRefName || null
+                    let movedFrom = null
+                    let followUpBranch = null
+                    const slot = slotFor(task.deliverables, repo, pr.url)
+                    // checked again under the lock, as the task may have
+                    // moved while the PR was read: marked no change, or done
+                    // / cancelled (nothing would watch a new PR there). A
+                    // close-out applies under this same lock (job lock):
+                    // the claim lands before its closable re-check (which
+                    // then refuses to close) or after done (refused here).
+                    if (slot.reason) {
+                        refused.reason = slot.reason
+                        throw refused
+                    }
+                    // the deliverable it was checked against is still the
+                    // one it goes to (not, say, a follow-up registered while
+                    // the PR was read after the first was marked no change)
+                    if (expected && !slot.existing) {
+                        const t =
+                            slot.index >= 0
+                                ? task.deliverables[slot.index]
+                                : null
+                        const kept =
+                            expected === "append"
+                                ? !t
+                                : Boolean(
+                                      t &&
+                                      t.branch === expected.branch &&
+                                      t.created_at === expected.created_at
+                                  )
+                        if (!kept) {
+                            refused.reason = "deliverable_changed"
+                            throw refused
+                        }
+                    }
+                    const refusal = statusRefusal(task, slot)
+                    if (refusal) {
+                        refused.reason = refusal
+                        throw refused
+                    }
+                    let deliverables
+                    if (slot.index >= 0) {
+                        // A claimed PR on another branch (an agent working on an
+                        // existing PR, or Leo's manual claim) moves the
+                        // deliverable onto the PR's head branch: that is the
+                        // branch pushed.
+                        deliverables = task.deliverables.map((d, i) =>
+                            i === slot.index
+                                ? (deliverable = {
+                                      ...d,
+                                      ...(head && head !== d.branch
+                                          ? ((movedFrom = d.branch),
+                                            { branch: head })
+                                          : {}),
+                                      disposition: "pr",
+                                      pr: pr.url,
+                                      claimed_at: at,
+                                      // claimed after it merged (e.g. Leo
+                                      // attached a PR from another branch):
+                                      // merged now
+                                      merged_at: mergedAt,
+                                  })
+                                : d
+                        )
+                    } else {
+                        // Every deliverable of the repo has its PR: a follow-up
+                        // PR is a deliverable of its own, so the task closes
+                        // only once it merges too.
+                        const like = latestDeliverable(
+                            task.deliverables,
+                            repo,
+                            same
+                        )
+                        deliverable = {
+                            repo: like ? like.repo : repo,
+                            branch: head || (like && like.branch) || "",
+                            role: "work",
+                            created_at: at,
+                            disposition: "pr",
+                            pr: pr.url,
+                            claimed_at: at,
+                            merged_at: mergedAt,
+                        }
+                        deliverables = [...task.deliverables, deliverable]
+                        // an open follow-up in the main repo is the work now:
+                        // the task's branch follows it (agent context,
+                        // folder fallback)
+                        if (head && !mergedAt && isMainRepo(task, repo))
+                            followUpBranch = head
+                    }
+                    const links = [...task.links]
+                    if (!links.some((l) => l.type === "pr" && l.url === pr.url))
+                        links.push({
+                            id: newLinkId(),
+                            type: "pr",
+                            url: pr.url,
+                            label: `${repo}#${pr.number}`,
+                            role: null,
+                            added_by: actor,
+                            at,
+                        })
+                    const patch = { deliverables, links }
+                    if (followUpBranch && task.branch !== followUpBranch)
+                        patch.branch = followUpBranch
+                    if (
+                        movedFrom &&
+                        task.branch === movedFrom &&
+                        isMainRepo(task, repo)
+                    )
+                        patch.branch = head
+                    // The branch that was refused as taken is this PR's head:
+                    // the conflict is resolved by the claim.
+                    if (
+                        head &&
+                        task.flags &&
+                        task.flags.now_reason ===
+                            `Branch conflict: ${head} in ${repo}`
+                    )
+                        patch.flags = { now: false, now_reason: null }
+                    if (task.status === "ready_for_pr") patch.status = "pr_open"
+                    // Every deliverable has its PR (or needs none): the "Ready
+                    // for PR" ask is done. Other Now reasons stay.
+                    const allOpened = deliverables.every(
+                        (d) => d.disposition !== "pending"
+                    )
+                    if (
+                        allOpened &&
+                        task.flags &&
+                        task.flags.now_reason === READY_REASON
+                    )
+                        patch.flags = { now: false, now_reason: null }
+                    return patch
+                },
+                { actor, reason: `PR claimed: ${pr.url}` }
+            )
+        } catch (err) {
+            if (err !== refused) throw err
+            if (!held) claims.release(pr.url)
+            return { ok: false, reason: refused.reason }
+        }
         await store.appendEvent(
             taskId,
             {
@@ -769,6 +895,10 @@ export function createPrWatcher({
                         const r = await applyClaim(task.id, d.repo, pr, {
                             manual: false,
                             actor: ACTOR,
+                            expected: {
+                                branch: d.branch,
+                                created_at: d.created_at,
+                            },
                         })
                         if (r.ok) {
                             claimed = true
@@ -1777,6 +1907,10 @@ export function createPrWatcher({
      * Claim a PR URL for a task. manual: Leo's claim, no PR checks.
      * reported: the task's agent named the PR (cc_add_link), checkReported.
      * Otherwise the full discovery checks (checkCandidate).
+     * The PR fills the repo's pending deliverable or, when every
+     * deliverable of the repo already has its PR, is added as a deliverable
+     * of its own (a follow-up PR). Not on a done or cancelled task: nothing
+     * would watch the PR there.
      */
     function claim(
         taskId,
@@ -1791,21 +1925,28 @@ export function createPrWatcher({
             if (!same(ref.owner, org))
                 return { ok: false, reason: "foreign_repo" }
             const task = await getTask(id)
-            const d = task.deliverables.find((x) => same(x.repo, ref.repo))
-            if (!d) return { ok: false, reason: "no_deliverable" }
+            const slot = slotFor(task.deliverables, ref.repo, ref.url)
+            if (slot.reason === "no_deliverable")
+                return { ok: false, reason: slot.reason }
             const existing = claims.claimOf(ref.url)
             if (existing && existing.task_id !== id)
                 return { ok: false, reason: "claimed_by_other_task" }
-            if (d.disposition === "pr" && d.pr === ref.url)
-                return { ok: true, deliverable: d, existing: true }
-            if (d.disposition !== "pending")
+            if (slot.existing)
                 return {
-                    ok: false,
-                    reason:
-                        d.disposition === "pr"
-                            ? "deliverable_has_pr"
-                            : "deliverable_no_change",
+                    ok: true,
+                    deliverable: task.deliverables[slot.index],
+                    existing: true,
                 }
+            if (slot.reason) return { ok: false, reason: slot.reason }
+            const refusal = statusRefusal(task, slot)
+            if (refusal) return { ok: false, reason: refusal }
+            // the deliverable it fills, or the repo's current one for a
+            // follow-up PR (its branch and start for the checks)
+            const d =
+                slot.index >= 0
+                    ? task.deliverables[slot.index]
+                    : currentDeliverable(task.deliverables, ref.repo, same) ||
+                      latestDeliverable(task.deliverables, ref.repo, same)
             let pr
             try {
                 pr = await gh.getPr(d.repo, ref.number)
@@ -1838,22 +1979,55 @@ export function createPrWatcher({
                     return check
                 }
             }
-            return applyClaim(id, d.repo, pr, { manual, actor: who })
+            return applyClaim(id, d.repo, pr, {
+                manual,
+                actor: who,
+                expected:
+                    slot.index >= 0
+                        ? { branch: d.branch, created_at: d.created_at }
+                        : "append",
+            })
         })
     }
 
-    /** Leo marks a deliverable as needing no change. */
-    async function setNoChange(taskId, repo) {
+    /**
+     * Leo marks a deliverable as needing no change. createdAt: the one he
+     * clicked (a repo can have several over time; its creation time is set
+     * once, a branch can come back): only that pending one, else 409
+     * deliverable_changed; without it, the repo's current one.
+     */
+    async function setNoChange(taskId, repo, createdAt = null) {
         const id = Number(taskId)
         const res = await serial(id, async () => {
             const task = await mutateTask(
                 id,
                 (t) => {
-                    const d = t.deliverables.find((x) => same(x.repo, repo))
-                    if (!d)
+                    const ofRepo = t.deliverables.filter((x) =>
+                        same(x.repo, repo)
+                    )
+                    if (!ofRepo.length)
                         throw new NotFoundError(
                             `deliverable ${repo} on T-${id}`
                         )
+                    let d
+                    if (createdAt) {
+                        // the one clicked: pending (or already no change)
+                        d = ofRepo.find(
+                            (x) =>
+                                x.created_at === createdAt &&
+                                x.disposition !== "pr"
+                        )
+                        // it got a PR or moved meanwhile: not another one
+                        if (!d)
+                            throw new AppError(
+                                "deliverable_changed",
+                                `${repo} on T-${id}: the deliverable started ${createdAt} is not pending any more`,
+                                { status: 409 }
+                            )
+                    } else
+                        d =
+                            currentDeliverable(ofRepo, repo, same) ||
+                            latestDeliverable(ofRepo, repo, same)
                     if (d.disposition === "no_change") return null
                     // a PR was claimed meanwhile (e.g. a stale No change
                     // click): don't drop it, or close-out skips its merge

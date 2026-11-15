@@ -126,6 +126,8 @@ function makeHerdr() {
         agentPrompt: jest.fn(async () => ({})),
         workspaceClose: jest.fn(async () => ({})),
         agentFocus: jest.fn(async () => ({})),
+        panes: new Map(), // name -> pane text
+        agentRead: jest.fn(async (name) => h.panes.get(name) || ""),
     }
     return h
 }
@@ -148,8 +150,20 @@ function setup(over = {}) {
     const settingsRepo = {
         values,
         get: jest.fn((k, f) => (k in values ? values[k] : f)),
+        set: jest.fn((k, v) => {
+            values[k] = v
+            return v
+        }),
     }
-    const bus = { emit: jest.fn() }
+    const listeners = new Set()
+    const bus = {
+        emit: jest.fn(),
+        subscribe: (fn) => {
+            listeners.add(fn)
+            return () => listeners.delete(fn)
+        },
+        dispatch: (ev) => listeners.forEach((fn) => fn(ev)),
+    }
     const fs = {
         promises: {
             rm: jest.fn(async () => {}),
@@ -1094,6 +1108,9 @@ describe("agents", () => {
             poll_minutes: 20,
             parallel: 1,
             agent_kind: "claude",
+            fallback_kind: "none",
+            limited: {},
+            next_kind: "claude",
         })
         await svc.stop()
     })
@@ -1105,6 +1122,7 @@ describe("agents", () => {
             number: 9,
             state: "OPEN",
             title: "x",
+            author: "dev1",
         })
         const run = await svc.requestReview("mobile", 9)
         reviews.upsertPr({ repo: "mobile", number: 9, state: "CLOSED" })
@@ -1129,6 +1147,1281 @@ async function launched(over) {
 
 const later = (ms) =>
     clock.set(new Date(clock.now().getTime() + ms).toISOString())
+
+describe("usage limits", () => {
+    const BANNER = "⎿  You've hit your usage limit · resets 5pm"
+
+    test("a limit with a fallback: the run fails and a fallback run takes the review", async () => {
+        const env = await started()
+        env.settingsRepo.values["reviews.fallback_kind"] = "codex"
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        const first = env.reviews.getRun(run.id)
+        expect(first.agent_kind).toBe("claude")
+        env.herdr.panes.set(first.agent_name, `working…\n${BANNER}`)
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id)).toMatchObject({
+            status: "failed",
+            error: `usage limit (claude): ${BANNER}`,
+            workspace_id: null,
+        })
+        expect(env.herdr.workspaceClose).toHaveBeenCalledWith(
+            first.workspace_id
+        )
+        // claude limited until 5pm (local), the retry runs on codex
+        const s = env.svc.settings()
+        expect(Object.keys(s.limited)).toEqual(["claude"])
+        const retry = env.reviews.latestRun("mobile", 1)
+        expect(retry.id).not.toBe(run.id)
+        expect(retry).toMatchObject({
+            status: "running",
+            agent_kind: "codex",
+            manual: 1,
+        })
+        expect(env.herdr.agentStart.mock.calls.at(-1)[0].kind).toBe("codex")
+        // new reviews go to codex while claude is limited
+        expect(env.svc.settings().agent_kind).toBe("claude")
+        // the codex review ends; the page hears when claude's limit lifts
+        env.reviews.updateRun(retry.id, { status: "done", workspace_id: null })
+        const before = emitted(env.bus)
+        const until = new Date(s.limited.claude).getTime()
+        await clock.advance(until - clock.now().getTime() + 2000)
+        await env.svc.idle()
+        expect(emitted(env.bus)).toBeGreaterThan(before)
+        expect(env.svc.settings().limited).toEqual({})
+        await env.svc.stop()
+    })
+
+    test("a fallback run at its limit goes back to the free main kind", async () => {
+        const env = await started()
+        env.settingsRepo.values["reviews.agent_kind"] = "codex"
+        env.settingsRepo.values["reviews.fallback_kind"] = "claude"
+        const run = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+            agent_kind: "claude",
+        })
+        await env.svc.pump()
+        await env.svc.idle()
+        const cur = env.reviews.getRun(run.id)
+        expect(cur.agent_kind).toBe("claude")
+        env.herdr.panes.set(cur.agent_name, "Claude AI usage limit reached")
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id).status).toBe("failed")
+        const next = env.reviews.latestRun("mobile", 1)
+        expect(next).toMatchObject({ status: "running", agent_kind: "codex" })
+        // the limit is kept for a restart
+        expect(
+            Object.keys(env.settingsRepo.values["reviews.limited_until"])
+        ).toEqual(["claude"])
+        await env.svc.stop()
+    })
+
+    test("no fallback: a replacement waits for the reset, and the state is not spent", async () => {
+        const env = await started()
+        env.reviews.setRepo("mobile", { auto_review: true })
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        const first = env.reviews.getRun(run.id)
+        env.herdr.panes.set(
+            first.agent_name,
+            "API Error: 429 rate_limit_error (try again at 3:00 PM)"
+        )
+        const starts = env.herdr.agentStart.mock.calls.length
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id).status).toBe("failed")
+        // a usage-limit failure does not count as "reviewed this state"
+        expect(
+            env.reviews.runWithKey("mobile", 1, first.trigger_key).id
+        ).not.toBe(run.id)
+        // the manual review is kept: a replacement waits in the queue
+        const next = env.reviews.latestRun("mobile", 1)
+        expect(next).toMatchObject({
+            status: "queued",
+            manual: 1,
+            agent_kind: null,
+        })
+        expect(env.herdr.agentStart.mock.calls.length).toBe(starts)
+        // the limit lifts: it starts
+        await clock.advance(25 * 3600000)
+        await env.svc.idle()
+        expect(env.reviews.getRun(next.id).status).not.toBe("queued")
+        expect(env.herdr.agentStart.mock.calls.length).toBe(starts + 1)
+        expect(env.svc.settings().limited).toEqual({})
+        await env.svc.stop()
+    })
+
+    test("a limit while the agent starts: the same hand-over", async () => {
+        const env = await started()
+        env.settingsRepo.values["reviews.fallback_kind"] = "codex"
+        const timers = jest.spyOn(clock, "setTimeout")
+        env.herdr.agentStart.mockImplementationOnce(async ({ name }) => {
+            env.herdr.panes.set(
+                name,
+                "Claude AI usage limit reached|9999999999"
+            )
+            throw new Error("agent start blocked")
+        })
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id)).toMatchObject({
+            status: "failed",
+            error: "usage limit (claude): Claude AI usage limit reached|9999999999",
+            workspace_id: null,
+        })
+        expect(env.svc.settings().limited.claude).toBe(
+            new Date(9999999999000).toISOString()
+        )
+        expect(env.reviews.latestRun("mobile", 1)).toMatchObject({
+            retry_of: run.id,
+            agent_kind: "codex",
+        })
+        // a reset centuries away: no timer longer than Node keeps
+        expect(
+            Math.max(...timers.mock.calls.map((c) => c[1]))
+        ).toBeLessThanOrEqual(2147483647)
+        timers.mockRestore()
+        await env.svc.stop()
+    })
+
+    test("a limit at a start that timed out before the name was known: read by its pane", async () => {
+        const env = await started()
+        env.settingsRepo.values["reviews.fallback_kind"] = "codex"
+        env.herdr.agentStart.mockImplementationOnce(async ({ paneId }) => {
+            env.herdr.panes.set(paneId, "Credit balance is too low")
+            throw new Error("agent start timed out")
+        })
+        env.herdr.agentRead.mockImplementation(async (target) => {
+            if (!env.herdr.panes.has(target)) throw new Error("agent_not_found")
+            return env.herdr.panes.get(target)
+        })
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id)).toMatchObject({
+            status: "failed",
+            error: "usage limit (claude): Credit balance is too low",
+        })
+        expect(env.reviews.latestRun("mobile", 1)).toMatchObject({
+            retry_of: run.id,
+            agent_kind: "codex",
+        })
+        await env.svc.stop()
+    })
+
+    test("a scan clears the stored row of a PR whose author is gone", async () => {
+        const env = await started()
+        // stored and waiting for a review (auto-review off: nothing queued)
+        expect(env.reviews.getPr("mobile", 1).needs_review).toBe("new")
+        // a manual run queued for it (no slot yet), and one for another PR
+        const queued = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+        })
+        const other = env.reviews.createRun({
+            repo: "mobile",
+            number: 2,
+            kind: "new",
+            manual: true,
+        })
+        env.gh.open.mobile = [node(1, { author: null })]
+        env.reviews.setRepo("mobile", { auto_review: true })
+        await env.svc.scanRepo("mobile")
+        await env.svc.idle()
+        expect(env.reviews.getRun(queued.id)).toMatchObject({
+            status: "cancelled",
+            error: "PR is not reviewable",
+        })
+        expect(env.reviews.getRun(other.id).status).not.toBe("queued")
+        expect(env.reviews.getPr("mobile", 1)).toMatchObject({
+            state: "OPEN",
+            needs_review: null,
+            author: null,
+        })
+        // never reviewed now, also not by hand
+        await expect(env.svc.requestReview("mobile", 1)).rejects.toMatchObject({
+            code: "pr_not_reviewable",
+            status: 409,
+        })
+        // a run queued before (say by hand, before the scan) starts nothing
+        const late = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+        })
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(late.id)).toMatchObject({
+            status: "cancelled",
+            error: "PR is not reviewable",
+        })
+        expect(
+            env.reviews.runsByStatus(["queued", "running", "reported"])
+        ).toHaveLength(0)
+        await env.svc.stop()
+    })
+
+    test("a retry whose PR can't be stored is dropped", async () => {
+        const env = await started()
+        const first = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+        })
+        env.reviews.updateRun(first.id, {
+            status: "failed",
+            started_at: "2026-11-07T11:00:00Z",
+            error: "usage limit (claude): x",
+        })
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+            retry_of: first.id,
+        })
+        // the author's account is gone and the PR closed
+        env.gh.open.mobile = [
+            node(1, {
+                author: null,
+                state: "CLOSED",
+                closedAt: "2026-11-07T12:00:00Z",
+            }),
+        ]
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id)).toMatchObject({
+            status: "cancelled",
+            error: "PR is not open",
+        })
+        expect(env.herdr.agentStart).not.toHaveBeenCalled()
+        // the stored row follows the fetch and waits for nothing
+        expect(env.reviews.getPr("mobile", 1)).toMatchObject({
+            state: "CLOSED",
+            closed_at: "2026-11-07T12:00:00Z",
+            needs_review: null,
+            author: null,
+        })
+        // open, but the author's account is gone: not reviewable
+        const again = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+            retry_of: first.id,
+        })
+        env.gh.open.mobile = [node(1, { author: null })]
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(again.id)).toMatchObject({
+            status: "cancelled",
+            error: "PR is not reviewable",
+        })
+        // later scans with auto-review on queue nothing from the old row
+        env.reviews.setRepo("mobile", { auto_review: true })
+        await env.svc.scanRepo("mobile", { full: true })
+        await env.svc.idle()
+        expect(env.reviews.getPr("mobile", 1)).toMatchObject({
+            state: "OPEN",
+            needs_review: null,
+        })
+        expect(
+            env.reviews.runsByStatus(["queued", "running", "reported"])
+        ).toHaveLength(0)
+        await env.svc.stop()
+    })
+
+    test("a cancel follows a retry chain limited twice to its active run", async () => {
+        const env = await started()
+        const limited = (over) => {
+            const r = env.reviews.createRun({
+                repo: "mobile",
+                number: 1,
+                kind: "new",
+                manual: true,
+                ...over,
+            })
+            return env.reviews.updateRun(r.id, {
+                status: "failed",
+                started_at: "2026-11-07T11:00:00Z",
+                finished_at: "2026-11-07T11:10:00Z",
+                error: "usage limit (claude): x",
+            })
+        }
+        const first = limited()
+        const second = limited({ retry_of: first.id })
+        const third = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+            retry_of: second.id,
+        })
+        await env.svc.cancelRun(first.id)
+        expect(env.reviews.getRun(third.id)).toMatchObject({
+            status: "cancelled",
+            error: "cancelled",
+        })
+        await env.svc.stop()
+    })
+
+    test("a cancel that lands after the hand-over cancels the replacement", async () => {
+        const env = await started()
+        env.settingsRepo.values["reviews.parallel"] = 1
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        const cur = env.reviews.getRun(run.id)
+        // the slot is taken: the replacement stays queued
+        const busy = env.reviews.createRun({
+            repo: "mobile",
+            number: 2,
+            kind: "new",
+        })
+        env.reviews.updateRun(busy.id, { status: "running", agent_name: "x" })
+        env.herdr.panes.set(cur.agent_name, "Credit balance is too low")
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        const next = env.reviews.latestRun("mobile", 1)
+        expect(next).toMatchObject({ status: "queued", retry_of: run.id })
+        // Cancel clicked on the stopped run
+        const res = await env.svc.cancelRun(run.id)
+        expect(res.status).toBe("failed")
+        expect(env.reviews.getRun(next.id)).toMatchObject({
+            status: "cancelled",
+            error: "cancelled",
+        })
+        // a failed run without a replacement: only its agent is closed
+        await env.svc.cancelRun(run.id)
+        expect(env.reviews.getRun(run.id).status).toBe("failed")
+        await env.svc.stop()
+    })
+
+    test("auto-review switched off before the hand-over: no automatic replacement", async () => {
+        const env = await started()
+        env.reviews.setRepo("mobile", { auto_review: true })
+        await env.svc.scanRepo("mobile")
+        await env.svc.idle()
+        const run = env.reviews.latestRun("mobile", 1)
+        expect(run).toMatchObject({ status: "running", manual: 0 })
+        env.reviews.setRepo("mobile", { auto_review: false })
+        env.herdr.panes.set(run.agent_name, "Credit balance is too low")
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id)).toMatchObject({
+            status: "failed",
+            error: "usage limit (claude): Credit balance is too low",
+        })
+        expect(env.reviews.latestRun("mobile", 1).id).toBe(run.id)
+        // auto-review back: the interrupted review is retried (the state
+        // was never reviewed to its end), not blocked as reviewed before
+        env.svc.setRepo("mobile", { auto_review: true })
+        await env.svc.idle()
+        expect(env.reviews.latestRun("mobile", 1)).toMatchObject({
+            retry_of: run.id,
+            manual: 0,
+        })
+        await env.svc.stop()
+    })
+
+    test("a queued retry cancelled by auto-review going off is queued again when it is back", async () => {
+        const env = await started()
+        env.reviews.setRepo("mobile", { auto_review: true })
+        const first = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            trigger_key: env.reviews.getPr("mobile", 1).trigger_key,
+        })
+        env.reviews.updateRun(first.id, {
+            status: "failed",
+            started_at: "2026-11-07T11:00:00Z",
+            finished_at: "2026-11-07T11:10:00Z",
+            error: "usage limit (claude): x",
+        })
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            retry_of: first.id,
+        })
+        env.svc.setRepo("mobile", { auto_review: false })
+        expect(env.reviews.getRun(retry.id)).toMatchObject({
+            status: "cancelled",
+            error: "auto-review switched off",
+        })
+        env.svc.setRepo("mobile", { auto_review: true })
+        await env.svc.idle()
+        const next = env.reviews.latestRun("mobile", 1)
+        expect(next.id).not.toBe(retry.id)
+        expect(next).toMatchObject({ retry_of: retry.id, manual: 0 })
+        await env.svc.stop()
+    })
+
+    test("a limited agent herdr won't close stays as it is; retried next tick", async () => {
+        const env = await started()
+        env.settingsRepo.values["reviews.fallback_kind"] = "codex"
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        const cur = env.reviews.getRun(run.id)
+        env.herdr.panes.set(cur.agent_name, "Credit balance is too low")
+        env.herdr.workspaceClose.mockRejectedValueOnce(new Error("socket down"))
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id).status).toBe("running")
+        expect(env.reviews.latestRun("mobile", 1).id).toBe(run.id)
+        const limited = env.svc.settings().limited.claude
+        // later: the same banner read again keeps the first deadline; a
+        // screen that changed or can't be read still retries the close
+        env.herdr.panes.set(cur.agent_name, "something else")
+        const close = env.herdr.workspaceClose.getMockImplementation()
+        env.herdr.workspaceClose.mockImplementation(async () => {
+            throw new Error("socket down")
+        })
+        await clock.advance(600000)
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id).status).toBe("running")
+        expect(env.svc.settings().limited.claude).toBe(limited)
+        env.herdr.workspaceClose.mockImplementation(close)
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id).status).toBe("failed")
+        expect(env.reviews.latestRun("mobile", 1).agent_kind).toBe("codex")
+        await env.svc.stop()
+    })
+
+    test("limits survive a restart; a settings change wakes the waiting queue", async () => {
+        const env = setup()
+        env.gh.open.mobile = [node(1)]
+        env.reviews.setRepo("mobile", { track: true })
+        await env.svc.scanRepo("mobile")
+        env.settingsRepo.values["reviews.limited_until"] = {
+            claude: clock.now().getTime() + 3600000,
+            codex: clock.now().getTime() - 1000, // lifted already
+        }
+        const run = await env.svc.requestReview("mobile", 1)
+        env.svc.start()
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id).status).toBe("queued")
+        expect(Object.keys(env.svc.settings().limited)).toEqual(["claude"])
+        // a fallback is set: the queue starts at once
+        env.settingsRepo.values["reviews.fallback_kind"] = "codex"
+        const before = emitted(env.bus)
+        env.bus.dispatch({ type: "settings.updated" })
+        env.bus.dispatch({ type: "other" })
+        expect(emitted(env.bus)).toBe(before + 1)
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id)).toMatchObject({
+            status: "running",
+            agent_kind: "codex",
+        })
+        await env.svc.stop()
+    })
+
+    test("the visible screen is read, not the scrollback", async () => {
+        const env = await started()
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        await env.svc.monitorTick()
+        expect(env.herdr.agentRead).toHaveBeenCalledWith(
+            env.reviews.getRun(run.id).agent_name,
+            { lines: 40, source: "visible" }
+        )
+        await env.svc.stop()
+    })
+
+    test("a retry fetches its PR fresh first: waits while GitHub is unreadable, an automatic one dropped once the review landed", async () => {
+        const env = await started()
+        env.reviews.setRepo("mobile", { auto_review: true })
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        const first = env.reviews.getRun(run.id)
+        // the second attempt hit a limit too: it is the stopped one
+        later(60000)
+        const mid = env.reviews.failAndReplace(
+            run.id,
+            { status: "failed", error: "usage limit (claude): x" },
+            {
+                repo: "mobile",
+                number: 1,
+                kind: "new",
+                manual: false,
+                retry_of: run.id,
+            }
+        )
+        env.reviews.updateRun(mid.id, {
+            status: "failed",
+            started_at: "2026-11-07T12:00:10Z",
+        })
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: false,
+            retry_of: mid.id,
+        })
+        // GitHub unreadable: it stays queued
+        const base = env.gh.graphql.getMockImplementation()
+        env.gh.graphql.mockImplementation(async (query, vars, opts) => {
+            if (query.includes("p1: pullRequest")) throw new Error("502")
+            return base(query, vars, opts)
+        })
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("queued")
+        // readable: our review was submitted after the stopped attempt began
+        env.gh.graphql.mockImplementation(base)
+        env.gh.open.mobile = [
+            node(1, {
+                updatedAt: "2026-11-07T13:00:00Z",
+                reviews: {
+                    nodes: [
+                        mine("rv", "APPROVED", "2026-11-07T12:00:30Z", "sha1"),
+                    ],
+                },
+            }),
+        ]
+        expect(first.started_at < "2026-11-07T12:00:10Z").toBe(true)
+        // the next fetch after the one-minute wait
+        later(61000)
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id)).toMatchObject({
+            status: "cancelled",
+            error: "no review needed any more",
+        })
+        await env.svc.stop()
+    })
+
+    test("a retry whose review did not land starts, its prompt dated from the first attempt", async () => {
+        const env = await started()
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        const first = env.reviews.getRun(run.id)
+        env.herdr.agents.delete(first.agent_name)
+        const retry = env.reviews.failAndReplace(
+            run.id,
+            { status: "failed", error: "usage limit (claude): x" },
+            {
+                repo: "mobile",
+                number: 1,
+                kind: "new",
+                manual: true,
+                retry_of: run.id,
+            }
+        )
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("running")
+        const prompt = env.herdr.agentPrompt.mock.calls.at(-1)[1]
+        expect(prompt).toContain(
+            `(started ${first.started_at}) stopped at a usage limit`
+        )
+        expect(env.svc.settings().next_kind).toBe("claude")
+        await env.svc.stop()
+    })
+
+    test("a retry: login failing waits; stop during the fetch starts nothing; a moved-on PR keeps it", async () => {
+        const env = await started()
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        env.herdr.agents.delete(env.reviews.getRun(run.id).agent_name)
+        const retry = env.reviews.failAndReplace(
+            run.id,
+            { status: "failed", error: "usage limit (claude): x" },
+            {
+                repo: "mobile",
+                number: 1,
+                kind: "new",
+                manual: true,
+                retry_of: run.id,
+            }
+        )
+        // the login lookup fails (a fresh service after a restart)
+        const svc2 = createReviewService({
+            reviews: env.reviews,
+            gh: {
+                ...env.gh,
+                login: jest.fn(async () => {
+                    throw new Error("gh down")
+                }),
+            },
+            herdr: env.herdr,
+            repoTable: { list: () => [{ name: "mobile" }] },
+            settingsRepo: env.settingsRepo,
+            clock,
+            log: env.log,
+            reviewsDir: DIR,
+            fs: env.fs,
+        })
+        svc2.start()
+        await svc2.pump()
+        await svc2.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("queued")
+        await svc2.stop()
+        // stop while GitHub answers: nothing is claimed
+        let answer
+        const base = env.gh.graphql.getMockImplementation()
+        env.gh.graphql.mockImplementation((query, vars, opts) =>
+            query.includes("p1: pullRequest")
+                ? new Promise((res) => {
+                      answer = () => res(base(query, vars, opts))
+                  })
+                : base(query, vars, opts)
+        )
+        const pumped = env.svc.pump()
+        await new Promise((r) => setImmediate(r))
+        const stopped = env.svc.stop()
+        answer()
+        await pumped
+        await stopped
+        expect(env.reviews.getRun(retry.id).status).toBe("queued")
+        env.gh.graphql.mockImplementation(base)
+        // our review landed, but the author pushed since: the retry stays
+        env.gh.open.mobile = [
+            node(1, {
+                headRefOid: "sha1b",
+                updatedAt: "2026-11-07T13:00:00Z",
+                reviews: {
+                    nodes: [
+                        mine(
+                            "rv",
+                            "CHANGES_REQUESTED",
+                            "2026-11-07T12:00:30Z",
+                            "sha1"
+                        ),
+                    ],
+                },
+            }),
+        ]
+        env.svc.start()
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("running")
+        await env.svc.stop()
+    })
+
+    test("a retry: an approval of an older head keeps it; no fetch while no slot is free", async () => {
+        const env = await started()
+        env.settingsRepo.values["reviews.parallel"] = 1
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        env.herdr.agents.delete(env.reviews.getRun(run.id).agent_name)
+        const retry = env.reviews.failAndReplace(
+            run.id,
+            { status: "failed", error: "usage limit (claude): x" },
+            {
+                repo: "mobile",
+                number: 1,
+                kind: "new",
+                manual: true,
+                retry_of: run.id,
+            }
+        )
+        // the only slot is taken: the retry's PR is not fetched
+        const busy = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+        })
+        env.reviews.updateRun(busy.id, { status: "running", agent_name: "x" })
+        const fetches = () =>
+            env.gh.graphql.mock.calls.filter((c) =>
+                c[0].includes("p1: pullRequest")
+            ).length
+        const before = fetches()
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(fetches()).toBe(before)
+        expect(env.reviews.getRun(retry.id).status).toBe("queued")
+        env.reviews.updateRun(busy.id, { status: "done" })
+        // approved, but an older head: the retry reviews the current one
+        env.gh.open.mobile = [
+            node(1, {
+                headRefOid: "sha1b",
+                updatedAt: "2026-11-07T13:00:00Z",
+                reviews: {
+                    nodes: [
+                        mine("rv", "APPROVED", "2026-11-07T12:00:30Z", "sha1"),
+                    ],
+                },
+            }),
+        ]
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("running")
+        await env.svc.stop()
+    })
+
+    test("retries: all kinds limited wakes up at the reset; one in its delay leaves the slot to the next", async () => {
+        const env = setup()
+        env.gh.open.mobile = [node(1), node(2)]
+        env.reviews.setRepo("mobile", { track: true })
+        await env.svc.scanRepo("mobile")
+        env.settingsRepo.values["reviews.parallel"] = 1
+        const mk = (n) => {
+            const r = env.reviews.createRun({
+                repo: "mobile",
+                number: n,
+                kind: "new",
+                manual: true,
+            })
+            env.reviews.updateRun(r.id, {
+                status: "failed",
+                started_at: "2026-11-07T11:00:00Z",
+            })
+            return env.reviews.createRun({
+                repo: "mobile",
+                number: n,
+                kind: "new",
+                manual: true,
+                retry_of: r.id,
+            })
+        }
+        const r1 = mk(1)
+        const r2 = mk(2)
+        // claude limited for an hour, no fallback
+        env.settingsRepo.values["reviews.limited_until"] = {
+            claude: clock.now().getTime() + 3600000,
+        }
+        // #1 unreadable on GitHub
+        const base = env.gh.graphql.getMockImplementation()
+        env.gh.graphql.mockImplementation(async (query, vars, opts) => {
+            if (query.includes("p1: pullRequest")) throw new Error("502")
+            return base(query, vars, opts)
+        })
+        env.svc.start()
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(r1.id).status).toBe("queued")
+        expect(env.reviews.getRun(r2.id).status).toBe("queued")
+        // the limit lifts: #1 fails its fetch (delay), #2 takes the slot
+        await clock.advance(3600000 + 2000)
+        await env.svc.idle()
+        expect(env.reviews.getRun(r1.id).status).toBe("queued")
+        expect(env.reviews.getRun(r2.id).status).toBe("running")
+        // #2 done, GitHub readable again: #1 starts when its delay ends
+        env.reviews.updateRun(r2.id, { status: "done", workspace_id: null })
+        env.gh.graphql.mockImplementation(base)
+        await clock.advance(61000)
+        await env.svc.idle()
+        expect(env.reviews.getRun(r1.id).status).toBe("running")
+        await env.svc.stop()
+    })
+
+    test("an automatic retry survives the stopped agent's partial comment", async () => {
+        const env = await started()
+        env.reviews.setRepo("mobile", { auto_review: true })
+        const cr = {
+            nodes: [
+                mine("r1", "CHANGES_REQUESTED", "2026-11-07T10:00:00Z", "sha1"),
+            ],
+        }
+        // the author answered; the stopped agent then posted a comment
+        env.gh.open.mobile = [
+            node(1, {
+                updatedAt: "2026-11-07T12:30:00Z",
+                reviews: cr,
+                comments: {
+                    nodes: [
+                        {
+                            author: { __typename: "User", login: "dev1" },
+                            createdAt: "2026-11-07T11:00:00Z",
+                        },
+                        {
+                            author: { __typename: "User", login: ME },
+                            createdAt: "2026-11-07T12:00:30Z",
+                        },
+                    ],
+                },
+            }),
+        ]
+        const first = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "re_review",
+        })
+        env.reviews.updateRun(first.id, {
+            status: "failed",
+            started_at: "2026-11-07T12:00:00Z",
+            error: "usage limit (claude): x",
+        })
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "re_review",
+            retry_of: first.id,
+        })
+        // a scan meanwhile keeps it queued
+        await env.svc.scanRepo("mobile")
+        expect(env.reviews.getPr("mobile", 1).needs_review).toBeNull()
+        expect(env.reviews.getRun(retry.id).status).not.toBe("cancelled")
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id)).toMatchObject({
+            status: "running",
+            kind: "re_review",
+        })
+        await env.svc.stop()
+    })
+
+    test("a later attempt's partial comment after an answer keeps the retry", async () => {
+        const env = await started()
+        env.reviews.setRepo("mobile", { auto_review: true })
+        // attempt 1 requested changes (10:05) and stopped; the author
+        // answered (11:00); attempt 2 began (12:00), commented, stopped
+        env.gh.open.mobile = [
+            node(1, {
+                updatedAt: "2026-11-07T12:30:00Z",
+                reviews: {
+                    nodes: [
+                        mine(
+                            "r1",
+                            "CHANGES_REQUESTED",
+                            "2026-11-07T10:05:00Z",
+                            "sha1"
+                        ),
+                    ],
+                },
+                comments: {
+                    nodes: [
+                        {
+                            author: { __typename: "User", login: "dev1" },
+                            createdAt: "2026-11-07T11:00:00Z",
+                        },
+                        {
+                            author: { __typename: "User", login: ME },
+                            createdAt: "2026-11-07T12:00:30Z",
+                        },
+                    ],
+                },
+            }),
+        ]
+        const chain = []
+        for (const started_at of [
+            "2026-11-07T10:00:00Z",
+            "2026-11-07T12:00:00Z",
+            null, // handed over before it started: not the stopped one
+        ]) {
+            const r = env.reviews.createRun({
+                repo: "mobile",
+                number: 1,
+                kind: "re_review",
+                retry_of: chain.length ? chain.at(-1).id : null,
+            })
+            env.reviews.updateRun(r.id, {
+                status: "failed",
+                started_at,
+                error: "usage limit (claude): x",
+            })
+            chain.push(r)
+        }
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "re_review",
+            retry_of: chain.at(-1).id,
+        })
+        await env.svc.scanRepo("mobile")
+        expect(env.reviews.getPr("mobile", 1).needs_review).toBeNull()
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("running")
+        await env.svc.stop()
+    })
+
+    test("a decision in the same second the attempt began keeps the retry", async () => {
+        const env = await started()
+        env.reviews.setRepo("mobile", { auto_review: true })
+        // our change request (whole seconds), then our partial comment
+        env.gh.open.mobile = [
+            node(1, {
+                updatedAt: "2026-11-07T12:30:00Z",
+                reviews: {
+                    nodes: [
+                        mine(
+                            "r1",
+                            "CHANGES_REQUESTED",
+                            "2026-11-07T12:00:00Z",
+                            "sha1"
+                        ),
+                    ],
+                },
+                comments: {
+                    nodes: [
+                        {
+                            author: { __typename: "User", login: ME },
+                            createdAt: "2026-11-07T12:00:30Z",
+                        },
+                    ],
+                },
+            }),
+        ]
+        const first = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "re_review",
+        })
+        env.reviews.updateRun(first.id, {
+            status: "failed",
+            started_at: "2026-11-07T12:00:00.500Z",
+            error: "usage limit (claude): x",
+        })
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "re_review",
+            retry_of: first.id,
+        })
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("running")
+        await env.svc.stop()
+    })
+
+    test("an automatic retry whose decision landed still reviews a newer head", async () => {
+        const env = await started()
+        env.reviews.setRepo("mobile", { auto_review: true })
+        // the stopped agent requested changes on sha1; then sha2 was pushed
+        env.gh.open.mobile = [
+            node(1, {
+                headRefOid: "sha2",
+                updatedAt: "2026-11-07T13:00:00Z",
+                reviews: {
+                    nodes: [
+                        mine(
+                            "r2",
+                            "CHANGES_REQUESTED",
+                            "2026-11-07T12:00:30Z",
+                            "sha1"
+                        ),
+                    ],
+                },
+            }),
+        ]
+        const first = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+        })
+        env.reviews.updateRun(first.id, {
+            status: "failed",
+            started_at: "2026-11-07T12:00:00Z",
+            error: "usage limit (claude): x",
+        })
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            retry_of: first.id,
+        })
+        await env.svc.scanRepo("mobile")
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id)).toMatchObject({
+            status: "running",
+            kind: "re_review",
+            head_sha: "sha2",
+        })
+        await env.svc.stop()
+    })
+
+    test("a retry dropped at its start lets the next retry be fetched", async () => {
+        const env = await started({}, [node(1), node(2)])
+        env.settingsRepo.values["reviews.parallel"] = 1
+        const mk = (n) => {
+            const r = env.reviews.createRun({
+                repo: "mobile",
+                number: n,
+                kind: "new",
+                manual: true,
+            })
+            env.reviews.updateRun(r.id, {
+                status: "failed",
+                started_at: "2026-11-07T11:00:00Z",
+                error: "usage limit (claude): x",
+            })
+            return env.reviews.createRun({
+                repo: "mobile",
+                number: n,
+                kind: "new",
+                manual: true,
+                retry_of: r.id,
+            })
+        }
+        const r1 = mk(1)
+        const r2 = mk(2)
+        // #1 closed meanwhile: its retry is dropped, #2's is fetched next
+        env.gh.open.mobile = [
+            node(1, { state: "CLOSED", closedAt: "2026-11-07T12:00:00Z" }),
+            node(2),
+        ]
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(r1.id)).toMatchObject({
+            status: "cancelled",
+            error: "PR is not open",
+        })
+        expect(env.reviews.getRun(r2.id).status).toBe("running")
+        await env.svc.stop()
+    })
+
+    test("each retry starts right after its own fetch", async () => {
+        const env = await started({}, [node(1), node(2)])
+        env.settingsRepo.values["reviews.parallel"] = 2
+        const mk = (n) => {
+            const r = env.reviews.createRun({
+                repo: "mobile",
+                number: n,
+                kind: "new",
+                manual: true,
+            })
+            env.reviews.updateRun(r.id, {
+                status: "failed",
+                started_at: "2026-11-07T11:00:00Z",
+                error: "usage limit (claude): x",
+            })
+            return env.reviews.createRun({
+                repo: "mobile",
+                number: n,
+                kind: "new",
+                manual: true,
+                retry_of: r.id,
+            })
+        }
+        const r1 = mk(1)
+        const r2 = mk(2)
+        // #2's fetch hangs: #1 is already running meanwhile
+        const base = env.gh.graphql.getMockImplementation()
+        let release = null
+        env.gh.graphql.mockImplementation(async (q, ...rest) => {
+            if (q.includes("p2: pullRequest") && !release) {
+                await new Promise((r) => {
+                    release = r
+                })
+            }
+            return base(q, ...rest)
+        })
+        const p = env.svc.pump()
+        for (let i = 0; i < 20 && !release; i++)
+            await new Promise((r) => setImmediate(r))
+        expect(release).not.toBeNull()
+        expect(env.reviews.getRun(r1.id).status).toBe("running")
+        expect(env.reviews.getRun(r2.id).status).toBe("queued")
+        release()
+        await p
+        await env.svc.idle()
+        expect(env.reviews.getRun(r2.id).status).toBe("running")
+        await env.svc.stop()
+    })
+
+    test("a lifted limit refreshes the page even with nothing queued", async () => {
+        const env = setup()
+        env.settingsRepo.values["reviews.limited_until"] = {
+            claude: clock.now().getTime() + 60000,
+        }
+        env.svc.start()
+        const r = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+        })
+        await env.svc.pump()
+        await env.svc.idle()
+        // the queued run went away meanwhile (cancelled by hand)
+        env.reviews.updateRun(r.id, { status: "cancelled" })
+        const before = emitted(env.bus)
+        await clock.advance(62000)
+        await env.svc.idle()
+        expect(emitted(env.bus)).toBeGreaterThan(before)
+        expect(env.svc.settings().limited).toEqual({})
+        await env.svc.stop()
+    })
+
+    test("ordinary runs don't wait for a retry's fetch; a retry ahead keeps its slot", async () => {
+        const env = await started({}, [node(1), node(2), node(3)])
+        env.settingsRepo.values["reviews.parallel"] = 2
+        const first = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+        })
+        env.reviews.updateRun(first.id, {
+            status: "failed",
+            started_at: "2026-11-07T11:00:00Z",
+            error: "usage limit (claude): x",
+        })
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+            retry_of: first.id,
+        })
+        const m2 = env.reviews.createRun({
+            repo: "mobile",
+            number: 2,
+            kind: "new",
+            manual: true,
+        })
+        const m3 = env.reviews.createRun({
+            repo: "mobile",
+            number: 3,
+            kind: "new",
+            manual: true,
+        })
+        const base = env.gh.graphql.getMockImplementation()
+        let release = null
+        env.gh.graphql.mockImplementation(async (q, ...rest) => {
+            if (q.includes("p1: pullRequest") && !release) {
+                await new Promise((r) => {
+                    release = r
+                })
+            }
+            return base(q, ...rest)
+        })
+        const p = env.svc.pump()
+        for (let i = 0; i < 20 && !release; i++)
+            await new Promise((r) => setImmediate(r))
+        expect(release).not.toBeNull()
+        // #2 started while #1's fetch hangs; #3 waits: #1 keeps its slot
+        expect(env.reviews.getRun(m2.id).status).toBe("running")
+        expect(env.reviews.getRun(m3.id).status).toBe("queued")
+        release()
+        await p
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("running")
+        expect(env.reviews.getRun(m3.id).status).toBe("queued")
+        await env.svc.stop()
+    })
+
+    test("a fetched retry whose slot went away is fetched again", async () => {
+        const env = await started({}, [node(1), node(2)])
+        env.settingsRepo.values["reviews.parallel"] = 1
+        const first = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+        })
+        env.reviews.updateRun(first.id, {
+            status: "failed",
+            started_at: "2026-11-07T11:00:00Z",
+            error: "usage limit (claude): x",
+        })
+        const retry = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+            retry_of: first.id,
+        })
+        const fetches = () => env.gh.graphql.mock.calls.length
+        // the retry's fetch hangs
+        const base = env.gh.graphql.getMockImplementation()
+        let release = null
+        env.gh.graphql.mockImplementation(async (q, ...rest) => {
+            if (q.includes("p1: pullRequest") && !release) {
+                await new Promise((r) => {
+                    release = r
+                })
+            }
+            return base(q, ...rest)
+        })
+        const a = env.svc.pump()
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+        expect(release).not.toBeNull()
+        // the slot is taken meanwhile (e.g. a run that was left running)
+        const other = env.reviews.createRun({
+            repo: "mobile",
+            number: 2,
+            kind: "new",
+            manual: true,
+        })
+        env.reviews.updateRun(other.id, { status: "running", agent_name: "x" })
+        release()
+        await a
+        await env.svc.idle()
+        expect(env.reviews.getRun(retry.id).status).toBe("queued")
+        // the slot frees: the retry's PR is fetched again before it starts
+        const before = fetches()
+        env.reviews.updateRun(other.id, { status: "done", workspace_id: null })
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(fetches()).toBe(before + 1)
+        expect(env.reviews.getRun(retry.id).status).toBe("running")
+        await env.svc.stop()
+    })
+
+    test("a hand-over interrupted after the close is finished when the agent is gone", async () => {
+        const env = await started()
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        const cur = env.reviews.getRun(run.id)
+        // the limit was noted, then the process stopped
+        env.reviews.updateRun(run.id, { error: "usage limit (claude): x" })
+        env.herdr.agents.delete(cur.agent_name)
+        // herdr refuses the close: no hand-over yet
+        env.herdr.workspaceClose.mockRejectedValueOnce(new Error("socket down"))
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id).status).toBe("running")
+        expect(env.reviews.latestRun("mobile", 1).id).toBe(run.id)
+        await env.svc.monitorTick()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id)).toMatchObject({
+            status: "failed",
+            error: "usage limit (claude): x",
+        })
+        const next = env.reviews.latestRun("mobile", 1)
+        expect(next.retry_of).toBe(run.id)
+        await env.svc.stop()
+    })
+
+    test("a retry's saved kind is used only while it is still configured", async () => {
+        const env = await started()
+        env.settingsRepo.values["reviews.fallback_kind"] = "none"
+        const run = env.reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+            manual: true,
+            agent_kind: "codex",
+        })
+        await env.svc.pump()
+        await env.svc.idle()
+        expect(env.reviews.getRun(run.id).agent_kind).toBe("claude")
+        await env.svc.stop()
+    })
+
+    test("a pane that can't be read, or holds no banner: nothing happens", async () => {
+        const env = await started()
+        const run = await env.svc.requestReview("mobile", 1)
+        await env.svc.idle()
+        env.herdr.agentRead.mockRejectedValueOnce(new Error("socket"))
+        await env.svc.monitorTick()
+        expect(env.reviews.getRun(run.id).status).toBe("running")
+        env.herdr.panes.set(
+            env.reviews.getRun(run.id).agent_name,
+            "Checking the gateway's per-IP rate limits"
+        )
+        await env.svc.monitorTick()
+        expect(env.reviews.getRun(run.id).status).toBe("running")
+        await env.svc.stop()
+    })
+})
 
 describe("review fixes", () => {
     test("auto-review off: queued automatic runs are cancelled, manual ones stay", async () => {
@@ -2060,6 +3353,9 @@ describe("lifecycle and scheduling", () => {
             poll_minutes: 20,
             parallel: 4,
             agent_kind: "claude",
+            fallback_kind: "none",
+            limited: {},
+            next_kind: "claude",
         })
         expect(svc.whoami()).toBe(ME)
         gh.open.mobile = []
@@ -2079,6 +3375,7 @@ describe("lifecycle and scheduling", () => {
             number: 1,
             state: "OPEN",
             title: "a",
+            author: "dev1",
         })
         await svc.requestReview("mobile", 1)
         await svc.pump()
@@ -2087,5 +3384,221 @@ describe("lifecycle and scheduling", () => {
         await svc.idle()
         expect(herdr.workspaceCreate).toHaveBeenCalledTimes(1)
         await svc.stop()
+    })
+})
+
+describe("approve", () => {
+    /** PR #1 stored (tracked, no auto-review); gh approves by adding ours. */
+    async function stored() {
+        const env = setup()
+        env.gh.open.mobile = [node(1)]
+        env.reviews.setRepo("mobile", { track: true })
+        await env.svc.scanRepo("mobile")
+        env.gh.approvePr = jest.fn(async () => {
+            env.gh.open.mobile = [
+                node(1, {
+                    updatedAt: "2026-11-07T12:00:00Z",
+                    reviews: {
+                        nodes: [
+                            mine(
+                                "R1",
+                                "APPROVED",
+                                "2026-11-07T12:00:00Z",
+                                "sha1"
+                            ),
+                        ],
+                    },
+                }),
+            ]
+            return {
+                id: 5,
+                node_id: "R1",
+                state: "APPROVED",
+                submitted_at: "2026-11-07T12:00:00Z",
+            }
+        })
+        return env
+    }
+
+    test("approves the seen head, stores our decision, refreshes", async () => {
+        const { svc, gh, reviews, bus } = await stored()
+        const before = emitted(bus)
+        expect(await svc.approvePr("mobile", 1, "sha1")).toEqual({ ok: true })
+        expect(gh.approvePr).toHaveBeenCalledWith("mobile", 1, {
+            headSha: "sha1",
+        })
+        expect(reviews.getPr("mobile", 1)).toMatchObject({
+            decision: "approved",
+            needs_review: null,
+        })
+        expect(emitted(bus)).toBeGreaterThan(before)
+        expect(reviews.runsByStatus(["queued"])).toHaveLength(0)
+    })
+
+    test("unknown, moved on, closed, or with an open run: refused", async () => {
+        const { svc, gh, reviews } = await stored()
+        await expect(svc.approvePr("mobile", 9, "sha9")).rejects.toThrow(
+            "PR mobile#9"
+        )
+        // the dashboard showed another head (or none)
+        for (const sha of ["sha0", undefined])
+            await expect(svc.approvePr("mobile", 1, sha)).rejects.toMatchObject(
+                { code: "pr_changed", status: 409 }
+            )
+        await svc.requestReview("mobile", 1)
+        await expect(svc.approvePr("mobile", 1, "sha1")).rejects.toMatchObject({
+            code: "review_running",
+            status: 409,
+        })
+        gh.open.mobile = []
+        gh.byNum["mobile#1"] = node(1, { state: "CLOSED" })
+        await svc.scanRepo("mobile")
+        expect(reviews.getPr("mobile", 1).state).toBe("CLOSED")
+        await expect(svc.approvePr("mobile", 1, "sha1")).rejects.toMatchObject({
+            code: "pr_not_open",
+            status: 409,
+        })
+        expect(gh.approvePr).not.toHaveBeenCalled()
+    })
+
+    test("a gh error reaches the caller", async () => {
+        const { svc, gh } = await stored()
+        gh.approvePr.mockRejectedValueOnce(new Error("Can not approve"))
+        await expect(svc.approvePr("mobile", 1, "sha1")).rejects.toThrow(
+            "Can not approve"
+        )
+    })
+
+    test("no review is queued while the approval is on its way", async () => {
+        const { svc, gh, reviews } = await stored()
+        const approve = gh.approvePr.getMockImplementation()
+        let release
+        gh.approvePr.mockImplementationOnce(
+            (...a) =>
+                new Promise((resolve) => {
+                    release = () => resolve(approve(...a))
+                })
+        )
+        const approving = svc.approvePr("mobile", 1, "sha1")
+        await new Promise((r) => setImmediate(r))
+        expect(gh.approvePr).toHaveBeenCalled()
+        const review = svc.requestReview("mobile", 1)
+        await new Promise((r) => setImmediate(r))
+        expect(reviews.runsByStatus(["queued"])).toHaveLength(0)
+        release()
+        expect(await approving).toEqual({ ok: true })
+        // the review asked for meanwhile comes after the stored approval
+        const run = await review
+        expect(run).toMatchObject({ kind: "re_review", manual: 1 })
+        expect(reviews.getPr("mobile", 1).decision).toBe("approved")
+    })
+
+    test("approved but not re-read: stored as approved, nothing queued", async () => {
+        const { svc, gh, log, reviews } = await stored()
+        // auto-review on: a stale "needs review" would queue a run
+        reviews.setRepo("mobile", { auto_review: true })
+        const approve = gh.approvePr.getMockImplementation()
+        gh.approvePr.mockImplementationOnce(async (...a) => {
+            const out = await approve(...a)
+            // GitHub is unreadable once the approval went through
+            gh.errors = [{ message: "boom" }]
+            gh.fail = new Error("gh down") // the rescan fails too
+            return out
+        })
+        expect(await svc.approvePr("mobile", 1, "sha1")).toEqual({ ok: true })
+        expect(log.warn).toHaveBeenCalledWith(
+            expect.objectContaining({ repo: "mobile", number: 1 }),
+            "approve: PR not refreshed"
+        )
+        await svc.idle()
+        expect(reviews.getPr("mobile", 1)).toMatchObject({
+            decision: "approved",
+            decided_sha: "sha1",
+            decided_at: "2026-11-07T12:00:00Z",
+            first_review_at: "2026-11-07T12:00:00Z",
+            attempts: 1,
+            needs_review: null,
+        })
+        expect(reviews.runsByStatus(["queued", "running"])).toHaveLength(0)
+        // the next scan stores the same review once, under the same id
+        gh.errors = []
+        gh.fail = null
+        await svc.scanRepo("mobile")
+        expect(reviews.decisions()).toHaveLength(1)
+        expect(reviews.getPr("mobile", 1)).toMatchObject({
+            decision: "approved",
+            attempts: 1,
+        })
+    })
+
+    test("no review id or time from gh: stored with ours", async () => {
+        const { svc, gh, reviews } = await stored()
+        gh.approvePr.mockImplementationOnce(async () => {
+            gh.errors = [{ message: "boom" }]
+            return null
+        })
+        await svc.approvePr("mobile", 1, "sha1")
+        expect(reviews.getPr("mobile", 1)).toMatchObject({
+            decision: "approved",
+            decided_at: "2026-11-07T12:00:00.000Z",
+        })
+        expect(reviews.decisions()).toHaveLength(0)
+    })
+
+    test("the live PR decides: pushed, closed, not ours to review, unreadable", async () => {
+        const { svc, gh, reviews, bus } = await stored()
+        // pushed since the last scan: the stored head is old
+        gh.open.mobile = [node(1, { headRefOid: "sha2" })]
+        const before = emitted(bus)
+        await expect(svc.approvePr("mobile", 1, "sha1")).rejects.toMatchObject({
+            code: "pr_changed",
+            status: 409,
+        })
+        // the fresh read is stored and shown
+        expect(reviews.getPr("mobile", 1).head_sha).toBe("sha2")
+        expect(emitted(bus)).toBeGreaterThan(before)
+        // closed on GitHub, still open here
+        gh.byNum["mobile#1"] = node(1, { headRefOid: "sha2", state: "CLOSED" })
+        await expect(svc.approvePr("mobile", 1, "sha2")).rejects.toMatchObject({
+            code: "pr_not_open",
+        })
+        // the author's account is gone: not stored, not ours to review
+        reviews.upsertPr({ ...reviews.getPr("mobile", 1), state: "OPEN" })
+        gh.byNum["mobile#1"] = node(1, { headRefOid: "sha2", author: null })
+        await expect(svc.approvePr("mobile", 1, "sha2")).rejects.toMatchObject({
+            code: "pr_not_reviewable",
+        })
+        gh.errors = [{ message: "boom" }]
+        await expect(svc.approvePr("mobile", 1, "sha2")).rejects.toMatchObject({
+            code: "pr_unreadable",
+            status: 502,
+        })
+        expect(gh.approvePr).not.toHaveBeenCalled()
+    })
+
+    test("every leftover agent of the PR is closed first", async () => {
+        const { svc, gh, reviews, herdr } = await stored()
+        const run = reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+        })
+        reviews.updateRun(run.id, { status: "failed", workspace_id: "w9" })
+        // a later run, cancelled before the older agent was closed
+        const later = reviews.createRun({
+            repo: "mobile",
+            number: 1,
+            kind: "new",
+        })
+        reviews.updateRun(later.id, { status: "cancelled" })
+        herdr.workspaceClose.mockRejectedValueOnce(new Error("herdr down"))
+        await expect(svc.approvePr("mobile", 1, "sha1")).rejects.toMatchObject({
+            code: "close_failed",
+        })
+        expect(gh.approvePr).not.toHaveBeenCalled()
+        expect(await svc.approvePr("mobile", 1, "sha1")).toEqual({ ok: true })
+        expect(herdr.workspaceClose).toHaveBeenLastCalledWith("w9")
+        expect(reviews.getRun(run.id).workspace_id).toBeNull()
+        expect(gh.approvePr).toHaveBeenCalled()
     })
 })

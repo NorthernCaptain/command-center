@@ -118,7 +118,10 @@ staged changes], checks)`. Stop and wait. If the answer is `ok: false`
 - No commit, push or PR until Leo asks (he asks through this session; the
   Create PR prompt says how, including the line
   `Command-Center-Task: T-<id>` in each PR description, then
-  `cc_add_link(type="pr", url)` for each PR).
+  `cc_add_link(type="pr", url)` for each PR). A further PR in a repo
+  whose PR is already registered (a follow-up after the first merged, Leo
+  asked for it) is registered the same way: it becomes a deliverable of
+  its own, and the task closes only once it merges too.
 - **Standing exception: PR feedback.** When the command center sends you PR
   review feedback, you are authorized to fix, test, commit and push to that
   PR's branch and to reply on GitHub, as the feedback prompt describes.

@@ -7,6 +7,7 @@ import { act, fireEvent, screen, waitFor } from "@testing-library/react"
 import Reviews, {
     DEFAULT_TAB,
     formatHours,
+    limitedText,
     prActions,
     prStatus,
     tabFromSearch,
@@ -36,12 +37,14 @@ const pr = (over = {}) => ({
     decision: null,
     decided_at: null,
     decided_sha: null,
+    head_sha: "sha417",
     first_review_at: null,
     attempts: 0,
     needs_review: "new",
     eligible: true,
     ineligible_reason: null,
     tracked_auto: true,
+    group: "new",
     run: null,
     ...over,
 })
@@ -177,6 +180,15 @@ describe("helpers", () => {
             )
         ).toMatchObject({ review: true, cancel: false, focus: false })
         expect(prActions(pr({ state: "MERGED" })).review).toBe(false)
+    })
+
+    it("prActions: Approve on open New / Changes requested rows only", () => {
+        expect(prActions(pr()).approve).toBe(true)
+        expect(prActions(pr({ group: "rejected" })).approve).toBe(true)
+        expect(prActions(pr({ group: "approved" })).approve).toBe(false)
+        expect(prActions(pr({ group: "queued" })).approve).toBe(false)
+        expect(prActions(pr({ run: run() })).approve).toBe(false)
+        expect(prActions(pr({ state: "CLOSED" })).approve).toBe(false)
     })
 
     it("formatHours", () => {
@@ -343,6 +355,38 @@ describe("Reviews page", () => {
         ])
     })
 
+    it("shows the fallback, a kind at its usage limit and each run's agent", async () => {
+        const until = new Date(2026, 10, 14, 17, 0, 0).toISOString()
+        setup({
+            "GET /api/reviews": page(
+                [pr({ run: run({ agent_kind: "codex", status: "running" }) })],
+                {
+                    settings: {
+                        poll_minutes: 20,
+                        parallel: 4,
+                        agent_kind: "claude",
+                        fallback_kind: "codex",
+                        limited: { claude: until },
+                        next_kind: "codex",
+                    },
+                }
+            ),
+        })
+        renderWithApp(<Reviews />)
+        await screen.findByText("Fix the login flow")
+        expect(
+            screen.getByText(/every 20 min · 4 parallel · claude → codex/)
+        ).toBeInTheDocument()
+        expect(
+            screen.getByText(limitedText("claude", until, "codex"))
+        ).toBeInTheDocument()
+        expect(limitedText("claude", until, "codex")).toMatch(
+            /^claude limited until .+ → codex$/
+        )
+        expect(limitedText("codex", until, null)).toMatch(/→ waiting$/)
+        expect(document.querySelector(".rv-run").textContent).toBe("codex")
+    })
+
     it("starts on the tab from the URL", async () => {
         window.history.replaceState(null, "", "/reviews?tab=approved")
         const f = setup()
@@ -490,6 +534,64 @@ describe("Reviews page", () => {
         await waitFor(() =>
             expect(f.find("GET", "/api/reviews").length).toBeGreaterThan(3)
         )
+    })
+
+    it("approves a PR: button off meanwhile, then a toast and a reload", async () => {
+        let release
+        const f = setup({
+            "GET /api/reviews": page([
+                pr(),
+                pr({ number: 5, group: "approved", decision: "approved" }),
+            ]),
+            "POST /api/reviews/prs/mobile/417/approve": () =>
+                new Promise((resolve) => {
+                    release = () => resolve({ ok: true })
+                }),
+        })
+        renderWithApp(<Reviews />)
+        await screen.findByText("mobile#417")
+        expect(
+            screen.queryByRole("button", { name: "Approve mobile#5" })
+        ).toBeNull()
+        const btn = screen.getByRole("button", { name: "Approve mobile#417" })
+        fireEvent.click(btn)
+        await waitFor(() => expect(btn).toBeDisabled())
+        expect(btn).toHaveTextContent("Approving…")
+        // no review of it meanwhile either
+        expect(
+            screen.getByRole("button", { name: "Review mobile#417" })
+        ).toBeDisabled()
+        // a second click while it is on its way sends nothing
+        fireEvent.click(btn)
+        const before = f.find("GET", "/api/reviews").length
+        act(() => release())
+        expect(
+            await screen.findByText("mobile#417: approved")
+        ).toBeInTheDocument()
+        const sent = f.find("POST", "/api/reviews/prs/mobile/417/approve")
+        expect(sent).toHaveLength(1)
+        expect(sent[0].body).toEqual({ head_sha: "sha417" })
+        await waitFor(() => expect(btn).not.toBeDisabled())
+        await waitFor(() =>
+            expect(f.find("GET", "/api/reviews").length).toBeGreaterThan(before)
+        )
+    })
+
+    it("toasts an approve error", async () => {
+        setup({
+            "POST /api/reviews/prs/mobile/417/approve": reply(409, {
+                message: "has a review run",
+            }),
+        })
+        renderWithApp(<Reviews />)
+        await screen.findByText("mobile#417")
+        fireEvent.click(
+            screen.getByRole("button", { name: "Approve mobile#417" })
+        )
+        expect(await screen.findByText("has a review run")).toBeInTheDocument()
+        expect(
+            screen.getByRole("button", { name: "Approve mobile#417" })
+        ).not.toBeDisabled()
     })
 
     it("toasts action errors", async () => {

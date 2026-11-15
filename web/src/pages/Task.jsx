@@ -494,9 +494,14 @@ export default function TaskPage({ id }) {
         }
     }
 
-    async function noChange(repo) {
+    async function noChange(repo, createdAt) {
         try {
-            const res = await api.setDeliverable(id, repo, "no_change")
+            const res = await api.setDeliverable(
+                id,
+                repo,
+                "no_change",
+                createdAt
+            )
             if (res && res.task)
                 setData((prev) => ({ ...prev, task: res.task }))
             toast.success(`${repo}: no change`)
