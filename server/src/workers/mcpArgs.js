@@ -28,7 +28,7 @@ export const DEFAULT_HEADERS_HELPER = fileURLToPath(
     new URL("../../../install/mcp-headers.sh", import.meta.url)
 )
 
-const tomlString = (s) => JSON.stringify(String(s))
+export const tomlString = (s) => JSON.stringify(String(s))
 
 /**
  * Launch flags that keep an agent from stopping at a startup dialog before

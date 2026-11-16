@@ -245,6 +245,7 @@ describe("normalizeNode", () => {
             ci_state: null,
             reviews: [],
             comments: [],
+            review_requests: [],
         })
     })
 })
@@ -575,6 +576,57 @@ describe("classifyPr", () => {
                 lastOwn: { nodes: [{ submittedAt: "2026-11-11T19:00:00Z" }] },
             }).needs_review
         ).toBe("re_review")
+    })
+
+    test("approved, new commits and still a requested reviewer: re-review of the head", () => {
+        const requests = (...logins) => ({
+            reviewRequests: {
+                nodes: [
+                    ...logins.map((l) => ({ requestedReviewer: user(l) })),
+                    // a team request is nobody's login
+                    { requestedReviewer: { __typename: "Team" } },
+                    null,
+                ],
+            },
+        })
+        const approved = (commit) => ({
+            reviews: {
+                nodes: [
+                    review("leok", "APPROVED", "2026-11-11T10:00:00Z", commit),
+                ],
+            },
+            // the author's answers never change the key of this re-review
+            comments: {
+                nodes: [
+                    { author: user("dev1"), createdAt: "2026-11-12T11:00:00Z" },
+                ],
+            },
+        })
+        const c = classify({ ...approved("aaa1111"), ...requests("LeoK") })
+        expect(c).toMatchObject({
+            decision: "approved",
+            needs_review: "re_review",
+            trigger_key: "re_review:bbb2222:",
+        })
+        // not requested: the approval stands
+        expect(
+            classify({ ...approved("aaa1111"), ...requests("dev2") })
+                .needs_review
+        ).toBeNull()
+        expect(classify(approved("aaa1111")).needs_review).toBeNull()
+        // requested, but our approval is of the head already
+        expect(
+            classify({ ...approved("bbb2222"), ...requests("leok") })
+                .needs_review
+        ).toBeNull()
+        // a closed PR needs nothing
+        expect(
+            classify({
+                ...approved("aaa1111"),
+                ...requests("leok"),
+                state: "CLOSED",
+            }).needs_review
+        ).toBeNull()
     })
 
     test("changes requested, nothing new since: no review needed", () => {

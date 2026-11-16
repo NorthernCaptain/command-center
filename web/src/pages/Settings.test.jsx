@@ -573,6 +573,8 @@ describe("Settings: phase 2/3", () => {
         expect(form["reviews.poll_minutes"]).toBe(20)
         expect(form["reviews.parallel"]).toBe(4)
         expect(form["reviews.agent_kind"]).toBe("claude")
+        expect(form["reviews.agent_model"]).toBe("default")
+        expect(form["reviews.fallback_model"]).toBe("default")
         expect(readSetting(null, "digest.time")).toBe("08:30")
     })
 
@@ -712,14 +714,40 @@ describe("Settings: phase 2/3", () => {
         fireEvent.change(parallel, { target: { value: "12" } })
         expect(screen.getByRole("alert")).toHaveTextContent("1 to 10")
         fireEvent.change(parallel, { target: { value: "2" } })
+        // the review model lists the kind's models
+        const model = screen.getByLabelText("Review model")
+        expect(model).toHaveValue("default")
+        expect([...model.options].map((o) => o.textContent)).toEqual([
+            "claude default",
+            "Opus, medium",
+            "Opus, high",
+            "Sonnet, high",
+            "Sonnet, xhigh",
+        ])
+        fireEvent.change(model, { target: { value: "opus-high" } })
+        // another kind: its models, a model of the old kind goes back
         fireEvent.change(screen.getByLabelText("Review agent"), {
             target: { value: "codex" },
         })
+        expect(screen.getByLabelText("Review model")).toHaveValue("default")
+        fireEvent.change(screen.getByLabelText("Review model"), {
+            target: { value: "terra-xhigh" },
+        })
+        // the same kind again keeps its model
+        fireEvent.change(screen.getByLabelText("Review agent"), {
+            target: { value: "codex" },
+        })
+        expect(screen.getByLabelText("Review model")).toHaveValue("terra-xhigh")
         expect(screen.getByLabelText("Fallback review agent")).toHaveValue(
             "none"
         )
+        // no fallback: no fallback model
+        expect(screen.queryByLabelText("Fallback model")).toBeNull()
         fireEvent.change(screen.getByLabelText("Fallback review agent"), {
             target: { value: "claude" },
+        })
+        fireEvent.change(screen.getByLabelText("Fallback model"), {
+            target: { value: "sonnet-xhigh" },
         })
         fireEvent.click(save)
         await screen.findByText("Settings saved")
@@ -729,6 +757,8 @@ describe("Settings: phase 2/3", () => {
             "reviews.parallel": 2,
             "reviews.agent_kind": "codex",
             "reviews.fallback_kind": "claude",
+            "reviews.agent_model": "terra-xhigh",
+            "reviews.fallback_model": "sonnet-xhigh",
         })
     })
 

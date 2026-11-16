@@ -67,7 +67,13 @@ From GitHub (source of truth), per PR:
     latest word (the change request, a comment-only review, a thread reply
     or a conversation comment of ours: once we replied, it waits on the
     author again; other reviewers' activity does not count):
-    **re-review**.
+    **re-review**;
+  - decision `APPROVED`, a head commit other than the approved one, and
+    GitHub still lists us as a requested reviewer (`reviewRequests`: the
+    author asked for our review again, or the request was never cleared;
+    a team request does not count): **re-review** of that head (its
+    trigger key is the head only; the author's comments don't renew it).
+    New commits nobody asked us to look at leave the approval as it is.
 - `eligible` for an automatic review: open and not a draft; a bot's PR
   and a stacked PR (based on another PR's branch) too. For a stacked PR the
   prompt says it is the explicit request by PR ID that AGENTS.md asks for
@@ -85,6 +91,17 @@ From GitHub (source of truth), per PR:
 - At most `reviews.parallel` (default 4) agents run; the queue starts the
   next one (oldest first) as soon as a slot frees up.
 - Agent kind: `reviews.agent_kind` (default `claude`).
+- Model and effort (Settings, per kind): `reviews.agent_model` for the
+  review agent, `reviews.fallback_model` for the fallback (default
+  `default`: the CLI's own configuration). Claude: `opus-medium`,
+  `opus-high`, `sonnet-high`, `sonnet-xhigh` (`--model <m> --effort <e>`).
+  Codex: `terra-medium`, `terra-high`, `terra-xhigh` (`-m gpt-6.1-terra
+  -c model_reasoning_effort="<e>"`). The list is `REVIEW_MODELS` in
+  `server/src/contracts/reviews.js` (the web client imports it too).
+  A run takes the model set for the kind it starts on (stored as
+  `agent_model`; a model of another kind falls back to `default`), and the
+  dashboard shows it, e.g. "codex (Terra, high)". Usage limits stay per
+  kind.
 - herdr: a workspace in `reviews.dir` (config.json; default `~/work/reviews`)
   labelled `#<number> <PR title>`; a Claude agent also gets
   `--name "#<number> <PR title>"`. Env: `CC_REVIEW_ID`, `CC_URL`,
@@ -108,7 +125,8 @@ From GitHub (source of truth), per PR:
 - `cc_review_report({ review_id, verdict, issues, summary })`: verdict
   `approved` | `changes_requested` (the GitHub review is submitted) |
   `unchanged` (a re-review where nothing since our change request changes
-  it: only replies, no fix; it stands and no new review is submitted) |
+  it: only replies, no fix; it stands and no new review is submitted;
+  refused after our approval, where the new head needs a new review) |
   `skipped` (no review could be done, e.g. not eligible after all or the
   evidence was insufficient; the summary says why). A finished run with
   `unchanged` settles the PR state it reviewed: the PR shows as changes
@@ -269,7 +287,8 @@ rejected, approved, all }`. Rows also carry `tracked` and `tracked_auto`.
 }
 ```
 
-`settings`: `{ poll_minutes, parallel, agent_kind }`. `repos[]`:
+`settings`: `{ poll_minutes, parallel, agent_kind, fallback_kind,
+agent_model, fallback_model, limited, next_kind, next_model }`. `repos[]`:
 `{ name, description, track, auto_review, last_scan_at, open, error }`.
 
 ## Auto-merge (task PRs)

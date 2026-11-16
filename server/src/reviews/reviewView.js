@@ -22,6 +22,7 @@ const RUN_FIELDS = [
     "status",
     "agent_name",
     "agent_kind",
+    "agent_model",
     "queued_at",
     "started_at",
     "finished_at",

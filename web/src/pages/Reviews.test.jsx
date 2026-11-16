@@ -387,6 +387,51 @@ describe("Reviews page", () => {
         expect(document.querySelector(".rv-run").textContent).toBe("codex")
     })
 
+    it("shows the review models: settings, the next kind and each run", async () => {
+        const until = new Date(2026, 10, 14, 17, 0, 0).toISOString()
+        setup({
+            "GET /api/reviews": page(
+                [
+                    pr({
+                        run: run({
+                            agent_kind: "codex",
+                            agent_model: "terra-high",
+                            status: "running",
+                        }),
+                    }),
+                ],
+                {
+                    settings: {
+                        poll_minutes: 20,
+                        parallel: 4,
+                        agent_kind: "claude",
+                        agent_model: "opus-high",
+                        fallback_kind: "codex",
+                        fallback_model: "terra-high",
+                        limited: { claude: until },
+                        next_kind: "codex",
+                        next_model: "terra-high",
+                    },
+                }
+            ),
+        })
+        renderWithApp(<Reviews />)
+        await screen.findByText("Fix the login flow")
+        expect(
+            screen.getByText(
+                /4 parallel · claude \(Opus, high\) → codex \(Terra, high\)/
+            )
+        ).toBeInTheDocument()
+        expect(
+            screen.getByText(/→ codex \(Terra, high\)$/, {
+                selector: ".rv-limited",
+            })
+        ).toBeInTheDocument()
+        expect(document.querySelector(".rv-run").textContent).toBe(
+            "codex (Terra, high)"
+        )
+    })
+
     it("starts on the tab from the URL", async () => {
         window.history.replaceState(null, "", "/reviews?tab=approved")
         const f = setup()

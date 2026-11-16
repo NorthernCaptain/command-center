@@ -63,7 +63,10 @@ export function reviewPrompt({ pr, run, org, folder, me, retry = null }) {
             .join(" ")
         lines.push(
             `This is a RE-REVIEW: ${me} ${pr.decision === "approved" ? "approved it" : "requested changes"} before${when ? ` (${when})` : ""}. ` +
-                "Read that review and every comment and reply since, pay close attention to the comments, verify each earlier finding against the new head, then review all changes since."
+                "Read that review and every comment and reply since, pay close attention to the comments, verify each earlier finding against the new head, then review all changes since." +
+                (pr.decision === "approved"
+                    ? " New commits came after that approval and the author asks for our review again: submit a new review on the current head (approve it, or request changes); unchanged does not apply."
+                    : "")
         )
     }
     lines.push(

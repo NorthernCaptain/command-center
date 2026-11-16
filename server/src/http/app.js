@@ -33,6 +33,7 @@ import {
     TaskPatchSchema,
     WORKER_KINDS,
 } from "../contracts/schemas.js"
+import { REVIEW_MODEL_IDS } from "../contracts/reviews.js"
 import {
     AppError,
     ForbiddenError,
@@ -104,6 +105,8 @@ export const SETTINGS_SCHEMAS = {
     "reviews.parallel": z.number().int().min(1).max(10),
     "reviews.agent_kind": z.enum(WORKER_KINDS),
     "reviews.fallback_kind": z.enum(["none", ...WORKER_KINDS]),
+    "reviews.agent_model": z.enum(REVIEW_MODEL_IDS),
+    "reviews.fallback_model": z.enum(REVIEW_MODEL_IDS),
     "digest.enabled": z.boolean(),
     "digest.time": z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/),
     "stale.days": z.number().int().min(1).max(90),

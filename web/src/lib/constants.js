@@ -3,6 +3,16 @@
  * MIT license.
  */
 
+// Review models come from their server contract (plain, no zod): one list
+// for the Settings choices and the server's validation.
+import {
+    DEFAULT_REVIEW_MODEL,
+    REVIEW_MODELS,
+    reviewModel,
+} from "../../../server/src/contracts/reviews.js"
+
+export { DEFAULT_REVIEW_MODEL, REVIEW_MODELS }
+
 // Plain constants duplicated from server/src/contracts/{schemas,lifecycle}.js.
 // The server files import zod, so the web bundle keeps its own copy. Keep the
 // two in sync when the contracts change.
@@ -42,6 +52,12 @@ export const LANES = [
 ]
 export const PROVIDERS = ["claude-sdk", "claude-cli", "codex"]
 export const WORKER_KINDS = ["claude", "codex"]
+/** "claude (Opus, high)", or just the kind on its default model. */
+export function reviewAgentLabel(kind, id) {
+    const m = reviewModel(kind, id)
+    return m ? `${kind} (${m.label})` : kind
+}
+
 export const ACTIVE_JOB_STATUSES = ["queued", "running", "parked"]
 
 /**
@@ -61,6 +77,8 @@ export const SETTINGS_DEFAULTS = {
     "reviews.parallel": 4,
     "reviews.agent_kind": "claude",
     "reviews.fallback_kind": "none",
+    "reviews.agent_model": "default",
+    "reviews.fallback_model": "default",
     "digest.enabled": true,
     "digest.time": "08:30",
     "stale.days": 7,

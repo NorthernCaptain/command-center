@@ -101,16 +101,19 @@ test("re-review prompt names the earlier decision", () => {
     })
     expect(bare).toContain("by unknown.")
     expect(bare).toContain("reviewer requested changes before. Read")
-    // a re-review Leo asked for on an approved PR
-    expect(
-        reviewPrompt({
-            pr: { ...pr, decision: "approved" },
-            run: { id: 14, kind: "re_review" },
-            org: "acme",
-            folder: "/r/x",
-            me: "reviewer",
-        })
-    ).toContain("reviewer approved it before (")
+    expect(p).not.toContain("unchanged does not apply")
+    // a re-review of an approved PR (new commits, asked again)
+    const again = reviewPrompt({
+        pr: { ...pr, decision: "approved" },
+        run: { id: 14, kind: "re_review" },
+        org: "acme",
+        folder: "/r/x",
+        me: "reviewer",
+    })
+    expect(again).toContain("reviewer approved it before (")
+    expect(again).toContain(
+        "submit a new review on the current head (approve it, or request changes); unchanged does not apply."
+    )
 })
 
 test("a retry after a usage limit: don't post twice", () => {

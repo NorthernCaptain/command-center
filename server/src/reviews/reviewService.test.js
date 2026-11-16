@@ -10,7 +10,7 @@ import { openDb } from "../store/db.js"
 import { createFakeClock } from "../util/clock.js"
 import { CLOSED_PRS_QUERY, OPEN_PRS_QUERY, ineligibleReason } from "./prScan.js"
 import { createReviewsRepo } from "./reviewsRepo.js"
-import { createReviewService } from "./reviewService.js"
+import { createReviewService, reviewModelArgs } from "./reviewService.js"
 
 const ORG = "acme"
 const ME = "acme-me"
@@ -199,6 +199,27 @@ const emitted = (bus) =>
     bus.emit.mock.calls.filter((c) => c[0] === "reviews.updated").length
 const openQueries = (gh) =>
     gh.graphql.mock.calls.filter((c) => c[0] === OPEN_PRS_QUERY)
+
+describe("reviewModelArgs", () => {
+    test("claude and codex flags; none for the default or another kind", () => {
+        expect(reviewModelArgs("claude", "sonnet-high")).toEqual([
+            "--model",
+            "sonnet",
+            "--effort",
+            "high",
+        ])
+        expect(reviewModelArgs("codex", "terra-medium")).toEqual([
+            "-m",
+            "gpt-6.1-terra",
+            "-c",
+            'model_reasoning_effort="medium"',
+        ])
+        expect(reviewModelArgs("claude", "default")).toEqual([])
+        expect(reviewModelArgs("codex", "opus-high")).toEqual([])
+        expect(reviewModelArgs("claude", undefined)).toEqual([])
+        expect(reviewModelArgs("gemini", "opus-high")).toEqual([])
+    })
+})
 
 describe("ineligibleReason", () => {
     test("closed and draft; bots and stacked PRs are eligible", () => {
@@ -641,6 +662,59 @@ describe("auto-review queue", () => {
             needs_review: "re_review",
             trigger_key: "re_review:sha1:2026-11-05T12:00:00Z",
         })
+        await svc.stop()
+    })
+
+    test("approved, then new commits with our review requested again: an automatic re-review", async () => {
+        const { svc, reviews, gh } = setup()
+        reviews.setRepo("mobile", { auto_review: true })
+        const requested = (logins) => ({
+            reviewRequests: {
+                nodes: logins.map((login) => ({
+                    requestedReviewer: { __typename: "User", login },
+                })),
+            },
+        })
+        gh.open.mobile = [
+            node(1, {
+                reviews: {
+                    nodes: [
+                        mine("r1", "APPROVED", "2026-11-04T10:00:00Z", "sha0"),
+                    ],
+                },
+                ...requested([ME, "dev2"]),
+            }),
+            // approved, new commits, but nobody asked us again
+            node(2, {
+                reviews: {
+                    nodes: [
+                        mine("r2", "APPROVED", "2026-11-04T10:00:00Z", "sha0"),
+                    ],
+                },
+                ...requested(["dev2"]),
+            }),
+        ]
+        await svc.scanRepo("mobile")
+        expect(reviews.getPr("mobile", 1)).toMatchObject({
+            decision: "approved",
+            needs_review: "re_review",
+            trigger_key: "re_review:sha1:",
+        })
+        expect(reviews.getPr("mobile", 2).needs_review).toBeNull()
+        const queued = reviews.runsByStatus(["queued"])
+        expect(queued.map((r) => [r.number, r.kind])).toEqual([
+            [1, "re_review"],
+        ])
+        // the new head needs a new review: unchanged is refused
+        svc.start()
+        await svc.idle()
+        const run = reviews.getRun(queued[0].id)
+        expect(run.status).toBe("running")
+        await expect(
+            svc.report({ review_id: run.id, verdict: "unchanged" }, {})
+        ).rejects.toThrow("unchanged is only for a re-review")
+        await svc.report({ review_id: run.id, verdict: "approved" }, {})
+        expect(reviews.getRun(run.id).verdict).toBe("approved")
         await svc.stop()
     })
 
@@ -1109,9 +1183,63 @@ describe("agents", () => {
             parallel: 1,
             agent_kind: "claude",
             fallback_kind: "none",
+            agent_model: "default",
+            fallback_model: "default",
             limited: {},
             next_kind: "claude",
+            next_model: "default",
         })
+        await svc.stop()
+    })
+
+    test("the review model: its flags at launch, stored on the run", async () => {
+        const { svc, herdr, reviews, settingsRepo } = await started({}, [
+            node(1),
+            node(2),
+            node(3),
+        ])
+        settingsRepo.values["reviews.agent_model"] = "opus-high"
+        const a = await svc.requestReview("mobile", 1)
+        await svc.idle()
+        expect(herdr.agentStart.mock.calls[0][0].args).toEqual([
+            ...MCP,
+            "--model",
+            "opus",
+            "--effort",
+            "high",
+            "--name",
+            "#1 Fix thing 1",
+        ])
+        expect(reviews.getRun(a.id).agent_model).toBe("opus-high")
+        expect(svc.settings()).toMatchObject({
+            agent_model: "opus-high",
+            next_model: "opus-high",
+        })
+        // codex, with a model of its own
+        settingsRepo.values["reviews.agent_kind"] = "codex"
+        settingsRepo.values["reviews.agent_model"] = "terra-xhigh"
+        const b = await svc.requestReview("mobile", 2)
+        await svc.idle()
+        expect(herdr.agentStart.mock.calls[1][0].args).toEqual([
+            ...MCP,
+            "-c",
+            "check_for_update_on_startup=false",
+            "--sandbox",
+            "workspace-write",
+            "-c",
+            "sandbox_workspace_write.network_access=true",
+            "-m",
+            "gpt-6.1-terra",
+            "-c",
+            'model_reasoning_effort="xhigh"',
+        ])
+        expect(reviews.getRun(b.id).agent_model).toBe("terra-xhigh")
+        // a model of another kind (the kind changed): the CLI's default
+        settingsRepo.values["reviews.agent_model"] = "sonnet-high"
+        const c = await svc.requestReview("mobile", 3)
+        await svc.idle()
+        expect(herdr.agentStart.mock.calls[2][0].args).not.toContain("-m")
+        expect(reviews.getRun(c.id).agent_model).toBe("default")
         await svc.stop()
     })
 
@@ -1180,6 +1308,9 @@ describe("usage limits", () => {
             manual: 1,
         })
         expect(env.herdr.agentStart.mock.calls.at(-1)[0].kind).toBe("codex")
+        // the fallback's model: none set, the CLI's default
+        expect(retry.agent_model).toBe("default")
+        expect(env.svc.settings().next_kind).toBe("codex")
         // new reviews go to codex while claude is limited
         expect(env.svc.settings().agent_kind).toBe("claude")
         // the codex review ends; the page hears when claude's limit lifts
@@ -1196,7 +1327,9 @@ describe("usage limits", () => {
     test("a fallback run at its limit goes back to the free main kind", async () => {
         const env = await started()
         env.settingsRepo.values["reviews.agent_kind"] = "codex"
+        env.settingsRepo.values["reviews.agent_model"] = "terra-high"
         env.settingsRepo.values["reviews.fallback_kind"] = "claude"
+        env.settingsRepo.values["reviews.fallback_model"] = "sonnet-xhigh"
         const run = env.reviews.createRun({
             repo: "mobile",
             number: 1,
@@ -1208,12 +1341,26 @@ describe("usage limits", () => {
         await env.svc.idle()
         const cur = env.reviews.getRun(run.id)
         expect(cur.agent_kind).toBe("claude")
+        // the fallback kind runs on the fallback's model
+        expect(cur.agent_model).toBe("sonnet-xhigh")
+        expect(env.herdr.agentStart.mock.calls.at(-1)[0].args).toEqual(
+            expect.arrayContaining(["--model", "sonnet", "--effort", "xhigh"])
+        )
         env.herdr.panes.set(cur.agent_name, "Claude AI usage limit reached")
         await env.svc.monitorTick()
         await env.svc.idle()
         expect(env.reviews.getRun(run.id).status).toBe("failed")
         const next = env.reviews.latestRun("mobile", 1)
-        expect(next).toMatchObject({ status: "running", agent_kind: "codex" })
+        // back on the main kind, with the main model
+        expect(next).toMatchObject({
+            status: "running",
+            agent_kind: "codex",
+            agent_model: "terra-high",
+        })
+        expect(env.svc.settings()).toMatchObject({
+            next_kind: "codex",
+            next_model: "terra-high",
+        })
         // the limit is kept for a restart
         expect(
             Object.keys(env.settingsRepo.values["reviews.limited_until"])
@@ -3354,8 +3501,11 @@ describe("lifecycle and scheduling", () => {
             parallel: 4,
             agent_kind: "claude",
             fallback_kind: "none",
+            agent_model: "default",
+            fallback_model: "default",
             limited: {},
             next_kind: "claude",
+            next_model: "default",
         })
         expect(svc.whoami()).toBe(ME)
         gh.open.mobile = []

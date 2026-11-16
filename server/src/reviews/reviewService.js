@@ -14,9 +14,11 @@
 import nodeFs from "node:fs"
 import path from "node:path"
 import {
+    DEFAULT_REVIEW_MODEL,
     REVIEW_VERDICTS,
     SETTLED_VERDICT,
     USAGE_LIMIT_ERROR,
+    reviewModel,
 } from "../contracts/reviews.js"
 import { sameAgent } from "../herdr/agentIdentity.js"
 import { freeAgentName } from "../herdr/agentNames.js"
@@ -40,7 +42,7 @@ import {
     ownReviewsBeforeQuery,
     prsByNumberQuery,
 } from "./prScan.js"
-import { quietLaunchArgs } from "../workers/mcpArgs.js"
+import { quietLaunchArgs, tomlString } from "../workers/mcpArgs.js"
 import {
     reviewAgentName,
     reviewFolderName,
@@ -60,6 +62,12 @@ export const REVIEW_SETTINGS = {
     parallel: { key: "reviews.parallel", fallback: 4 },
     agent_kind: { key: "reviews.agent_kind", fallback: "claude" },
     fallback_kind: { key: "reviews.fallback_kind", fallback: "none" },
+    // REVIEW_MODELS ids of the review agent's / fallback's kind
+    agent_model: { key: "reviews.agent_model", fallback: DEFAULT_REVIEW_MODEL },
+    fallback_model: {
+        key: "reviews.fallback_model",
+        fallback: DEFAULT_REVIEW_MODEL,
+    },
 }
 /** Settings key the limit deadlines are kept under (across restarts). */
 export const LIMITS_KEY = "reviews.limited_until"
@@ -87,6 +95,22 @@ export function reviewSandboxArgs(kind) {
               "sandbox_workspace_write.network_access=true",
           ]
         : []
+}
+/**
+ * Model and effort flags of a review agent: a REVIEW_MODELS id of its kind.
+ * None for "default" (the CLI's own configuration) or an id of another kind.
+ */
+export function reviewModelArgs(kind, id) {
+    const m = reviewModel(kind, id)
+    if (!m) return []
+    return kind === "codex"
+        ? [
+              "-m",
+              m.model,
+              "-c",
+              `model_reasoning_effort=${tomlString(m.effort)}`,
+          ]
+        : ["--model", m.model, "--effort", m.effort]
 }
 const UPDATED = "reviews.updated"
 /** A queued automatic run whose state was reviewed (or failed) before. */
@@ -201,19 +225,28 @@ export function createReviewService({
             parallel: Math.max(1, Number(setting("parallel")) || 4),
             agent_kind: setting("agent_kind"),
             fallback_kind: setting("fallback_kind"),
+            agent_model: setting("agent_model"),
+            fallback_model: setting("fallback_model"),
             limited,
         }
     }
 
     /** settings() plus the kind a new review starts with now (or null). */
     function settingsView() {
-        return { ...settings(), next_kind: kindForRun({}).kind || null }
+        const next = kindForRun({})
+        return {
+            ...settings(),
+            next_kind: next.kind || null,
+            next_model: next.kind ? next.model : null,
+        }
     }
 
     /**
      * The kind a run starts with: its own (a fallback retry) or the review
      * agent kind, else the fallback while that one is at its usage limit.
-     * { kind } or, every allowed kind limited, { kind: null, until }.
+     * { kind, model } (model: the REVIEW_MODELS id set for that kind, as
+     * review agent or fallback) or, every allowed kind limited,
+     * { kind: null, until }.
      */
     function kindForRun(run) {
         const s = settings()
@@ -228,7 +261,11 @@ export function createReviewService({
         const own = allowed.includes(run.agent_kind) ? run.agent_kind : null
         const options = [own, ...allowed].filter(Boolean)
         const kind = options.find(free)
-        if (kind) return { kind }
+        if (kind)
+            return {
+                kind,
+                model: kind === s.agent_kind ? s.agent_model : s.fallback_model,
+            }
         return {
             kind: null,
             until: Math.min(...options.map((k) => limitedUntil.get(k))),
@@ -868,7 +905,7 @@ export function createReviewService({
     }
 
     /** Take a slot for a queued run (on the chain); null: not startable. */
-    function claimRun(run, kind) {
+    function claimRun(run, kind, model = DEFAULT_REVIEW_MODEL) {
         const pr = reviews.getPr(run.repo, run.number)
         if (!pr || pr.state !== "OPEN") {
             finishRun(run, { status: "cancelled", error: "PR is not open" })
@@ -916,6 +953,10 @@ export function createReviewService({
             status: "running",
             started_at: now(),
             agent_kind: kind,
+            // a model of another kind (the settings changed): its default
+            agent_model: reviewModel(kind, model)
+                ? model
+                : DEFAULT_REVIEW_MODEL,
             folder: path.join(
                 dir,
                 reviewFolderName(run.repo, run.number, run.id)
@@ -978,6 +1019,7 @@ export function createReviewService({
                     ...mcpArgs(kind),
                     ...quietLaunchArgs(kind),
                     ...reviewSandboxArgs(kind),
+                    ...reviewModelArgs(kind, run.agent_model),
                     ...(kind === "claude" ? ["--name", title] : []),
                 ],
                 timeoutMs: startTimeoutMs,
@@ -1159,7 +1201,7 @@ export function createReviewService({
                     if (!((retryAfter.get(next.id) || 0) > nowMs())) reserved++
                     continue
                 }
-                const run = claimRun(next, pick.kind)
+                const run = claimRun(next, pick.kind, pick.model)
                 // null: claimRun dropped it (cancelled)
                 if (run) claimed.push(run)
                 else changed = true
@@ -1563,8 +1605,14 @@ export function createReviewService({
                     { status: 409 }
                 )
             // "unchanged": our earlier change request stands, so only a
-            // re-review can end that way
-            if (verdict === SETTLED_VERDICT && run.kind !== "re_review")
+            // re-review of one can end that way (after our approval, the
+            // new head needs a new review)
+            const reviewed = reviews.getPr(run.repo, run.number)
+            if (
+                verdict === SETTLED_VERDICT &&
+                (run.kind !== "re_review" ||
+                    (reviewed && reviewed.decision === "approved"))
+            )
                 throw new ValidationError(
                     "unchanged is only for a re-review of our change request",
                     { verdict, kind: run.kind }

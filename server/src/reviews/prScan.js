@@ -59,6 +59,9 @@ function prFields(author) {
         nodes { commit { oid committedDate statusCheckRollup { state } } }
     }
     comments(last: 100) { ${COMMENT_NODES} }
+    reviewRequests(first: 50) {
+        nodes { requestedReviewer { __typename ... on User { login } } }
+    }
     ${own}
 `
 }
@@ -236,6 +239,11 @@ export function normalizeNode(node) {
         first_own_at: node.firstOwn?.nodes?.[0]?.submittedAt || null,
         // our latest submitted review of any kind (a thread reply too)
         last_own_at: node.lastOwn?.nodes?.[0]?.submittedAt || null,
+        // users GitHub lists as requested reviewers (pending requests; a
+        // team request is not ours)
+        review_requests: (node.reviewRequests?.nodes || [])
+            .map((n) => n && n.requestedReviewer && n.requestedReviewer.login)
+            .filter(Boolean),
     }
 }
 
@@ -295,6 +303,17 @@ export function classifyPr(pr, { me, defaultBranch = null, prev = null }) {
             .reduce((a, b) => (after(b, a) ? b : a), null)
         const newComment = Boolean(lastComment && after(lastComment, ourLast))
         if (newCommit || newComment) needs = "re_review"
+    } else if (open && decision === "approved") {
+        // approved, then the head moved and GitHub still lists us as a
+        // requested reviewer (the author asks for our review again): the
+        // new commits need a look. Our next review at that head clears it.
+        const requested = (pr.review_requests || []).some(
+            (l) => lower(l) === lower(me)
+        )
+        const newCommit = Boolean(
+            pr.head_sha && last.commit && pr.head_sha !== last.commit
+        )
+        if (requested && newCommit) needs = "re_review"
     }
     const ineligible = ineligibleReason({
         ...pr,
@@ -317,8 +336,10 @@ export function classifyPr(pr, { me, defaultBranch = null, prev = null }) {
         needs_review: needs,
         eligible: !ineligible,
         ineligible_reason: ineligible,
+        // a re-review after our approval stands for the head only: an
+        // answer that is no change request's answer never asks for another
         trigger_key: needs
-            ? `${needs}:${pr.head_sha || ""}:${needs === "re_review" ? lastComment || "" : ""}`
+            ? `${needs}:${pr.head_sha || ""}:${needs === "re_review" && decision === "changes_requested" ? lastComment || "" : ""}`
             : null,
     }
 }

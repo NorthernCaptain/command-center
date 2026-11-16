@@ -11,7 +11,13 @@ import { EmptyState, SkeletonRows } from "../components/Skeleton.jsx"
 import { useApp } from "../components/AppContext.jsx"
 import { useToast } from "../components/Toasts.jsx"
 import { api, errorMessage } from "../lib/api.js"
-import { PROVIDERS, SETTINGS_DEFAULTS, WORKER_KINDS } from "../lib/constants.js"
+import {
+    DEFAULT_REVIEW_MODEL,
+    PROVIDERS,
+    REVIEW_MODELS,
+    SETTINGS_DEFAULTS,
+    WORKER_KINDS,
+} from "../lib/constants.js"
 import { useEvents } from "../lib/hooks.js"
 import { relativeTime } from "../lib/time.js"
 
@@ -28,6 +34,8 @@ export const SETTING_KEYS = [
     "reviews.parallel",
     "reviews.agent_kind",
     "reviews.fallback_kind",
+    "reviews.agent_model",
+    "reviews.fallback_model",
     "digest.enabled",
     "digest.time",
     "stale.days",
@@ -38,6 +46,28 @@ const DEFAULTS = SETTINGS_DEFAULTS
 
 const intIn = (v, min, max) =>
     typeof v === "number" && Number.isInteger(v) && v >= min && v <= max
+
+/** Model (with effort) of a review agent kind; "default" is the CLI's own. */
+function ReviewModel({ label, kind, value, onChange }) {
+    return (
+        <label className="field">
+            <span>{label}</span>
+            <select
+                className="input"
+                aria-label={label}
+                value={value}
+                onChange={(e) => onChange(e.target.value)}
+            >
+                <option value={DEFAULT_REVIEW_MODEL}>{kind} default</option>
+                {(REVIEW_MODELS[kind] || []).map((m) => (
+                    <option key={m.id} value={m.id}>
+                        {m.label}
+                    </option>
+                ))}
+            </select>
+        </label>
+    )
+}
 
 /** Client-side checks (same ranges as the server's SETTINGS_SCHEMAS). */
 export function settingErrors(form) {
@@ -236,6 +266,18 @@ function CenterSettings() {
         ) : null
     const differs = formDiffers(original, form)
     const set = (k, v) => setForm((f) => ({ ...f, [k]: v }))
+    // a review agent kind and its model: a model of another kind goes back
+    // to the default
+    const setKind = (kindKey, modelKey, v) =>
+        setForm((f) => ({
+            ...f,
+            [kindKey]: v,
+            [modelKey]: (REVIEW_MODELS[v] || []).some(
+                (m) => m.id === f[modelKey]
+            )
+                ? f[modelKey]
+                : DEFAULT_REVIEW_MODEL,
+        }))
     const setModel = (p, w, v) =>
         setForm((f) => ({
             ...f,
@@ -543,7 +585,11 @@ function CenterSettings() {
                                 aria-label="Review agent"
                                 value={form["reviews.agent_kind"]}
                                 onChange={(e) =>
-                                    set("reviews.agent_kind", e.target.value)
+                                    setKind(
+                                        "reviews.agent_kind",
+                                        "reviews.agent_model",
+                                        e.target.value
+                                    )
                                 }
                             >
                                 {WORKER_KINDS.map((k) => (
@@ -553,6 +599,12 @@ function CenterSettings() {
                                 ))}
                             </select>
                         </label>
+                        <ReviewModel
+                            label="Review model"
+                            kind={form["reviews.agent_kind"]}
+                            value={form["reviews.agent_model"]}
+                            onChange={(v) => set("reviews.agent_model", v)}
+                        />
                         <label className="field">
                             <span>Fallback at a usage limit</span>
                             <select
@@ -560,7 +612,11 @@ function CenterSettings() {
                                 aria-label="Fallback review agent"
                                 value={form["reviews.fallback_kind"]}
                                 onChange={(e) =>
-                                    set("reviews.fallback_kind", e.target.value)
+                                    setKind(
+                                        "reviews.fallback_kind",
+                                        "reviews.fallback_model",
+                                        e.target.value
+                                    )
                                 }
                             >
                                 <option value="none">none (wait)</option>
@@ -571,6 +627,16 @@ function CenterSettings() {
                                 ))}
                             </select>
                         </label>
+                        {form["reviews.fallback_kind"] !== "none" ? (
+                            <ReviewModel
+                                label="Fallback model"
+                                kind={form["reviews.fallback_kind"]}
+                                value={form["reviews.fallback_model"]}
+                                onChange={(v) =>
+                                    set("reviews.fallback_model", v)
+                                }
+                            />
+                        ) : null}
                     </div>
                 </>
             ) : null}

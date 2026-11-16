@@ -2044,6 +2044,24 @@ describe("owner: settings and devices", () => {
         expect(h.settingsRepo.get("reviews.fallback_kind")).toBe("codex")
     })
 
+    test("review models: preset ids or default; anything else is refused", async () => {
+        const res = await patch({
+            "reviews.agent_model": "opus-high",
+            "reviews.fallback_model": "terra-xhigh",
+        })
+        expect(res.status).toBe(200)
+        expect(h.settingsRepo.get("reviews.agent_model")).toBe("opus-high")
+        expect(h.settingsRepo.get("reviews.fallback_model")).toBe("terra-xhigh")
+        expect((await patch({ "reviews.agent_model": "default" })).status).toBe(
+            200
+        )
+        for (const bad of ["opus", "gpt-6.1-terra", "", null]) {
+            const r = await patch({ "reviews.fallback_model": bad })
+            expect(r.status).toBe(400)
+        }
+        expect(h.settingsRepo.get("reviews.fallback_model")).toBe("terra-xhigh")
+    })
+
     test("center.models merges per provider", async () => {
         h.settingsRepo.set("center.models", {
             codex: { light: "a", heavy: "b" },

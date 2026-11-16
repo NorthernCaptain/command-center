@@ -58,6 +58,7 @@ const RUN_PATCHABLE = new Set([
     "head_sha",
     "agent_name",
     "agent_kind",
+    "agent_model",
     "workspace_id",
     "pane_id",
     "folder",

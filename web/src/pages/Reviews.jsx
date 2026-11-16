@@ -17,6 +17,7 @@ import Donut from "../components/charts/Donut.jsx"
 import { api as defaultApi, errorMessage } from "../lib/api.js"
 import { useDebounced, useEvents } from "../lib/hooks.js"
 import { relativeTime } from "../lib/time.js"
+import { reviewAgentLabel } from "../lib/constants.js"
 
 /** Tabs in display order; "new" is the default. */
 export const REVIEW_TABS = [
@@ -308,7 +309,8 @@ export function limitedText(kind, until, next) {
 function RunInfo({ run }) {
     if (!run) return null
     const parts = []
-    if (run.agent_kind) parts.push(run.agent_kind)
+    if (run.agent_kind)
+        parts.push(reviewAgentLabel(run.agent_kind, run.agent_model))
     if (run.verdict) parts.push(run.verdict.replace("_", " "))
     if (Number.isFinite(run.issues))
         parts.push(`${run.issues} issue${run.issues === 1 ? "" : "s"}`)
@@ -595,10 +597,14 @@ function ReviewsPage({ api }) {
                     {settings ? (
                         <Link to="/settings" className="rv-settings muted">
                             every {settings.poll_minutes} min ·{" "}
-                            {settings.parallel} parallel · {settings.agent_kind}
+                            {settings.parallel} parallel ·{" "}
+                            {reviewAgentLabel(
+                                settings.agent_kind,
+                                settings.agent_model
+                            )}
                             {settings.fallback_kind &&
                             settings.fallback_kind !== "none"
-                                ? ` → ${settings.fallback_kind}`
+                                ? ` → ${reviewAgentLabel(settings.fallback_kind, settings.fallback_model)}`
                                 : ""}
                         </Link>
                     ) : null}
@@ -613,7 +619,11 @@ function ReviewsPage({ api }) {
                                       {limitedText(
                                           kind,
                                           until,
-                                          settings.next_kind
+                                          settings.next_kind &&
+                                              reviewAgentLabel(
+                                                  settings.next_kind,
+                                                  settings.next_model
+                                              )
                                       )}
                                   </span>
                               )

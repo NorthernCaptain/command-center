@@ -283,6 +283,10 @@ export const MIGRATIONS = [
     `
     ALTER TABLE review_runs ADD COLUMN retry_of INTEGER;
     `,
+    // 8: the model (REVIEW_MODELS id) a review agent ran on
+    `
+    ALTER TABLE review_runs ADD COLUMN agent_model TEXT;
+    `,
 ]
 
 /** Apply pending migrations. Returns the resulting schema version. */
