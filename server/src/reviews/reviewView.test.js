@@ -175,10 +175,16 @@ describe("tabs and search", () => {
         expect(inTab(t(), "queued", NOW)).toBe(false)
         const rejected = pr({
             decision: "changes_requested",
-            state: "MERGED",
             needs_review: null,
         })
         expect(inTab(rejected, "rejected", NOW)).toBe(true)
+        // closed or merged: out of Rejected, still in All
+        for (const state of ["CLOSED", "MERGED"]) {
+            const gone = { ...rejected, state }
+            expect(inTab(gone, "rejected", NOW)).toBe(false)
+            expect(inTab(gone, "all", NOW)).toBe(true)
+            expect(groupOf(gone, NOW)).toBe(state.toLowerCase())
+        }
         // answered (re-review) or in the queue: not Rejected
         const cr = { decision: "changes_requested", needs_review: null }
         expect(

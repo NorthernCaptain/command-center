@@ -207,8 +207,9 @@ From GitHub (source of truth), per PR:
     automatic reviews);
   - **Queued**: PRs with a review run in flight (queued, running, or
     reported and closing);
-  - **Rejected**: our change request stands unanswered (no new commit or
-    comment since; an answered one is a re-review: New or Queued);
+  - **Rejected**: open PRs where our change request stands unanswered
+    (no new commit or comment since; an answered one is a re-review: New
+    or Queued; a closed or merged PR leaves Rejected);
   - **Approved**: approved by us in the last 7 days;
   - **All**: every stored PR, in sections by status (in the queue,
     waiting for you, changes requested, approved, merged, closed, other).

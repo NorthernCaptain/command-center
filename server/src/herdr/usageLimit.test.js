@@ -16,11 +16,17 @@ test("banners of claude and codex, not prose", () => {
         "■ You've hit your usage limit. Upgrade to Pro or try again at 4:31 PM.",
         "5-hour limit reached ∙ resets 3pm",
         "Claude AI usage limit reached|1794700000",
+        "■ Usage limit reached. You've reached your usage limit. Increase your limits to continue using codex.",
+        "You've reached your usage limit.",
         "Credit balance is too low",
         'API Error: 429 {"type":"rate_limit_error"}',
     ])
         expect(USAGE_LIMIT_RE.test(line)).toBe(true)
     expect(USAGE_LIMIT_RE.test("The gateway's per-IP rate limits")).toBe(false)
+    expect(
+        USAGE_LIMIT_RE.test("We check whether the usage limit reached zero")
+    ).toBe(false)
+    expect(USAGE_LIMIT_RE.test("- limit reached: retry later")).toBe(false)
 })
 
 test("findLimitLine: only the bottom of the pane", () => {

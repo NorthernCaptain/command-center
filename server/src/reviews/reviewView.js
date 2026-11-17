@@ -106,7 +106,8 @@ const inQueue = (row) =>
  * Does the row belong to the tab? New: open PRs of tracked repos that need
  * Leo (a review needed, none in the queue: tracked-only repos, PRs an
  * automatic review can't take, failed automatic reviews). Queued: PRs with
- * a review run in flight. Rejected: our change request, not answered yet.
+ * a review run in flight. Rejected: our change request on an open PR, not
+ * answered yet (a closed or merged one leaves it: All keeps it).
  */
 export function inTab(row, tab, nowMs) {
     if (tab === "new")
@@ -118,10 +119,12 @@ export function inTab(row, tab, nowMs) {
             !inQueue(row)
         )
     if (tab === "queued") return inQueue(row)
-    // our change request still stands unanswered: no new commit or comment
-    // since (that is a re-review: New or Queued)
+    // our change request still stands unanswered on an open PR: no new
+    // commit or comment since (that is a re-review: New or Queued); once
+    // the PR is closed or merged it leaves Rejected (All keeps it)
     if (tab === "rejected")
         return (
+            row.state === "OPEN" &&
             row.decision === "changes_requested" &&
             !row.needs_review &&
             !inQueue(row)
@@ -164,7 +167,7 @@ export function groupOf(row, nowMs) {
     const open = row.state === "OPEN"
     if (inQueue(row)) return "queued"
     if (inTab(row, "new", nowMs)) return "new"
-    if (open && inTab(row, "rejected", nowMs)) return "rejected"
+    if (inTab(row, "rejected", nowMs)) return "rejected"
     if (open && row.decision === "approved") return "approved"
     if (row.state === "MERGED") return "merged"
     if (row.state === "CLOSED") return "closed"

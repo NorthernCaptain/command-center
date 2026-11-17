@@ -10,13 +10,14 @@
  * Claude Code's and Codex's limit banners, at the start of a line (after
  * box and bullet glyphs): "You've hit your usage limit · resets 5pm",
  * "■ You've hit your usage limit … try again at 4:31 PM", "5-hour limit
- * reached ∙ resets 3pm", "Claude AI usage limit reached|…", "Credit balance
- * is too low", "API Error: 429 … rate_limit_error". The agent's own prose
+ * reached ∙ resets 3pm", "Claude AI usage limit reached|…", Codex out of
+ * credits ("■ Usage limit reached. You've reached your usage limit."),
+ * "Credit balance is too low", "API Error: 429 … rate_limit_error". The agent's own prose
  * that mentions rate limits (e.g. a question about a gateway's per-IP rate
  * limits) is not a banner and must not match.
  */
 export const USAGE_LIMIT_RE =
-    /^[^\p{L}\p{N}]*(?:you['’]ve hit your (?:usage )?limit\b|you['’]re out of (?:extra )?usage\b|(?:claude(?: ai)?|5-hour|session|weekly|opus weekly|sonnet weekly)(?: usage)? limit reached\b|credit balance is too low\b|api error:.*\b(?:429|rate_limit_error)\b)/iu
+    /^[^\p{L}\p{N}]*(?:you['’]ve (?:hit|reached) your (?:usage )?limit\b|you['’]re out of (?:extra )?usage\b|(?:claude(?: ai)?|5-hour|session|weekly|opus weekly|sonnet weekly)(?: usage)? limit reached\b|usage limit reached\b|credit balance is too low\b|api error:.*\b(?:429|rate_limit_error)\b)/iu
 
 /** Banners are at the bottom of the pane: only these lines count. */
 export const USAGE_TAIL_LINES = 12
