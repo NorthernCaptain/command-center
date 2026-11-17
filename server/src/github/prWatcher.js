@@ -115,6 +115,15 @@ export const AUTO_MERGE_SETTING = "github.auto_merge"
 /** GitHub merge states with nothing blocking (checks green, no conflict). */
 const MERGEABLE_STATES = new Set(["CLEAN", "HAS_HOOKS"])
 const OPINIONS = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"])
+const CONFLICT_REASON = "PR merge conflict: prompt not delivered"
+
+/** Does GitHub see a merge conflict with the base branch? */
+export function hasConflict(pr) {
+    return Boolean(
+        pr &&
+        (pr.mergeable === "CONFLICTING" || pr.mergeStateStatus === "DIRTY")
+    )
+}
 
 /**
  * Is a PR ready to merge? GitHub's merge state has nothing blocking
@@ -439,6 +448,7 @@ export function createPrWatcher({
     log = nullLogger,
     org,
     feedbackPrompt = null,
+    conflictPrompt = null,
     enqueueCloseOut = defaultEnqueueCloseOut,
     pollMinutes = 15,
     startDelayMs = 5000,
@@ -447,6 +457,9 @@ export function createPrWatcher({
     const now = () => clock.now().toISOString()
     const queues = new Map()
     const mergeFailedHead = new Map() // PR url -> head sha of the last failed merge
+    // PR url -> head sha whose conflict prompt was handed to the outbox (a
+    // queued prompt is not reported as a duplicate by deliver)
+    const conflictHead = new Map()
     const inflight = new Map()
     const candidateMap = new Map() // taskId -> Map(repo -> [{repo,url,number,reason}])
     let pollAllRun = null
@@ -602,7 +615,7 @@ export function createPrWatcher({
     function prFeedbackKey(prUrl) {
         const k = escapeRe(prKey(prUrl))
         const re = new RegExp(
-            `^(?:round-${k}-\\d+|(?:manual|resume)-${k}-\\d+-\\d+|reverify-${k}-[a-z].*|reopen-${k}-[a-z].*-\\d+)$`
+            `^(?:round-${k}-\\d+|(?:manual|resume)-${k}-\\d+-\\d+|reverify-${k}-[a-z].*|reopen-${k}-[a-z].*-\\d+|conflict-${k}-[0-9a-f]*)$`
         )
         return (key) => re.test(key)
     }
@@ -1106,6 +1119,62 @@ export function createPrWatcher({
         return res
     }
 
+    /**
+     * Tell the task's agent to merge the base into each conflicting PR and
+     * push. Once per PR head commit (outbox dedupe): after the agent pushes
+     * the merge, only a new conflict on the new head asks again. Like
+     * feedback, it relaunches the agent when none is live.
+     */
+    async function deliverConflicts(taskId, list, summary) {
+        if (!list.length || !workerService || !conflictPrompt) return
+        const task = await getTask(taskId)
+        for (const { d, pr } of list) {
+            const head = lower(pr.headRefOid)
+            const base = pr.baseRefName || null
+            // this head's prompt is already queued or sent
+            if (conflictHead.get(d.pr) === head) continue
+            let res
+            try {
+                res = await workerService.deliver(
+                    taskId,
+                    conflictPrompt({
+                        task,
+                        pr: d.pr,
+                        branch: d.branch || task.branch,
+                        base,
+                    }),
+                    {
+                        reason: "pr_conflict",
+                        dedupeKey: `conflict-${prKey(d.pr)}-${head}`,
+                    }
+                )
+            } catch (err) {
+                log.warn({ err: err.message, taskId }, "conflict prompt")
+                summary.errors.push(`${d.pr}: conflict prompt: ${err.message}`)
+                continue
+            }
+            conflictHead.set(d.pr, head)
+            if (res && res.duplicate) continue
+            const status = (res && res.status) || "unknown"
+            summary.conflicts.push(d.pr)
+            await store.appendEvent(
+                taskId,
+                {
+                    type: "pr_conflict",
+                    data: { url: d.pr, head, base, delivery: status },
+                },
+                ACTOR
+            )
+            if (!DELIVERED.has(status) && status !== "blocked") {
+                await flagNow(taskId, CONFLICT_REASON)
+                await notify(
+                    `T-${taskId}: merge conflict prompt not delivered`,
+                    (res && res.error) || d.pr
+                )
+            }
+        }
+    }
+
     /** Deliver the oldest queued round unless an attempted one is open. */
     async function maybeDeliver(taskId, summary) {
         const items = await liveFeedback(taskId)
@@ -1497,6 +1566,9 @@ export function createPrWatcher({
                 merged = Boolean(pr.mergedAt) || pr.state === "MERGED"
             }
         }
+        // a conflict with the base: the agent merges the base in (once per
+        // head commit, after this poll's feedback handling)
+        if (!merged && !closed && hasConflict(pr)) out.conflicts.push({ d, pr })
 
         if (merged && !d.merged_at) {
             const at = pr.mergedAt ? new Date(pr.mergedAt).toISOString() : now()
@@ -1699,6 +1771,7 @@ export function createPrWatcher({
             closed: [],
             reopened_prs: [],
             delivered_round: null,
+            conflicts: [],
             close_out: false,
             errors: [],
         }
@@ -1714,6 +1787,7 @@ export function createPrWatcher({
             fresh: [],
             reopened: [],
             failedTwice: [],
+            conflicts: [],
             feedbackChanged: false,
         }
         try {
@@ -1783,6 +1857,7 @@ export function createPrWatcher({
 
             await settleStatus(taskId)
             await maybeDeliver(taskId, summary)
+            await deliverConflicts(taskId, out.conflicts, summary)
             await checkClose(taskId, summary)
             if (summary.errors.length)
                 await setError(taskId, summary.errors.join("; ").slice(0, 300))

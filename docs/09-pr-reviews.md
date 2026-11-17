@@ -66,14 +66,20 @@ From GitHub (source of truth), per PR:
     comment, review-thread reply or review by the PR's author after our
     latest word (the change request, a comment-only review, a thread reply
     or a conversation comment of ours: once we replied, it waits on the
-    author again; other reviewers' activity does not count):
-    **re-review**;
+    author again; other reviewers' activity does not count), or our
+    review asked for again after our latest word and still pending
+    (anyone's `ReviewRequestedEvent` for us, while `reviewRequests` still
+    lists us; the request time is part of the trigger key, so each new
+    request asks once): **re-review**;
   - decision `APPROVED`, a head commit other than the approved one, and
     GitHub still lists us as a requested reviewer (`reviewRequests`: the
     author asked for our review again, or the request was never cleared;
     a team request does not count): **re-review** of that head (its
     trigger key is the head only; the author's comments don't renew it).
     New commits nobody asked us to look at leave the approval as it is.
+- `rerequested_at`: on an open PR we reviewed, when our review was
+  asked for again after our latest word, while the request is pending
+  (null otherwise). The re-review must then end in a new GitHub review.
 - `eligible` for an automatic review: open and not a draft; a bot's PR
   and a stacked PR (based on another PR's branch) too. For a stacked PR the
   prompt says it is the explicit request by PR ID that AGENTS.md asks for
@@ -126,7 +132,9 @@ From GitHub (source of truth), per PR:
   `approved` | `changes_requested` (the GitHub review is submitted) |
   `unchanged` (a re-review where nothing since our change request changes
   it: only replies, no fix; it stands and no new review is submitted;
-  refused after our approval, where the new head needs a new review) |
+  refused after our approval, where the new head needs a new review,
+  and while our review is asked for again, where the author needs an
+  answer on GitHub) |
   `skipped` (no review could be done, e.g. not eligible after all or the
   evidence was insufficient; the summary says why). A finished run with
   `unchanged` settles the PR state it reviewed: the PR shows as changes

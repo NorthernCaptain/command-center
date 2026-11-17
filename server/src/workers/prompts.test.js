@@ -4,6 +4,7 @@
  */
 
 import {
+    conflictPrompt,
     cleanPrompt,
     cleanupStartPrompt,
     isForcedClean,
@@ -298,4 +299,23 @@ test("long feedback ids reach the worker intact in both prompts", () => {
         expect(text).toContain(`  ${id}  `)
         expect(text).not.toContain(`${id.slice(0, 79)}…`)
     }
+})
+
+test("conflictPrompt: merge the base in, resolve, push; never rebase or force-push", () => {
+    const task = { id: 26 }
+    const pr = "https://github.com/acme/mobile/pull/7"
+    const p = conflictPrompt({ task, pr, branch: "t26-fix", base: "develop" })
+    expect(p).toContain(
+        `T-26: PR ${pr} has merge conflicts with its base (develop).`
+    )
+    expect(p).toContain(
+        "on t26-fix: git fetch origin, then git merge origin/develop."
+    )
+    expect(p).toContain("never a rebase")
+    expect(p).toContain("Never force-push")
+    expect(p).toContain("git merge --abort")
+    // the base unknown: the agent looks it up
+    const q = conflictPrompt({ task, pr, branch: "t26-fix", base: null })
+    expect(q).toContain("has merge conflicts with its base.")
+    expect(q).toContain(`gh pr view ${pr} --json baseRefName`)
 })

@@ -54,6 +54,7 @@ import {
 } from "./herdr/index.js"
 import {
     createIdentity,
+    conflictPrompt,
     createWorkerService,
     feedbackPrompt,
     mountWorkers,
@@ -383,6 +384,7 @@ export function createSystem({ config, overrides = {} }) {
         clock,
         log,
         feedbackPrompt,
+        conflictPrompt,
         actionableBots: config.github.actionableBots || [],
         ...(overrides.reviewFs ? { fs: overrides.reviewFs } : {}),
     })

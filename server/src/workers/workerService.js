@@ -59,6 +59,7 @@ export const ACTIONS = [
     "focus",
     "send",
     "relaunch-codex",
+    "relaunch",
     "stop",
     "retry",
     "cancel",
@@ -2094,6 +2095,46 @@ export function createWorkerService({
                         actor,
                     })
                     return { session: r.session }
+                })
+                break
+            case "relaunch":
+                // Leo's Relaunch: the task's agent is gone (stopped, closed
+                // or crashed) in a state Start does not cover. Resumes its
+                // last session (or adopts it when it still runs), else a
+                // fresh one with the task's context. The task keeps its
+                // status; a kind other than the last one starts fresh.
+                result = await serial(id, async () => {
+                    const cur0 = (await store.getTask(id)).task
+                    if (CLOSED_STATUSES.includes(cur0.status))
+                        throw conflict(
+                            "task_closed",
+                            `T-${id} is ${cur0.status}; no agent is relaunched`
+                        )
+                    if (await sessions.current(id))
+                        throw conflict(
+                            "agent_running",
+                            `T-${id} already has a live agent`
+                        )
+                    const kind = await kindFor(cur0, b.kind)
+                    if (kind !== cur0.worker_kind)
+                        await store.updateTask(
+                            id,
+                            { worker_kind: kind },
+                            { actor, reason: `relaunch on ${kind}` }
+                        )
+                    const r = await doRevive(id, { kind, actor })
+                    return {
+                        session: r.session,
+                        resumed: Boolean(r.resumed),
+                        adopted: Boolean(r.adopted),
+                        delivery:
+                            !r.status || r.status === "ok"
+                                ? { status: "sent" }
+                                : {
+                                      status: "uncertain",
+                                      error: "the agent did not start working on its prompt",
+                                  },
+                    }
                 })
                 break
             case "stop":

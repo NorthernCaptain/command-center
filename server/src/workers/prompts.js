@@ -206,6 +206,34 @@ export function feedbackPrompt({ task, pr, round, items, branch }) {
 }
 
 /**
+ * The PR watcher found a merge conflict between the task's PR and its base
+ * branch: merge the base in, resolve, push (no rebase, no force-push).
+ */
+export function conflictPrompt({ task, pr, branch, base }) {
+    const id = task.id
+    const into = token(branch, 200)
+    const from = base ? token(base, 200) : null
+    const merge = from
+        ? `git merge origin/${from}`
+        : `git merge origin/<base> (the base: gh pr view ${token(pr)} --json baseRefName)`
+    return [
+        `T-${id}: PR ${token(pr)} has merge conflicts with its base${from ? ` (${from})` : ""}.`,
+        "Leo's standing instruction: bring the PR up to date. You are authorized to commit and push",
+        `to this PR's branch (${into}).`,
+        "1. If you are in the middle of other work, finish that step first; keep unrelated work in",
+        "   progress out of the merge.",
+        `2. In that repo's work folder, on ${into}: git fetch origin, then ${merge}.`,
+        "   A merge, never a rebase.",
+        "3. Resolve every conflict keeping the intent of both sides; if a conflict needs a product",
+        "   decision you can't make, abort the merge (git merge --abort) and ask me here instead.",
+        "4. Run the tests and request_review in the work folder until GOOD_TO_GO.",
+        "5. Commit the merge (repo conventions) and push to the PR branch. Never force-push, never",
+        "   push to the default branch.",
+        "6. Tell me here in one line what conflicted and how you resolved it.",
+    ].join("\n")
+}
+
+/**
  * "Clean folders" click, or the clean-up after done / cancelled. A cancelled
  * task's work is dropped: its folders go even with uncommitted or unpushed
  * changes.

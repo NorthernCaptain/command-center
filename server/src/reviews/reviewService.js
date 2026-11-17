@@ -1606,12 +1606,15 @@ export function createReviewService({
                 )
             // "unchanged": our earlier change request stands, so only a
             // re-review of one can end that way (after our approval, the
-            // new head needs a new review)
+            // new head needs a new review; when our review was asked for
+            // again, the author needs an answer on GitHub)
             const reviewed = reviews.getPr(run.repo, run.number)
             if (
                 verdict === SETTLED_VERDICT &&
                 (run.kind !== "re_review" ||
-                    (reviewed && reviewed.decision === "approved"))
+                    (reviewed &&
+                        (reviewed.decision === "approved" ||
+                            reviewed.rerequested_at)))
             )
                 throw new ValidationError(
                     "unchanged is only for a re-review of our change request",

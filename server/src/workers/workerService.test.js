@@ -2169,6 +2169,67 @@ describe("actions", () => {
         }
     )
 
+    test("relaunch: a stopped agent of a pr_open task comes back, the status stays", async () => {
+        const env = setup()
+        await started(env)
+        env.store.tasks.get(1).status = "pr_open"
+        // live: refused
+        await expect(env.svc.action(1, "relaunch")).rejects.toMatchObject({
+            code: "agent_running",
+        })
+        await env.svc.action(1, "stop")
+        env.herdr.agents.clear()
+        const starts = env.herdr.agentStart.mock.calls.length
+        const r = await env.svc.action(1, "relaunch")
+        expect(r).toMatchObject({ ok: true, delivery: { status: "sent" } })
+        expect(r.session).toMatchObject({ kind: "claude" })
+        expect(env.herdr.agentStart).toHaveBeenCalledTimes(starts + 1)
+        expect(env.store.task(1).status).toBe("pr_open")
+        expect(await env.sessions.current(1)).not.toBeNull()
+        // another kind: the task's kind follows, a fresh agent
+        await env.svc.action(1, "stop")
+        env.herdr.agents.clear()
+        const c = await env.svc.action(1, "relaunch", { kind: "codex" })
+        expect(c.session).toMatchObject({ kind: "codex" })
+        expect(c.resumed).toBe(false)
+        expect(env.store.task(1).worker_kind).toBe("codex")
+        await env.svc.stop()
+    })
+
+    test("relaunch: the agent did not start working on its prompt", async () => {
+        const env = setup()
+        await started(env)
+        env.store.tasks.get(1).status = "review"
+        await env.svc.action(1, "stop")
+        env.herdr.agents.clear()
+        env.herdr.agentPrompt.mockRejectedValueOnce(
+            herdrErr("agent_prompt_stalled")
+        )
+        const r = await env.svc.action(1, "relaunch")
+        expect(r.delivery).toEqual({
+            status: "uncertain",
+            error: "the agent did not start working on its prompt",
+        })
+        // back at work: out of review (as any revive)
+        expect(env.store.task(1).status).toBe("active")
+        await env.svc.stop()
+    })
+
+    test.each(["done", "cancelled"])(
+        "relaunch on a %s task is refused",
+        async (status) => {
+            const env = setup()
+            await started(env)
+            env.store.tasks.get(1).status = status
+            await env.svc.action(1, "stop")
+            const starts = env.herdr.agentStart.mock.calls.length
+            await expect(env.svc.action(1, "relaunch")).rejects.toMatchObject({
+                code: "task_closed",
+            })
+            expect(env.herdr.agentStart).toHaveBeenCalledTimes(starts)
+        }
+    )
+
     test("stop ends the record only", async () => {
         const env = setup()
         await started(env)

@@ -246,6 +246,7 @@ describe("normalizeNode", () => {
             reviews: [],
             comments: [],
             review_requests: [],
+            review_requested: [],
         })
     })
 })
@@ -627,6 +628,98 @@ describe("classifyPr", () => {
                 state: "CLOSED",
             }).needs_review
         ).toBeNull()
+    })
+
+    test("changes requested, then our review asked for again: re-review, keyed by the request", () => {
+        const cr = (at = "2026-11-12T10:00:00Z") => ({
+            reviews: {
+                nodes: [review("leok", "CHANGES_REQUESTED", at, "bbb2222")],
+            },
+        })
+        const asked = (pending, ...events) => ({
+            reviewRequests: {
+                nodes: pending.map((l) => ({ requestedReviewer: user(l) })),
+            },
+            reRequests: {
+                nodes: [
+                    ...events.map(([l, at]) => ({
+                        createdAt: at,
+                        requestedReviewer: user(l),
+                    })),
+                    // a team request, an empty node
+                    {
+                        createdAt: "2026-11-12T12:00:00Z",
+                        requestedReviewer: {},
+                    },
+                    null,
+                ],
+            },
+        })
+        // asked again after our change request, no new commit or comment
+        const c = classify({
+            ...cr(),
+            ...asked(
+                ["LeoK"],
+                ["leok", "2026-11-10T10:00:00Z"],
+                ["leok", "2026-11-12T11:00:00Z"],
+                ["dev2", "2026-11-12T11:30:00Z"]
+            ),
+        })
+        expect(c).toMatchObject({
+            needs_review: "re_review",
+            rerequested_at: "2026-11-12T11:00:00Z",
+            trigger_key: "re_review:bbb2222:2026-11-12T11:00:00Z",
+            last_activity_at: "2026-11-12T11:00:00Z",
+        })
+        // the request was removed: not pending, no answer due
+        const removed = classify({
+            ...cr(),
+            ...asked([], ["leok", "2026-11-12T11:00:00Z"]),
+        })
+        expect(removed).toMatchObject({
+            needs_review: null,
+            rerequested_at: null,
+        })
+        // ... also once that request was stored in the trigger key
+        const prev = {
+            decided_at: "2026-11-12T10:00:00Z",
+            trigger_key: "re_review:bbb2222:2026-11-12T11:00:00Z",
+        }
+        expect(
+            classify(
+                { ...cr(), ...asked([], ["leok", "2026-11-12T11:00:00Z"]) },
+                { prev }
+            ).needs_review
+        ).toBeNull()
+        // still pending: the stored request keeps its key
+        expect(
+            classify(
+                {
+                    ...cr(),
+                    ...asked(["leok"], ["leok", "2026-11-12T11:00:00Z"]),
+                },
+                { prev }
+            ).trigger_key
+        ).toBe("re_review:bbb2222:2026-11-12T11:00:00Z")
+        // asked before our latest review (that review answered it)
+        expect(
+            classify({
+                ...cr("2026-11-12T12:00:00Z"),
+                ...asked(["leok"], ["leok", "2026-11-12T11:00:00Z"]),
+            }).needs_review
+        ).toBeNull()
+        // a closed PR: no answer due
+        expect(
+            classify({
+                ...cr(),
+                ...asked(["leok"], ["leok", "2026-11-12T11:00:00Z"]),
+                state: "CLOSED",
+            }).rerequested_at
+        ).toBeNull()
+        // never reviewed: a first review, whoever asked
+        expect(
+            classify(asked(["leok"], ["leok", "2026-11-12T11:00:00Z"]))
+        ).toMatchObject({ needs_review: "new", rerequested_at: null })
     })
 
     test("changes requested, nothing new since: no review needed", () => {

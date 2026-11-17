@@ -48,6 +48,7 @@ const PR_COLUMNS = [
     "last_activity_at",
     "needs_review",
     "trigger_key",
+    "rerequested_at",
     "last_scanned_at",
 ]
 

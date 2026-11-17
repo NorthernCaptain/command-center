@@ -41,6 +41,8 @@ export const VIEW_FIELDS = [
     "commits",
     "isDraft",
     "mergeStateStatus",
+    "mergeable",
+    "baseRefName",
 ]
 
 /** Default exec: execFile without a shell; resolves to stdout. */
@@ -241,6 +243,8 @@ export function createGhClient({
             ...normalizePr(pr),
             isDraft: Boolean(pr.isDraft),
             mergeStateStatus: pr.mergeStateStatus || null,
+            mergeable: pr.mergeable || null,
+            baseRefName: pr.baseRefName || null,
             reviewDecision: pr.reviewDecision || null,
             statusCheckRollup: (pr.statusCheckRollup || []).map(normalizeCheck),
             reviews: revs,

@@ -54,6 +54,7 @@ const ACTION_DONE = {
     "close-agent": "Closed the agent's herdr workspace",
     focus: "Focused the agent in herdr",
     "relaunch-codex": "Relaunching on Codex…",
+    relaunch: "Relaunching the agent…",
     send: "Sent to the agent",
     stop: "Stopped tracking the agent",
     retry: "Sent the prompt again",

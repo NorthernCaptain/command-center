@@ -42,6 +42,7 @@ describe("workerActions", () => {
 
     it("offers the PR flow actions by status", () => {
         expect(on(sampleTask({ status: "ready_for_pr" }))).toEqual([
+            "relaunch",
             "createPr",
             "checkPrs",
         ])
@@ -51,8 +52,19 @@ describe("workerActions", () => {
             "checkPrs",
             "closeAgent",
         ])
-        expect(on(sampleTask({ status: "pr_open" }))).toEqual(["checkPrs"])
-        expect(on(sampleTask({ status: "review" }))).toEqual(["accept"])
+        expect(on(sampleTask({ status: "pr_open" }))).toEqual([
+            "relaunch",
+            "checkPrs",
+        ])
+        expect(on(sampleTask({ status: "pr_open" }), live)).toEqual([
+            "focus",
+            "checkPrs",
+            "closeAgent",
+        ])
+        expect(on(sampleTask({ status: "review" }))).toEqual([
+            "relaunch",
+            "accept",
+        ])
         // an open claimed PR outside the PR statuses: still checkable
         const pr = { disposition: "pr", pr: "https://github.com/o/r/pull/1" }
         expect(
@@ -106,7 +118,36 @@ describe("workerActions", () => {
             on(sampleTask({ status: "done", deliverables: [{ repo: "a" }] }))
         ).toEqual(["clean"])
         expect(on(sampleTask({ status: "done" }))).toEqual([])
-        expect(on(sampleTask({ status: "waiting", flags: null }))).toEqual([])
+        expect(on(sampleTask({ status: "waiting", flags: null }))).toEqual([
+            "relaunch",
+        ])
+    })
+
+    it("offers Relaunch in every open state Start does not cover, without a live agent", () => {
+        for (const status of [
+            "waiting",
+            "ready_for_pr",
+            "pr_open",
+            "pr_feedback",
+            "review",
+        ]) {
+            expect(
+                workerActions(sampleTask({ status }), null, ALL_FEATURES)
+                    .relaunch
+            ).toBe(true)
+            expect(
+                workerActions(sampleTask({ status }), live, ALL_FEATURES)
+                    .relaunch
+            ).toBe(false)
+        }
+        for (const status of ["inbox", "ready", "active", "done", "cancelled"])
+            expect(
+                workerActions(sampleTask({ status }), null, ALL_FEATURES)
+                    .relaunch
+            ).toBe(false)
+        expect(
+            workerActions(sampleTask({ status: "pr_open" }), null, {}).relaunch
+        ).toBe(false)
     })
 
     it("hides everything but Accept without the server features", () => {
@@ -114,11 +155,14 @@ describe("workerActions", () => {
         expect(on(sampleTask({ status: "pr_feedback" }), live, {})).toEqual([])
         expect(
             on(sampleTask({ status: "pr_open" }), null, { workers: true })
-        ).toEqual([])
+        ).toEqual(["relaunch"])
+        expect(on(sampleTask({ status: "pr_open" }), null, {})).toEqual([])
         expect(
             on(sampleTask({ status: "pr_feedback" }), live, { github: true })
         ).toEqual(["checkPrs"])
-        expect(on(sampleTask({ status: "review" }))).toEqual(["accept"])
+        expect(on(sampleTask({ status: "review" }), null, {})).toEqual([
+            "accept",
+        ])
         expect(workerActions(sampleTask({ status: "ready" })).start).toBe(false)
     })
 })
@@ -195,6 +239,18 @@ describe("TaskHeader worker actions", () => {
         )
         await waitFor(() =>
             expect(h.onAction).toHaveBeenCalledWith("relaunch-codex")
+        )
+    })
+
+    it("Relaunch brings a gone agent back with the picked kind", async () => {
+        const h = renderHeader(sampleTask({ status: "pr_open" }))
+        fireEvent.click(
+            await screen.findByRole("button", { name: /^Relaunch with / })
+        )
+        await waitFor(() =>
+            expect(h.onAction).toHaveBeenCalledWith("relaunch", {
+                kind: expect.any(String),
+            })
         )
     })
 

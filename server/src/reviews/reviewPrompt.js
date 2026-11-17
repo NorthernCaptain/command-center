@@ -66,7 +66,9 @@ export function reviewPrompt({ pr, run, org, folder, me, retry = null }) {
                 "Read that review and every comment and reply since, pay close attention to the comments, verify each earlier finding against the new head, then review all changes since." +
                 (pr.decision === "approved"
                     ? " New commits came after that approval and the author asks for our review again: submit a new review on the current head (approve it, or request changes); unchanged does not apply."
-                    : "")
+                    : pr.rerequested_at
+                      ? ` The author asked for our review again (${pr.rerequested_at}): answer with a new review on the current head (approve it, or request changes again saying what is still missing and why); unchanged does not apply.`
+                      : "")
         )
     }
     lines.push(

@@ -22,15 +22,23 @@ export function defaultKindOf(settings) {
  * Start button with a Claude/Codex select. The kind defaults to the task's
  * worker_kind, else the workers.default_kind setting, else its default.
  * A task without repos asks for one (it becomes the main repo):
- * onStart(kind, repo | null) -> Promise.
+ * onStart(kind, repo | null) -> Promise. `label`: the button's verb
+ * (Relaunch for an agent that is gone); `askRepo` false: never ask for a
+ * repo (a relaunch works in the task's existing folders).
  */
-export default function StartAgent({ task, onStart, api = defaultApi }) {
+export default function StartAgent({
+    task,
+    onStart,
+    label = "Start",
+    askRepo = true,
+    api = defaultApi,
+}) {
     const [picked, setPicked] = useState(null)
     const [fallback, setFallback] = useState(null)
     const [busy, setBusy] = useState(false)
     const [repo, setRepo] = useState("")
     const fromTask = task.worker_kind || null
-    const needsRepo = !(task.repos && task.repos.length)
+    const needsRepo = askRepo && !(task.repos && task.repos.length)
     const known = useKnownRepos(api, needsRepo)
 
     useEffect(() => {
@@ -63,7 +71,7 @@ export default function StartAgent({ task, onStart, api = defaultApi }) {
     }
 
     return (
-        <div className="start-agent" role="group" aria-label="Start agent">
+        <div className="start-agent" role="group" aria-label={`${label} agent`}>
             {needsRepo ? (
                 <select
                     className="select-pill"
@@ -98,12 +106,12 @@ export default function StartAgent({ task, onStart, api = defaultApi }) {
             <button
                 type="button"
                 className="btn btn-accent btn-sm"
-                aria-label={`Start with ${WORKER_KIND_LABELS[kind] || kind}`}
+                aria-label={`${label} with ${WORKER_KIND_LABELS[kind] || kind}`}
                 title={needsRepo && !repo ? "Pick a repo first" : undefined}
                 disabled={busy || (needsRepo && !repo)}
                 onClick={start}
             >
-                <span aria-hidden="true">▶</span> Start
+                <span aria-hidden="true">▶</span> {label}
             </button>
         </div>
     )

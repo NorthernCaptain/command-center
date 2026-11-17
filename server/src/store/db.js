@@ -287,6 +287,11 @@ export const MIGRATIONS = [
     `
     ALTER TABLE review_runs ADD COLUMN agent_model TEXT;
     `,
+    // 9: the author asked for our review again after our latest review
+    // (still pending): a re-review that must end in a new GitHub review
+    `
+    ALTER TABLE review_prs ADD COLUMN rerequested_at TEXT;
+    `,
 ]
 
 /** Apply pending migrations. Returns the resulting schema version. */

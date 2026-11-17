@@ -185,6 +185,7 @@ Create PR, PR feedback, Clean, Send to agent), plus:
 kickoffPrompt({ task, repos, branch, slug })
 createPrPrompt({ task })                    // includes "Command-Center-Task: T-<id>"
 feedbackPrompt({ task, pr, round, items, branch })
+conflictPrompt({ task, pr, branch, base })  // merge the base in, resolve, push
 cleanPrompt({ task })
 sendToAgentPrompt({ task, quote?, comment })
 resumePrompt({ task, folder, action })      // "Resuming T-123. cd back into <folder>, then: <action>"
@@ -205,7 +206,7 @@ createWorkerService({ store, herdr, events, sessions, outbox, identity,
   deliver(taskId, text, { reason, dedupeKey? }) -> { status: "sent"|"queued"|"blocked" }
   revive(taskId, { action? }) -> { session }
   action(taskId, name, body?) -> result     // create-pr | address-feedback | clean | focus
-                                            //  | send | relaunch-codex | stop
+                                            //  | send | relaunch-codex | relaunch | stop
   agentState(taskId) -> { state, kind, name, session_id, pane_id, outbox: n } | null
   states() -> { [taskId]: state }           // for the board overlay
 }
@@ -263,7 +264,16 @@ the live agent's workspace, only while herdr reports it `idle`/`done` (409
 `agent_busy` / `agent_not_found` otherwise), then the session ends (`gone`,
 event `agent_closed`); `focus` → `herdr.agentFocus`;
 `send` `{ text, quote? }` → `sendToAgentPrompt`; `stop` → end the session
-record only (never closes herdr panes Leo did not ask to close).
+record only (never closes herdr panes Leo did not ask to close);
+`relaunch` `{ kind? }` → bring a gone agent back in any open status
+(409 `task_closed` for done / cancelled, `agent_running` with a live
+session): `worker_kind` follows the picked kind, then `revive` (adopt the
+agent if it still runs, resume its last session of that kind, else a fresh
+agent with `freshContextPrompt`); the status stays (a `review` task goes
+back to work like any revive). The header offers it as **Relaunch** (kind
+picker) in every open status Start does not cover (`waiting`,
+`ready_for_pr`, `pr_open`, `pr_feedback`, `review`) while no agent is
+live, except when Relaunch on Codex is offered.
 
 Routes (`mountWorkers(api, helpers, { workerService })`):
 ```
@@ -463,7 +473,17 @@ attached; a PR that is already merged is recorded as merged at claim time
    round is recorded as delivered (`via: "pr_reopened"`) or failed. When every deliverable is
    `no_change` or merged (after a fresh discovery pass):
    `enqueueCloseOut(jobRunner, taskId)`.
-6. Record `pr_watch` (state, head_sha, ci_state, last_*_at). Errors per
+6. **Merge conflict**: an open PR that GitHub reports `mergeable:
+   CONFLICTING` (or `mergeStateStatus: DIRTY`) → `workerService.deliver(
+   conflictPrompt, { reason:"pr_conflict", dedupeKey:"conflict-<pr>-<head
+   sha>" })` after this poll's feedback delivery: merge the base branch
+   in (never a rebase or force-push), resolve, test, push to the PR
+   branch. Once per head commit; a new conflict after the merge is pushed
+   asks again. Event `pr_conflict` `{ url, head, base, delivery }`; a
+   delivery that failed flags Now "PR merge conflict: prompt not
+   delivered" and notifies. Like feedback, it relaunches a gone agent;
+   a merged or closed PR drops it from the outbox.
+7. Record `pr_watch` (state, head_sha, ci_state, last_*_at). Errors per
    task are logged and stored in `flags.error`, never stop the loop.
 
 Routes (`mountGithub(api, helpers, { prWatcher })`):

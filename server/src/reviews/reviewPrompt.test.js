@@ -114,6 +114,18 @@ test("re-review prompt names the earlier decision", () => {
     expect(again).toContain(
         "submit a new review on the current head (approve it, or request changes); unchanged does not apply."
     )
+    // our change request, then our review asked for again
+    const asked = reviewPrompt({
+        pr: { ...pr, rerequested_at: "2026-11-12T11:00:00Z" },
+        run: { id: 16, kind: "re_review" },
+        org: "acme",
+        folder: "/r/x",
+        me: "reviewer",
+    })
+    expect(asked).toContain(
+        "The author asked for our review again (2026-11-12T11:00:00Z): answer with a new review on the current head"
+    )
+    expect(asked).toContain("unchanged does not apply.")
 })
 
 test("a retry after a usage limit: don't post twice", () => {

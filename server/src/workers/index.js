@@ -18,6 +18,7 @@ export {
 export {
     cleanPrompt,
     createPrPrompt,
+    conflictPrompt,
     feedbackPrompt,
     freshContextPrompt,
     kickoffPrompt,

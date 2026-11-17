@@ -62,6 +62,11 @@ function prFields(author) {
     reviewRequests(first: 50) {
         nodes { requestedReviewer { __typename ... on User { login } } }
     }
+    reRequests: timelineItems(last: 20, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+        nodes { ... on ReviewRequestedEvent {
+            createdAt requestedReviewer { __typename ... on User { login } }
+        } }
+    }
     ${own}
 `
 }
@@ -244,6 +249,13 @@ export function normalizeNode(node) {
         review_requests: (node.reviewRequests?.nodes || [])
             .map((n) => n && n.requestedReviewer && n.requestedReviewer.login)
             .filter(Boolean),
+        // when users were asked for their review (the latest 20 requests)
+        review_requested: (node.reRequests?.nodes || [])
+            .filter((n) => n && n.createdAt && n.requestedReviewer?.login)
+            .map((n) => ({
+                login: n.requestedReviewer.login,
+                createdAt: n.createdAt,
+            })),
     }
 }
 
@@ -279,9 +291,43 @@ export function classifyPr(pr, { me, defaultBranch = null, prev = null }) {
         last &&
         prev.decided_at === last.submittedAt &&
         (/^re_review:[^:]*:(.+)$/.exec(prev.trigger_key || "") || [])[1]
-    const lastComment = [...others.map((c) => c.createdAt), seen]
-        .filter(Boolean)
-        .reduce((a, b) => (after(b, a) ? b : a), null)
+    const latest = (list) =>
+        list.filter(Boolean).reduce((a, b) => (after(b, a) ? b : a), null)
+    // our latest word (the decision, a comment-only review or thread reply,
+    // a conversation comment): once we replied, the ball is with the author
+    const ourLast = last
+        ? latest([
+              last.submittedAt,
+              pr.last_own_at,
+              ...pr.comments
+                  .filter((c) => c.login && lower(c.login) === lower(me))
+                  .map((c) => c.createdAt),
+          ])
+        : null
+    // our review asked for again after our latest word, still pending (our
+    // next review clears it; a removed request does not count): the author
+    // wants an answer, a review on GitHub
+    const requested = (pr.review_requests || []).some(
+        (l) => lower(l) === lower(me)
+    )
+    const ourRequests = (pr.review_requested || [])
+        .filter((r) => lower(r.login) === lower(me))
+        .map((r) => r.createdAt)
+    const requestedAt = requested ? latest(ourRequests) : null
+    const rerequested =
+        last && requestedAt && after(requestedAt, ourLast) ? requestedAt : null
+    // a stored time that was a request of our review (not an author's
+    // answer) counts only while that request is pending
+    const seenAnswer =
+        seen && !(ourRequests.includes(seen) && seen !== rerequested)
+            ? seen
+            : null
+    const lastComment = latest([
+        ...others.map((c) => c.createdAt),
+        seenAnswer,
+        // asking for our review again is an answer too (whoever asks)
+        decision === "changes_requested" ? rerequested : null,
+    ])
     const open = pr.state === "OPEN"
     let needs = null
     if (open && !decision) needs = "new"
@@ -289,27 +335,14 @@ export function classifyPr(pr, { me, defaultBranch = null, prev = null }) {
         const newCommit = Boolean(
             pr.head_sha && last.commit && pr.head_sha !== last.commit
         )
-        // the author answered after our latest word (the change request, a
-        // comment-only review or thread reply, a conversation comment): once
-        // we replied, the ball is with the author again
-        const ourLast = [
-            last.submittedAt,
-            pr.last_own_at,
-            ...pr.comments
-                .filter((c) => c.login && lower(c.login) === lower(me))
-                .map((c) => c.createdAt),
-        ]
-            .filter(Boolean)
-            .reduce((a, b) => (after(b, a) ? b : a), null)
+        // the author answered after our latest word (a comment, a reply, a
+        // new request of our review)
         const newComment = Boolean(lastComment && after(lastComment, ourLast))
         if (newCommit || newComment) needs = "re_review"
     } else if (open && decision === "approved") {
         // approved, then the head moved and GitHub still lists us as a
         // requested reviewer (the author asks for our review again): the
         // new commits need a look. Our next review at that head clears it.
-        const requested = (pr.review_requests || []).some(
-            (l) => lower(l) === lower(me)
-        )
         const newCommit = Boolean(
             pr.head_sha && last.commit && pr.head_sha !== last.commit
         )
@@ -334,6 +367,7 @@ export function classifyPr(pr, { me, defaultBranch = null, prev = null }) {
             .filter(Boolean)
             .reduce((a, b) => (after(b, a) ? b : a), null),
         needs_review: needs,
+        rerequested_at: open ? rerequested : null,
         eligible: !ineligible,
         ineligible_reason: ineligible,
         // a re-review after our approval stands for the head only: an

@@ -718,6 +718,67 @@ describe("auto-review queue", () => {
         await svc.stop()
     })
 
+    test("changes requested, then our review asked for again: a re-review that must answer", async () => {
+        const { svc, reviews, gh } = setup()
+        reviews.setRepo("mobile", { auto_review: true })
+        gh.open.mobile = [
+            node(1, {
+                reviews: {
+                    nodes: [
+                        mine(
+                            "r1",
+                            "CHANGES_REQUESTED",
+                            "2026-11-04T10:00:00Z",
+                            "sha1"
+                        ),
+                    ],
+                },
+                reviewRequests: {
+                    nodes: [
+                        {
+                            requestedReviewer: {
+                                __typename: "User",
+                                login: ME,
+                            },
+                        },
+                    ],
+                },
+                reRequests: {
+                    nodes: [
+                        {
+                            createdAt: "2026-11-04T11:00:00Z",
+                            requestedReviewer: {
+                                __typename: "User",
+                                login: ME,
+                            },
+                        },
+                    ],
+                },
+            }),
+        ]
+        await svc.scanRepo("mobile")
+        expect(reviews.getPr("mobile", 1)).toMatchObject({
+            decision: "changes_requested",
+            needs_review: "re_review",
+            rerequested_at: "2026-11-04T11:00:00Z",
+            trigger_key: "re_review:sha1:2026-11-04T11:00:00Z",
+        })
+        svc.start()
+        await svc.idle()
+        const run = reviews.latestRun("mobile", 1)
+        expect(run).toMatchObject({ kind: "re_review", status: "running" })
+        // asked again: the author gets a review on GitHub, not silence
+        await expect(
+            svc.report({ review_id: run.id, verdict: "unchanged" }, {})
+        ).rejects.toThrow("unchanged is only for a re-review")
+        await svc.report(
+            { review_id: run.id, verdict: "changes_requested", issues: 1 },
+            {}
+        )
+        expect(reviews.getRun(run.id).verdict).toBe("changes_requested")
+        await svc.stop()
+    })
+
     test("unchanged is refused for a first review; it never hides an unreviewed PR", async () => {
         const { svc, reviews, run } = await launched()
         expect(run.kind).toBe("new")

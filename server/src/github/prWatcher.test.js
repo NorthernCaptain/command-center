@@ -22,6 +22,7 @@ import {
     classify,
     createPrWatcher,
     extractItems,
+    hasConflict,
     isBot,
     isWatched,
     isTrivialBody,
@@ -2487,6 +2488,138 @@ describe("auto-merge", () => {
                 : ready({ headRefOid: "fff0001aaaa" })
         await watcher.pollTask(1)
         expect(await eventsOf("pr_auto_merged")).toHaveLength(1)
+    })
+})
+
+describe("merge conflicts", () => {
+    const conflicting = (over = {}) =>
+        fullPr({
+            mergeable: "CONFLICTING",
+            mergeStateStatus: "DIRTY",
+            baseRefName: "main",
+            ...over,
+        })
+    const conflictPrompt = jest.fn(
+        ({ pr, branch, base }) => `conflict ${pr} ${branch} ${base}`
+    )
+
+    test("hasConflict: CONFLICTING or DIRTY", () => {
+        expect(hasConflict({ mergeable: "CONFLICTING" })).toBe(true)
+        expect(hasConflict({ mergeStateStatus: "DIRTY" })).toBe(true)
+        expect(
+            hasConflict({ mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" })
+        ).toBe(false)
+        expect(hasConflict({ mergeable: "UNKNOWN" })).toBe(false)
+        expect(hasConflict(null)).toBe(false)
+    })
+
+    test("a conflicting PR: the agent is told to merge the base in, once per head", async () => {
+        const { gh, watcher, workerService } = await claimedSetup({
+            opts: { conflictPrompt },
+        })
+        const delivered = new Set()
+        workerService.deliver = jest.fn(async (id, text, { dedupeKey }) => {
+            if (delivered.has(dedupeKey))
+                return { status: "sent", duplicate: true }
+            delivered.add(dedupeKey)
+            return { status: "sent" }
+        })
+        gh.prs[`${REPO}#812`] = conflicting()
+        const s = await watcher.pollTask(1)
+        expect(s.conflicts).toEqual([PR_URL])
+        expect(workerService.deliver).toHaveBeenCalledWith(
+            1,
+            `conflict ${PR_URL} t1-fix main`,
+            {
+                reason: "pr_conflict",
+                dedupeKey: `conflict-${REPO}-812-${HEAD}`,
+            }
+        )
+        expect(await eventsOf("pr_conflict")).toEqual([
+            expect.objectContaining({
+                data: {
+                    url: PR_URL,
+                    head: HEAD,
+                    base: "main",
+                    delivery: "sent",
+                },
+            }),
+        ])
+        // the same head again: nothing new
+        expect((await watcher.pollTask(1)).conflicts).toEqual([])
+        expect(await eventsOf("pr_conflict")).toHaveLength(1)
+        // merged in and pushed, then a new conflict on the new head
+        gh.prs[`${REPO}#812`] = conflicting({ headRefOid: "abc1234" })
+        expect((await watcher.pollTask(1)).conflicts).toEqual([PR_URL])
+        expect(await eventsOf("pr_conflict")).toHaveLength(2)
+        // no conflict: no prompt
+        gh.prs[`${REPO}#812`] = fullPr({ mergeable: "MERGEABLE" })
+        expect((await watcher.pollTask(1)).conflicts).toEqual([])
+        expect(workerService.deliver).toHaveBeenCalledTimes(2) // the same head is never handed over twice
+    })
+
+    test("a prompt waiting in the queue is announced once", async () => {
+        const { gh, watcher, workerService } = await claimedSetup({
+            opts: { conflictPrompt },
+        })
+        // the agent is busy: deliver keeps answering queued (no duplicate)
+        workerService.deliver = jest.fn(async () => ({ status: "queued" }))
+        gh.prs[`${REPO}#812`] = conflicting()
+        expect((await watcher.pollTask(1)).conflicts).toEqual([PR_URL])
+        expect((await watcher.pollTask(1)).conflicts).toEqual([])
+        expect(workerService.deliver).toHaveBeenCalledTimes(1)
+        expect(await eventsOf("pr_conflict")).toHaveLength(1)
+        expect((await getTask()).flags.now_reason).not.toBe(
+            "PR merge conflict: prompt not delivered"
+        )
+    })
+
+    test("not delivered: flagged for Leo; a throw is a poll error", async () => {
+        const { gh, watcher, workerService, notifier } = await claimedSetup({
+            opts: { conflictPrompt },
+        })
+        gh.prs[`${REPO}#812`] = conflicting()
+        workerService.deliver = jest.fn(async () => ({
+            status: "failed",
+            error: "herdr down",
+        }))
+        await watcher.pollTask(1)
+        expect((await getTask()).flags).toMatchObject({
+            now: true,
+            now_reason: "PR merge conflict: prompt not delivered",
+        })
+        expect(notifier.notify).toHaveBeenCalledWith(
+            expect.objectContaining({
+                title: "T-1: merge conflict prompt not delivered",
+            })
+        )
+        workerService.deliver = jest.fn(async () => {
+            throw new Error("bad text")
+        })
+        // a new head: tried again; a throw is retried on the next poll
+        gh.prs[`${REPO}#812`] = conflicting({ headRefOid: "abc1234" })
+        const s = await watcher.pollTask(1)
+        expect(s.errors).toEqual([`${PR_URL}: conflict prompt: bad text`])
+        await watcher.pollTask(1)
+        expect(workerService.deliver).toHaveBeenCalledTimes(2)
+    })
+
+    test("closed or merged PRs and an unwired prompt send nothing", async () => {
+        const { gh, watcher, workerService } = await claimedSetup()
+        gh.prs[`${REPO}#812`] = conflicting()
+        // no conflictPrompt wired
+        expect((await watcher.pollTask(1)).conflicts).toEqual([])
+        const ctx = await claimedSetup({ opts: { conflictPrompt } })
+        ctx.gh.prs[`${REPO}#812`] = conflicting({
+            state: "CLOSED",
+            closedAt: "2026-11-07T12:00:00Z",
+        })
+        expect((await ctx.watcher.pollTask(1)).conflicts).toEqual([])
+        expect(workerService.deliver).not.toHaveBeenCalledWith(
+            1,
+            expect.stringContaining("conflict"),
+            expect.anything()
+        )
     })
 })
 

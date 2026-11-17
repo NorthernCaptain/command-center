@@ -48,19 +48,30 @@ export function workerActions(task, agent, features = {}) {
     const hasFolders = Boolean(
         task.slug || (task.deliverables && task.deliverables.length)
     )
+    const relaunchCodex =
+        workers &&
+        !["done", "cancelled"].includes(task.status) &&
+        error.startsWith("Claude unavailable")
     return {
         start:
             workers &&
             START_STATUSES.includes(task.status) &&
             !(task.status === "active" && live),
+        // the agent is gone (stopped, closed, crashed) in a state Start
+        // does not cover: bring it back (resume its session); with Start,
+        // every open state can get an agent again (Relaunch on Codex
+        // stands in for it when Claude is unavailable)
+        relaunch:
+            workers &&
+            isOpenTask(task) &&
+            !START_STATUSES.includes(task.status) &&
+            !live &&
+            !relaunchCodex,
         createPr: workers && canCreatePr(task),
         addressFeedback: workers && task.status === "pr_feedback",
         accept: task.status === "review",
         focus: workers && live,
-        relaunchCodex:
-            workers &&
-            !["done", "cancelled"].includes(task.status) &&
-            error.startsWith("Claude unavailable"),
+        relaunchCodex,
         // also any open task whose claimed PR is still open (the watcher
         // follows it there too, e.g. back in active for review fixes)
         checkPrs:
@@ -315,6 +326,15 @@ export default function TaskHeader({
                         <StartAgent
                             task={task}
                             onStart={onStart}
+                            {...(api ? { api } : {})}
+                        />
+                    ) : null}
+                    {can.relaunch ? (
+                        <StartAgent
+                            task={task}
+                            label="Relaunch"
+                            askRepo={false}
+                            onStart={(kind) => onAction("relaunch", { kind })}
                             {...(api ? { api } : {})}
                         />
                     ) : null}
