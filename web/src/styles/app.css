@@ -3214,6 +3214,14 @@ textarea.chatbar-input {
     z-index: 1;
 }
 
+/* Each row's actions are their own z-index: 1 layer, and later rows paint
+   over earlier ones at the same level: lift the actions whose menu (Snooze)
+   is open above the other rows' buttons and links, but still below the
+   sticky .home-top (20) and .topbar (30). */
+.row-actions:has(.menu) {
+    z-index: 2;
+}
+
 .pill-link {
     text-decoration: none;
     color: var(--blue);
