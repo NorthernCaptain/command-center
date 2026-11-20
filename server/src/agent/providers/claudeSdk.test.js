@@ -209,7 +209,7 @@ describe("claudeSdk provider", () => {
                 behavior: "deny",
             })
         }
-        expect(options.maxTurns).toBe(10)
+        expect(options.maxTurns).toBe(24)
         expect(options.includePartialMessages).toBe(false)
         expect(options.env).toEqual({ A: "1" })
     })
@@ -413,6 +413,42 @@ describe("claudeSdk provider", () => {
         await new Promise((r) => setImmediate(r))
         await clock.advance(1000)
         await expect(run).rejects.toThrow(/timed out after 1000 ms/)
+    })
+
+    test("toolTimeoutMs applies only to a run with MCP servers", async () => {
+        const clock = createFakeClock()
+        const p = createClaudeSdkProvider({
+            query: fakeQuery([], { hang: true }),
+            clock,
+        })
+        const plain = p.run({
+            prompt: "p",
+            schema,
+            model: "m",
+            timeoutMs: 1000,
+            toolTimeoutMs: 5000,
+        })
+        await new Promise((r) => setImmediate(r))
+        await clock.advance(1000)
+        await expect(plain).rejects.toThrow(/timed out after 1000 ms/)
+
+        const withTools = p.run({
+            prompt: "p",
+            schema,
+            model: "m",
+            mcpServers: { "tracebot-mcp": { type: "http", url: "u" } },
+            allowedTools: ["mcp__tracebot-mcp__wiki_read"],
+            timeoutMs: 1000,
+            toolTimeoutMs: 5000,
+        })
+        await new Promise((r) => setImmediate(r))
+        await clock.advance(1000)
+        let settled = false
+        withTools.catch(() => {}).finally(() => (settled = true))
+        await new Promise((r) => setImmediate(r))
+        expect(settled).toBe(false)
+        await clock.advance(4000)
+        await expect(withTools).rejects.toThrow(/timed out after 5000 ms/)
     })
 
     test("external abort -> cancelled", async () => {

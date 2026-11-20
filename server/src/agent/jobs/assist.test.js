@@ -6,6 +6,7 @@
 import { createFakeStore, makeCtx, makeTask } from "../testing/fakes.js"
 import { jest } from "@jest/globals"
 import job, {
+    TOOL_TIMEOUT_MS,
     asksAgent,
     chatHistory,
     findThread,
@@ -109,8 +110,36 @@ describe("assist", () => {
             "mcp__tracebot-mcp__wiki_read",
         ])
         expect(built.allowedTools).not.toContain("mcp__tracebot-mcp")
+        expect(built.toolTimeoutMs).toBe(TOOL_TIMEOUT_MS)
         const chat = { ...ctx, input: { message: "hi", intent: "weird" } }
         expect(job.buildPrompt(chat, context).prompt).toMatch(/Intent: chat/)
+    })
+
+    test("chat and change get the same read-only tools (Brain for Slack)", async () => {
+        const mcp = { "tracebot-mcp": { type: "http", url: "u" } }
+        for (const intent of ["chat", "change"]) {
+            const { ctx } = await setup(
+                { intent, comment_id: undefined },
+                { mcpServers: mcp }
+            )
+            const { context } = await job.prepare(ctx)
+            context.task = {
+                ...context.task,
+                source: { type: "slack", url: "https://acme.slack.com/p1" },
+            }
+            const built = job.buildPrompt(ctx, context)
+            expect(built.mcpServers).toBe(mcp)
+            expect(built.allowedTools).toEqual([
+                "mcp__tracebot-mcp__brain_do",
+                "mcp__tracebot-mcp__brain_job_result",
+                "mcp__tracebot-mcp__wiki_search",
+                "mcp__tracebot-mcp__wiki_read",
+            ])
+            expect(built.toolTimeoutMs).toBe(TOOL_TIMEOUT_MS)
+            expect(built.prompt).toMatch(
+                /\nTask source: https:\/\/acme\.slack\.com\/p1\n/
+            )
+        }
     })
 
     test("change: edits applied, reply posted on the root, thread resolved", async () => {

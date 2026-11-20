@@ -248,6 +248,26 @@ describe("job runner", () => {
         expect(fromRow(row).output).toEqual({ v: "hello" })
         expect(s.runner.list({}).map((j) => j.id)).toEqual(["j1"])
         expect(s.runner.get("missing")).toBeNull()
+        await s.runner.stop()
+    })
+
+    test("a job's toolTimeoutMs goes to the provider next to the default", async () => {
+        const slow = mod({
+            buildPrompt: () => ({
+                system: "S",
+                prompt: "P",
+                toolTimeoutMs: 600000,
+            }),
+        })
+        const s = setup({ modules: [slow], handler: () => ({ v: "x" }) })
+        s.runner.start()
+        s.runner.enqueue("t", { q: 1 })
+        await s.runner.idle()
+        expect(s.primary.calls[0]).toMatchObject({
+            timeoutMs: 1234,
+            toolTimeoutMs: 600000,
+        })
+        await s.runner.stop()
     })
 
     test("unknown type and missing task_id fail immediately", () => {

@@ -31,10 +31,10 @@ export const READ_ONLY_PREFIX =
 export const GUARDED_TOOLS = ["brain_do"]
 
 /**
- * tracebot-mcp tools an assist "ask" may use: brain_do (guarded, see above;
- * dropped on claude-cli) plus the read-only result/wiki tools.
+ * tracebot-mcp tools an assist job (any intent) may use: brain_do (guarded,
+ * see above; dropped on claude-cli) plus the read-only result/wiki tools.
  */
-export const ASSIST_ASK_TOOLS = [
+export const ASSIST_TOOLS = [
     "brain_do",
     "brain_job_result",
     "wiki_search",
@@ -127,6 +127,17 @@ export const KNOWN_TRACEBOT_TOOLS = [
     "worker_status",
     "worker_stop",
 ]
+
+/**
+ * The run's timeout: toolTimeoutMs (a job's longer limit for tool calls,
+ * e.g. a Brain round trip) when the run really has MCP servers, else
+ * timeoutMs. Providers without MCP (codex) never get the longer limit. It
+ * never shortens the base limit, and no base limit (0) stays none.
+ */
+export function runTimeoutMs({ timeoutMs, toolTimeoutMs, hasMcp }) {
+    if (!(timeoutMs > 0) || !hasMcp || !(toolTimeoutMs > 0)) return timeoutMs
+    return Math.max(timeoutMs, toolTimeoutMs)
+}
 
 export function mcpToolName(server, tool) {
     return `mcp__${server}__${tool}`

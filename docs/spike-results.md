@@ -16,8 +16,9 @@
   schema-validated object (`edits`, `actions`, `reply`, …) and service code
   validates it and applies it through the store. This is faster (no tool
   round-trips), behaves the same on Claude and Codex, and gives least
-  privilege by construction. Only `assist` with intent "ask" gets an MCP
-  server (`tracebot-mcp`, for Brain) on the Claude providers.
+  privilege by construction. Only `assist` (any intent: ask, change,
+  chat) gets an MCP server (`tracebot-mcp`, for Brain) on the Claude
+  providers, limited to read-only tools.
 - **Jest:** two configs. `jest.config.js` covers server and CLI (native ESM,
   `--experimental-vm-modules`) and `jest.web.config.js` covers web (babel +
   jsdom). `npm test` runs both.

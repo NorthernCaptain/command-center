@@ -433,9 +433,9 @@ function CenterSettings() {
                                     }
                                 />
                                 <span>
-                                    Merge our task PRs automatically once
-                                    approved and all required checks pass (merge
-                                    commit)
+                                    Merge our task PRs automatically once GitHub
+                                    allows the merge and their feedback is
+                                    settled (merge commit)
                                 </span>
                             </label>
                         ) : null}

@@ -262,6 +262,48 @@ describe("claudeCli provider", () => {
         ).rejects.toMatchObject({ code: "provider_failed" })
     })
 
+    test("toolTimeoutMs applies only to a run with MCP servers", async () => {
+        const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), "cc-cli-to-"))
+        try {
+            const clock = createFakeClock()
+            let spawned = 0
+            const inner = fakeSpawn(() => {})
+            const spawn = (...a) => {
+                spawned++
+                return inner(...a)
+            }
+            const p = createClaudeCliProvider({ spawn, clock, tmpDir })
+            const base = { system: "s", prompt: "p", schema, model: "m" }
+            const plain = p.run({
+                ...base,
+                timeoutMs: 500,
+                toolTimeoutMs: 5000,
+            })
+            await flush()
+            await clock.advance(500)
+            await expect(plain).rejects.toThrow(/timed out after 500 ms/)
+
+            const withTools = p.run({
+                ...base,
+                mcpServers: { "tracebot-mcp": { type: "http", url: "u" } },
+                allowedTools: ["mcp__tracebot-mcp__wiki_read"],
+                timeoutMs: 500,
+                toolTimeoutMs: 5000,
+            })
+            for (let i = 0; i < 200 && spawned < 2; i++)
+                await new Promise((r) => setTimeout(r, 5))
+            await clock.advance(500)
+            let settled = false
+            withTools.catch(() => {}).finally(() => (settled = true))
+            await flush()
+            expect(settled).toBe(false)
+            await clock.advance(4500)
+            await expect(withTools).rejects.toThrow(/timed out after 5000 ms/)
+        } finally {
+            await fsp.rm(tmpDir, { recursive: true, force: true })
+        }
+    })
+
     test("timeout kills the process", async () => {
         const clock = createFakeClock()
         const spawn = fakeSpawn(() => {})

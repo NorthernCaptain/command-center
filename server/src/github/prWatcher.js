@@ -129,24 +129,15 @@ const FEEDBACK_REASON = "PR feedback"
 const WATCHER_ERROR = "PR watcher:"
 const ACTOR = "system"
 
-/** Runtime setting (default on): merge approved, mergeable task PRs. */
+/** Runtime setting (default on): merge task PRs GitHub lets us merge. */
 export const AUTO_MERGE_SETTING = "github.auto_merge"
-/** GitHub merge states with nothing blocking (checks green, no conflict). */
-const MERGEABLE_STATES = new Set(["CLEAN", "HAS_HOOKS"])
 /**
- * Required checks green, but a check that is not required failed or is
- * still running (e.g. CodeQL). Mergeable once every check has finished and
- * passed or failed: each failed one is then a ci_failure feedback item that
- * must be settled (fixed, or declined / answered and verified) before the
- * merge. Any other end (CANCELLED, ACTION_REQUIRED, STALE) raises no item,
- * so it keeps the PR unmerged.
+ * GitHub merge states in which its Merge button works: CLEAN, HAS_HOOKS,
+ * and UNSTABLE (a check that is not required failed or is still running).
+ * BEHIND, BLOCKED (required reviews or checks), DIRTY, DRAFT and UNKNOWN do
+ * not merge.
  */
-const UNSTABLE = "UNSTABLE"
-const settledCheck = (c) =>
-    c.status === "COMPLETED" &&
-    (PASSED_CONCLUSIONS.has(c.conclusion) ||
-        FAILED_CONCLUSIONS.has(c.conclusion))
-const OPINIONS = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"])
+const MERGEABLE_STATES = new Set(["CLEAN", "HAS_HOOKS", "UNSTABLE"])
 const CONFLICT_REASON = "PR merge conflict: prompt not delivered"
 
 /** Does GitHub see a merge conflict with the base branch? */
@@ -158,33 +149,15 @@ export function hasConflict(pr) {
 }
 
 /**
- * Is a PR ready to merge? GitHub's merge state has nothing blocking
- * (required checks, conflicts, required reviews; UNSTABLE, a failed check
- * that is not required, only once every check passed or failed), GitHub's
- * review decision is APPROVED or none (no review required), and the current head commit is
- * approved: some reviewer's latest opinion is an approval of that commit
- * and no reviewer's latest opinion is a change request. An approval of an
- * older commit never merges a newer one.
+ * Is a PR ready to merge? Exactly when GitHub would let a person press
+ * Merge: not a draft and a mergeable merge state. GitHub's own rules
+ * (required reviews, whether a push dismisses an approval, required checks)
+ * decide; no review or check rule of ours is added on top. autoMerge also
+ * waits for the task's own work: PR feedback settled, agent idle.
  */
 export function mergeReady(pr) {
-    if (!pr || pr.isDraft) return false
-    if (pr.mergeStateStatus === UNSTABLE) {
-        if (!(pr.statusCheckRollup || []).every(settledCheck)) return false
-    } else if (!MERGEABLE_STATES.has(pr.mergeStateStatus)) return false
-    if (pr.reviewDecision && pr.reviewDecision !== "APPROVED") return false
-    const latest = new Map()
-    const reviews = [...(pr.reviews || [])].sort(
-        (a, b) => ms(a.submittedAt) - ms(b.submittedAt)
-    )
-    for (const r of reviews) {
-        const who = r.author && r.author.login
-        if (who && OPINIONS.has(r.state)) latest.set(who.toLowerCase(), r)
-    }
-    const opinions = [...latest.values()]
-    if (opinions.some((r) => r.state === "CHANGES_REQUESTED")) return false
-    const head = lower(pr.headRefOid)
-    return opinions.some(
-        (r) => r.state === "APPROVED" && head && lower(r.commitId) === head
+    return (
+        Boolean(pr) && !pr.isDraft && MERGEABLE_STATES.has(pr.mergeStateStatus)
     )
 }
 
@@ -1775,7 +1748,7 @@ export function createPrWatcher({
     }
 
     /**
-     * Merge an approved, mergeable task PR (merge commit, only its current
+     * Merge a task PR GitHub lets us merge (merge commit, only its current
      * head) unless actionable feedback on it is not settled (open, new in
      * this poll, or resolved but not verified yet) or the task's agent is
      * at work. True when merged.

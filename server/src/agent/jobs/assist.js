@@ -11,9 +11,15 @@
 // Every chat bar message is its own thread, so a "chat" prompt also carries
 // the last few chat exchanges on the task (chatHistory): Leo's "add my
 // note" or "update the artifact" refers to what was said before.
-// Only "ask" gets MCP (tracebot-mcp), and only the exact tools in
-// ASSIST_ASK_TOOLS: the prompt carries untrusted artifact/thread content, so
-// no write tool (Slack posting, deploys, SQL, QA writes) may be reachable.
+// Every intent gets MCP (tracebot-mcp), but only the exact read-only tools
+// in ASSIST_TOOLS, so "chat" / "change" can look things up (a Slack thread
+// through Brain) and record them: the prompt carries untrusted
+// artifact/thread content, so no write tool (Slack posting, deploys, SQL, QA
+// writes) may be reachable. What "chat" / "change" can do with the answer
+// stays as without tools: artifact edits, a rename, links Leo wrote, and
+// Leo's own words to the agent. A run with tools gets TOOL_TIMEOUT_MS (a
+// Brain round trip takes minutes) instead of the runner's default, on the
+// providers that have MCP (not codex).
 // brain_do acts as Leo; the providers guard it (read-only prompt prefix on
 // claude-sdk, denied on claude-cli; see providers/toolPolicy.js).
 // "chat" / "change" may also rename the task and pass Leo's message on to
@@ -30,7 +36,7 @@
 import { z } from "zod"
 import { applySectionEdits } from "../artifactEdits.js"
 import { artifactBlock, systemPrompt, taskLine, untrusted } from "../prompts.js"
-import { ASSIST_ASK_TOOLS, mcpToolNames } from "../providers/toolPolicy.js"
+import { ASSIST_TOOLS, mcpToolNames } from "../providers/toolPolicy.js"
 import { errMessage, newLinkId } from "./util.js"
 
 const INTENTS = ["ask", "change", "chat"]
@@ -42,6 +48,8 @@ const MAX_SUMMARY = 4000
 const HISTORY_EXCHANGES = 8
 const HISTORY_CHARS = 12000
 const HISTORY_MESSAGE_CHARS = 3000
+// a run with tracebot-mcp: Brain jobs take minutes
+export const TOOL_TIMEOUT_MS = 10 * 60 * 1000
 
 const outputSchema = z.object({
     reply: z.string(),
@@ -322,8 +330,10 @@ export default {
 
     buildPrompt(ctx, context) {
         const intent = intentOf(ctx.input)
+        const src = context.task.source
         const parts = [
-            taskLine(context.task),
+            taskLine(context.task) +
+                (src && src.url ? `\nTask source: ${src.url}` : ""),
             artifactBlock(context.artifact.content),
         ]
         if (context.anchor && context.anchor.exact) {
@@ -351,16 +361,10 @@ export default {
             system: systemPrompt("assist"),
             prompt: parts.join("\n\n"),
         }
-        if (
-            intent === "ask" &&
-            ctx.deps.mcpServers &&
-            Object.keys(ctx.deps.mcpServers).length
-        ) {
+        if (ctx.deps.mcpServers && Object.keys(ctx.deps.mcpServers).length) {
             out.mcpServers = ctx.deps.mcpServers
-            out.allowedTools = mcpToolNames(
-                ctx.deps.mcpServers,
-                ASSIST_ASK_TOOLS
-            )
+            out.allowedTools = mcpToolNames(ctx.deps.mcpServers, ASSIST_TOOLS)
+            out.toolTimeoutMs = TOOL_TIMEOUT_MS
         }
         return out
     },

@@ -70,7 +70,9 @@ center agent to Codex at any time, for example when Claude credits run out.
   Jobs return a schema-validated object (`edits`, `actions`, `reply`, …)
   that service code validates and applies through the store. This works the
   same on every provider and gives least privilege by construction. Only
-  `assist` asks get `tracebot-mcp` (Brain) as an MCP server on the Claude
+  `assist` jobs (ask, change and chat: so a chat message can pull the
+  details from a Slack thread and record them) get `tracebot-mcp` (Brain)
+  as an MCP server on the Claude
   providers, limited to an exact allow-list (`brain_job_result`,
   `wiki_search`, `wiki_read`, plus `brain_do` on `claude-sdk` only); every
   other tracebot tool, including Slack posting and deploys, is denied.
@@ -81,7 +83,10 @@ center agent to Codex at any time, for example when Claude credits run out.
   not post, send, deploy, create, modify or delete anything …" instruction.
   That is an instruction to Brain, not an enforcement boundary. `claude -p`
   has no way to rewrite tool input, so on `claude-cli` `brain_do` is denied
-  and an ask can only read finished Brain results and the wiki. Codex center jobs run with an isolated
+  and an assist job can only read finished Brain results and the wiki.
+  An assist run with these tools gets a 10-minute timeout instead of the
+  default 3 minutes, since a Brain round trip takes minutes; it holds an
+  interactive slot while it waits. Codex center jobs run with an isolated
   `CODEX_HOME` and **no MCP servers at all**, so a Codex "ask" has no Brain
   access.
 - **Same output contract.** Each job type has a JSON schema (zod →

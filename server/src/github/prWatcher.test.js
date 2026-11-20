@@ -2504,59 +2504,14 @@ describe("auto-merge", () => {
             ...over,
         })
 
-    test("mergeReady: clean merge state and approved", () => {
-        expect(mergeReady(ready())).toBe(true)
-        expect(mergeReady(ready({ mergeStateStatus: "HAS_HOOKS" }))).toBe(true)
-        expect(mergeReady(ready({ mergeStateStatus: "BLOCKED" }))).toBe(false)
-        expect(mergeReady(ready({ mergeStateStatus: "UNKNOWN" }))).toBe(false)
-        // UNSTABLE: a failed check that is not required; only once every
-        // check has finished (the failed ones are feedback items)
-        const check = (status, conclusion) => ({
-            name: "x",
-            status,
-            conclusion,
-        })
-        expect(mergeReady(ready({ mergeStateStatus: "UNSTABLE" }))).toBe(true)
-        expect(
-            mergeReady(
-                ready({
-                    mergeStateStatus: "UNSTABLE",
-                    statusCheckRollup: [
-                        check("COMPLETED", "SUCCESS"),
-                        check("COMPLETED", "FAILURE"),
-                    ],
-                })
-            )
-        ).toBe(true)
-        expect(
-            mergeReady(
-                ready({
-                    mergeStateStatus: "UNSTABLE",
-                    statusCheckRollup: [
-                        check("COMPLETED", "FAILURE"),
-                        check("IN_PROGRESS", null),
-                    ],
-                })
-            )
-        ).toBe(false)
-        for (const end of ["CANCELLED", "ACTION_REQUIRED", "STALE"])
-            expect(
-                mergeReady(
-                    ready({
-                        mergeStateStatus: "UNSTABLE",
-                        statusCheckRollup: [check("COMPLETED", end)],
-                    })
-                )
-            ).toBe(false)
+    test("mergeReady: exactly GitHub's merge state (no review rules of ours)", () => {
+        for (const st of ["CLEAN", "HAS_HOOKS", "UNSTABLE"])
+            expect(mergeReady(ready({ mergeStateStatus: st }))).toBe(true)
+        for (const st of ["BLOCKED", "BEHIND", "DIRTY", "DRAFT", "UNKNOWN"])
+            expect(mergeReady(ready({ mergeStateStatus: st }))).toBe(false)
         expect(mergeReady(ready({ isDraft: true }))).toBe(false)
-        expect(mergeReady(ready({ reviewDecision: "CHANGES_REQUESTED" }))).toBe(
-            false
-        )
-        expect(mergeReady(ready({ reviewDecision: "REVIEW_REQUIRED" }))).toBe(
-            false
-        )
         expect(mergeReady(null)).toBe(false)
-        // an approval of an older commit never merges a newer head
+        // an approval of an older commit that GitHub keeps counts
         expect(
             mergeReady(
                 ready({
@@ -2570,39 +2525,40 @@ describe("auto-merge", () => {
                     ],
                 })
             )
-        ).toBe(false)
-        expect(mergeReady(ready({ reviews: [] }))).toBe(false)
-        expect(mergeReady(ready({ headRefOid: null, reviews: [] }))).toBe(false)
-        // no review required: each reviewer's latest opinion
-        const none = (reviews) => ready({ reviewDecision: null, reviews })
-        expect(mergeReady(none([]))).toBe(false)
+        ).toBe(true)
+        // no review required and none given, or a change request GitHub
+        // does not enforce: GitHub's Merge button works, so do we
+        expect(mergeReady(ready({ reviewDecision: null, reviews: [] }))).toBe(
+            true
+        )
         expect(
             mergeReady(
-                none([review("ann", "APPROVED", "2026-11-07T12:00:00Z")])
+                ready({
+                    reviewDecision: "CHANGES_REQUESTED",
+                    reviews: [
+                        review(
+                            "bob",
+                            "CHANGES_REQUESTED",
+                            "2026-11-07T12:05:00Z"
+                        ),
+                    ],
+                })
             )
         ).toBe(true)
+        // UNSTABLE with a check still running: GitHub allows the merge
         expect(
             mergeReady(
-                none([
-                    review("ann", "APPROVED", "2026-11-07T12:00:00Z"),
-                    review("bob", "CHANGES_REQUESTED", "2026-11-07T12:05:00Z"),
-                ])
-            )
-        ).toBe(false)
-        expect(
-            mergeReady(
-                none([
-                    review("bob", "CHANGES_REQUESTED", "2026-11-07T12:00:00Z"),
-                    review("ann", "APPROVED", "2026-11-07T12:01:00Z"),
-                    review("Bob", "APPROVED", "2026-11-07T12:05:00Z"),
-                    review("cid", "COMMENTED", "2026-11-07T12:06:00Z"),
-                    { state: "APPROVED", submittedAt: null },
-                ])
+                ready({
+                    mergeStateStatus: "UNSTABLE",
+                    statusCheckRollup: [
+                        { name: "x", status: "IN_PROGRESS", conclusion: null },
+                    ],
+                })
             )
         ).toBe(true)
     })
 
-    test("an approved, clean task PR is merged (merge commit, its head) and handled as merged", async () => {
+    test("a mergeable task PR is merged (merge commit, its head) and handled as merged", async () => {
         const { gh, watcher, jobRunner } = await claimedSetup()
         let merged = false
         gh.prs[`${REPO}#812`] = () =>

@@ -36,7 +36,7 @@ import {
     tail,
     timeoutError,
 } from "./common.js"
-import { resolveToolPolicy } from "./toolPolicy.js"
+import { resolveToolPolicy, runTimeoutMs } from "./toolPolicy.js"
 
 export const CLAUDE_CLI = "claude-cli"
 
@@ -126,6 +126,7 @@ export function createClaudeCliProvider({
             mcpServers,
             allowedTools,
             timeoutMs,
+            toolTimeoutMs,
         }) {
             if (signal && signal.aborted) throw abortedError(CLAUDE_CLI)
             const hasMcp = mcpServers && Object.keys(mcpServers).length > 0
@@ -141,7 +142,11 @@ export function createClaudeCliProvider({
                     onDelta,
                     mcpServers: hasMcp ? mcpServers : null,
                     allowedTools,
-                    timeoutMs,
+                    timeoutMs: runTimeoutMs({
+                        timeoutMs,
+                        toolTimeoutMs,
+                        hasMcp,
+                    }),
                     mcpConfigFile: mcp ? mcp.file : null,
                 })
             } finally {

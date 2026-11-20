@@ -7,8 +7,9 @@ Two features on top of the GitHub integration:
    start a herdr agent that reviews each one (first review or re-review)
    following the `AGENTS.md` in the reviews folder (config `reviews.dir`).
 2. **Auto-merge**: our own task PRs (claimed by a task) merge by
-   themselves once GitHub says they are approved and nothing blocks the
-   merge.
+   themselves once GitHub allows the merge (its own review and check
+   rules, as for a person pressing Merge) and their PR feedback is
+   settled.
 
 "We" / "us" is the authenticated `gh` user (`gh api user`), or
 `github.login` in config.json.
@@ -309,18 +310,15 @@ agent_model, fallback_model, limited, next_kind, next_model }`. `repos[]`:
 Setting `github.auto_merge` (default on). On each PR watcher poll of a
 claimed, open PR of ours:
 
-- not a draft;
-- approved: GitHub's `reviewDecision` is `APPROVED` or none (no review
-  required), the current head commit has an approval (an approval of an
-  older commit never merges a newer one), and no reviewer's latest
-  opinion is a change request;
-- `mergeStateStatus` is `CLEAN` (or `HAS_HOOKS`): required checks green, no
-  conflicts, nothing else blocking. `UNSTABLE` (required checks green, a
-  check that is not required failed, e.g. CodeQL) also merges, but only once
-  every check has passed or failed (a cancelled or stale check keeps it
-  unmerged): each failed check is a `ci_failure` feedback
-  item, so the agent must fix it or decline / answer it (verified by its
-  `Re:` comment) first;
+- GitHub would let a person press Merge: not a draft, and
+  `mergeStateStatus` is `CLEAN`, `HAS_HOOKS` or `UNSTABLE` (a check that
+  is not required failed or is still running, e.g. CodeQL). GitHub's own
+  rules decide everything else: required reviews and checks (`BLOCKED`),
+  whether a push dismisses an earlier approval, conflicts. No review or
+  check rule of ours is added on top, so a stale approval GitHub keeps
+  counts, and a repo that needs no review merges without one. A failed
+  check is still a `ci_failure` feedback item (next point), so the agent
+  must fix it or decline / answer it first;
 - every actionable feedback item on that PR is settled (verified after
   its fix or answer; checked after this poll's verification), and the
   task's agent is not at work: nothing queued, being sent or just sent,
@@ -329,6 +327,6 @@ claimed, open PR of ours:
   chain, so no prompt or revive starts mid-merge.
 
 Then `gh pr merge <n> --merge --delete-branch --match-head-commit <sha>`
-(merge commit, only the approved head). The usual merged handling follows
+(merge commit, only the head that was checked). The usual merged handling follows
 in the same poll (deliverable merged, close-out). A failed merge logs
 `pr_auto_merge_failed` once per head commit.

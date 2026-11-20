@@ -4,7 +4,7 @@
  */
 
 import {
-    ASSIST_ASK_TOOLS,
+    ASSIST_TOOLS,
     GUARDED_TOOLS,
     KNOWN_TRACEBOT_TOOLS,
     READ_ONLY_PREFIX,
@@ -13,6 +13,7 @@ import {
     mcpToolName,
     mcpToolNames,
     resolveToolPolicy,
+    runTimeoutMs,
 } from "./toolPolicy.js"
 
 describe("toolPolicy", () => {
@@ -36,7 +37,7 @@ describe("toolPolicy", () => {
             "delete_query",
             "qa_set_game_param",
         ]) {
-            expect(ASSIST_ASK_TOOLS).not.toContain(t)
+            expect(ASSIST_TOOLS).not.toContain(t)
             expect(KNOWN_TRACEBOT_TOOLS).toContain(t)
         }
     })
@@ -94,7 +95,7 @@ describe("toolPolicy", () => {
     test("canGuardInputs: false never allows guarded tools", () => {
         const p = resolveToolPolicy({
             mcpServers: { tb: {} },
-            allowedTools: mcpToolNames({ tb: {} }, ASSIST_ASK_TOOLS),
+            allowedTools: mcpToolNames({ tb: {} }, ASSIST_TOOLS),
             canGuardInputs: false,
         })
         expect(p.allowed).toEqual([
@@ -110,5 +111,24 @@ describe("toolPolicy", () => {
         const p = resolveToolPolicy()
         expect(p).toMatchObject({ allowed: [], disallowed: [] })
         expect(p.isAllowed("mcp__tb__brain_do")).toBe(false)
+    })
+})
+
+describe("runTimeoutMs", () => {
+    test("the tool limit only for a run with MCP servers", () => {
+        expect(
+            runTimeoutMs({ timeoutMs: 1, toolTimeoutMs: 9, hasMcp: true })
+        ).toBe(9)
+        expect(
+            runTimeoutMs({ timeoutMs: 1, toolTimeoutMs: 9, hasMcp: false })
+        ).toBe(1)
+        expect(runTimeoutMs({ timeoutMs: 1, hasMcp: true })).toBe(1)
+        // never shorter than the base; no base limit stays none
+        expect(
+            runTimeoutMs({ timeoutMs: 20, toolTimeoutMs: 9, hasMcp: true })
+        ).toBe(20)
+        expect(
+            runTimeoutMs({ timeoutMs: 0, toolTimeoutMs: 9, hasMcp: true })
+        ).toBe(0)
     })
 })

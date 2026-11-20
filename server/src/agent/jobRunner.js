@@ -340,6 +340,9 @@ export function createJobRunner({
                 mcpServers: built.mcpServers,
                 allowedTools: built.allowedTools,
                 timeoutMs,
+                // longer limit for runs with tools (assist with Brain);
+                // only providers with MCP use it
+                toolTimeoutMs: built.toolTimeoutMs,
                 onDelta: (text) => {
                     if (bus)
                         bus.emit("job.delta", {

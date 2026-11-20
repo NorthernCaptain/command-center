@@ -24,6 +24,7 @@ import {
     guardToolInput,
     isGuardedTool,
     resolveToolPolicy,
+    runTimeoutMs,
 } from "./toolPolicy.js"
 
 export const CLAUDE_SDK = "claude-sdk"
@@ -89,7 +90,7 @@ export function createClaudeSdkProvider({
     cwd,
     clock = systemClock,
     maxTurns = 3,
-    mcpMaxTurns = 10,
+    mcpMaxTurns = 24,
     env,
 }) {
     if (typeof query !== "function") throw new Error("query is required")
@@ -104,9 +105,16 @@ export function createClaudeSdkProvider({
             onDelta,
             mcpServers,
             allowedTools,
-            timeoutMs,
+            timeoutMs: baseTimeoutMs,
+            toolTimeoutMs,
         }) {
             if (signal && signal.aborted) throw abortedError(CLAUDE_SDK)
+            const hasMcp = mcpServers && Object.keys(mcpServers).length > 0
+            const timeoutMs = runTimeoutMs({
+                timeoutMs: baseTimeoutMs,
+                toolTimeoutMs,
+                hasMcp,
+            })
             const abortController = new AbortController()
             let timedOut = false
             const onAbort = () => abortController.abort()
@@ -119,7 +127,6 @@ export function createClaudeSdkProvider({
                           abortController.abort()
                       }, timeoutMs)
                     : null
-            const hasMcp = mcpServers && Object.keys(mcpServers).length > 0
             const policy = resolveToolPolicy({
                 mcpServers: hasMcp ? mcpServers : {},
                 allowedTools,
