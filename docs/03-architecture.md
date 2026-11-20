@@ -281,8 +281,10 @@ its PR(s) are merged**, the same rule as the Asana task.
    run tests and the review loop until GOOD_TO_GO, commit, push to the PR
    branch, reply to each comment on GitHub (what changed + commit, or why
    not), then `cc_feedback` for each item.
-5. When every item of the round is resolved (`fixed` / `answered` /
-   `declined` / `no_action`), the status goes back to `pr_open`. The watcher
+5. Rounds are gated per PR: a PR's next round waits only for that PR's
+   open round, never for another PR's. When every item is resolved
+   (`fixed` / `answered` / `declined` / `no_action`), the status goes back
+   to `pr_open`. The watcher
    verifies the agent's claims on the next poll, checking only what that
    item's kind and status require (see the table in
    [PR feedback items](#pr-feedback-items)). `no_action` items are never
@@ -374,6 +376,12 @@ Each code task tracks one **deliverable per work repo** in `task.json`:
 - **Disposition:** `pending` → `pr` (a **claimed** PR, see below) →
   merged; or `no_change`. Only **I** can set `no_change`, either directly
   or by confirming an agent's suggestion.
+- **Dropped** when I take its repo off the task (the task header's repos,
+  e.g. a wrong repo picked at enrich): a `pending` deliverable of that repo,
+  still without a PR, goes with it (event `deliverable_dropped`), so the
+  task no longer waits for it. One with a PR, merged or `no_change` stays.
+  An agent's later `no_change_repos` naming that repo is skipped, not an
+  error.
 - **Follow-up PRs.** A repo can have more than one deliverable. A PR the
   agent reports (`cc_add_link(type:"pr")`) or I claim for a repo whose
   deliverables all have their PR (a follow-up opened after the first
@@ -392,14 +400,19 @@ Each code task tracks one **deliverable per work repo** in `task.json`:
   deliverable clicked by its creation time: 409 `deliverable_changed` if it got a
   PR meanwhile; or the agent's `no_change_repos`), act on the repo's
   current deliverable: the
-  pending one, else the newest with an unmerged PR. A done deliverable
-  (merged or no change) keeps its branch and disposition, and a PR is
-  never added after a follow-up marked no change. Once every one is done
-  in a repo that had a PR, a branch (`type:"branch"`, or a work folder with `branch`) other than
-  theirs is follow-up work: it adds a **pending** deliverable on that
-  branch (and `task.branch` for the main repo), so the task does not
-  close under the agent, and discovery claims its PR as usual. Not on a
-  `done`, `cancelled` or `inbox` task.
+  pending one, else the newest with an unmerged PR. Only a pending
+  deliverable moves to a new branch: one with a PR keeps its branch (the
+  PR's head), and a done deliverable (merged or no change) keeps its
+  disposition too. A PR is never added after a follow-up marked no change.
+  In a repo that had a PR (open or merged), a branch (`type:"branch"`, or
+  a work folder with `branch`) other than theirs is follow-up work: it
+  adds a **pending** deliverable on that branch (and `task.branch` for the
+  main repo), so the task does not close under the agent, and discovery
+  claims its PR as usual. Not on a `done`, `cancelled` or `inbox` task.
+- Each poll, an open claimed PR's head branch is its deliverable's branch:
+  one recorded under another branch (an older registration moved it)
+  follows the PR again, and so does `task.branch` when it pointed there in
+  the main repo. Feedback and merge-conflict prompts name that branch.
 - The agent's `cc_report(status:"ready_for_pr")` must list its work repos.
   If that list and `deliverables` differ, the task is flagged in Now and is
   not closed.
@@ -408,6 +421,18 @@ Each code task tracks one **deliverable per work repo** in `task.json`:
   closes only if every deliverable is `no_change` or has a **claimed,
   merged** PR. Otherwise it stays `pr_open` with a progress badge ("1 of 2
   merged"), and a merged PR alone completes nothing.
+- **Manual deliverables** (`task.manual_deliverables`: `{ id, text,
+  created_at, done_at }`) are my checklist for work outside the PRs, such
+  as a manual install after merge. I add, check off and remove them in the
+  Deliverables tab (`POST /api/tasks/:id/manual-deliverables`, `PATCH
+  …/:item` with `{ done }`, `DELETE …/:item`; owner only, refused on a
+  `done` or `cancelled` task). An unchecked one blocks Done like an
+  unmerged PR, in the store, the close-out job and a command. Once every PR
+  is merged the watcher waits instead of closing out: it raises Now
+  ("Manual deliverables left"), notifies me and logs
+  `close_out_waiting_manual` once per set of open ones. Checking off the
+  last one (or removing it) clears that flag and re-runs the poll, which
+  closes the task out.
 - Asana completion follows the same condition. Each individual PR merge
   only adds an Asana comment.
 

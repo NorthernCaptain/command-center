@@ -1122,6 +1122,41 @@ describe("agents", () => {
         await svc.stop()
     })
 
+    test("klaude: herdr's claude with --name and the model flags, its account's env", async () => {
+        const { svc, herdr, settingsRepo, reviews } = await started({
+            agentEnv: (kind) => ({
+                ...(kind === "klaude" ? { CLAUDE_CONFIG_DIR: "/h/.k" } : {}),
+                CC_URL: "http://127.0.0.1:1",
+                CC_TOKEN: "t",
+            }),
+        })
+        settingsRepo.values["reviews.agent_kind"] = "klaude"
+        settingsRepo.values["reviews.agent_model"] = "opus-high"
+        const run = await svc.requestReview("mobile", 1)
+        await svc.idle()
+        expect(herdr.workspaceCreate.mock.calls[0][0].env).toMatchObject({
+            CLAUDE_CONFIG_DIR: "/h/.k",
+            REVIEW_ORCH_SKIP: "1",
+        })
+        expect(herdr.agentStart.mock.calls[0][0]).toMatchObject({
+            kind: "claude",
+            args: [
+                ...MCP,
+                "--model",
+                "opus",
+                "--effort",
+                "high",
+                "--name",
+                "#1 Fix thing 1",
+            ],
+        })
+        expect(reviews.getRun(run.id)).toMatchObject({
+            agent_kind: "klaude",
+            agent_model: "opus-high",
+        })
+        await svc.stop()
+    })
+
     test("no free agent name: the run fails", async () => {
         const { svc, herdr, reviews } = await started()
         herdr.agents.set("pr-mobile-1", "idle")

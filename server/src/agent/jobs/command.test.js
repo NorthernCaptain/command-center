@@ -417,7 +417,7 @@ describe("command", () => {
             {}
         )
         expect(res.summary).toBe(
-            "✗ set_status T-1: deliverables not merged: aws-lambda@feat/x"
+            "✗ set_status T-1: deliverables not done: aws-lambda@feat/x"
         )
         expect((await store.getTask(1)).task.status).not.toBe("done")
     })

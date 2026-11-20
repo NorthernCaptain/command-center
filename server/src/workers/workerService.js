@@ -18,6 +18,7 @@ import { enqueueOnce, errMessage } from "../agent/jobs/util.js"
 import { currentRound, feedbackDedupeKey } from "../contracts/feedback.js"
 import { canCreatePr, canTransition } from "../contracts/lifecycle.js"
 import { WORKER_KINDS } from "../contracts/schemas.js"
+import { AGENT_KINDS, baseKind, kindEnv } from "../contracts/agentKinds.js"
 import { systemClock } from "../util/clock.js"
 import { AppError, NotFoundError, ValidationError } from "../util/errors.js"
 import { nullLogger } from "../util/logger.js"
@@ -72,15 +73,19 @@ const SENDABLE = ["idle", "done"]
 // clean-up prompt as outbox row <id>, recorded before it is sent:
 // "clean:<id>", plus ":working" once the agent worked after it was sent.
 // The workspace closes when it is idle again and the folders are gone.
+// ":left" (before ":working"): a turn ended with folders left and Leo was
+// told; the close stays pending, later turns don't tell him again.
 export const CLEAN_LEFT_REASON = "Clean-up left folders; agent kept open"
 // runtime setting (default on): a task that moves to done or cancelled gets
 // its agent's folders cleaned and its workspace closed (autoCloseOnDone)
 export const AUTO_CLEAN_SETTING = "workers.auto_clean_on_done"
 
-/** "clean:<id>[:working]" -> { rowId, working } or null. */
+/** "clean:<id>[:left][:working]" -> { rowId, left, working } or null. */
 export function parseCloseAfter(value) {
-    const m = /^clean:(\d+)(:working)?$/.exec(String(value || ""))
-    return m ? { rowId: Number(m[1]), working: Boolean(m[2]) } : null
+    const m = /^clean:(\d+)(:left)?(:working)?$/.exec(String(value || ""))
+    return m
+        ? { rowId: Number(m[1]), left: Boolean(m[2]), working: Boolean(m[3]) }
+        : null
 }
 // A wait:true prompt that has not settled after this long is working: the
 // agent took it (herdr reports agent_prompt_stalled within 5 s otherwise).
@@ -181,7 +186,7 @@ export function createWorkerService({
      * it makes up; codex has no such flag and names its own.
      */
     const titleArgs = (kind, task) =>
-        kind === "claude" ? ["--name", sessionTitle(task)] : []
+        baseKind(kind) === "claude" ? ["--name", sessionTitle(task)] : []
     /** Flags giving the worker the command-center MCP server (mcpArgs.js). */
     const mcpArgs = (kind) =>
         mcpHeadersHelper === false
@@ -512,7 +517,8 @@ export function createWorkerService({
             ws = await herdr.workspaceCreate({
                 cwd: treeDir,
                 label: `T-${taskId} ${oneLine(task.title, 40)}`,
-                env: envFor(taskId),
+                // the kind's account (klaude: its own CLAUDE_CONFIG_DIR)
+                env: { ...kindEnv(kind, config.agents), ...envFor(taskId) },
                 focus: false,
             })
         } catch (err) {
@@ -539,7 +545,7 @@ export function createWorkerService({
         try {
             await herdr.agentStart({
                 name,
-                kind,
+                kind: baseKind(kind),
                 paneId: ws.paneId,
                 args: [
                     ...mcpArgs(kind),
@@ -775,7 +781,7 @@ export function createWorkerService({
     // ---- revive ------------------------------------------------------------
 
     function resumeArgs(kind, sessionId) {
-        return kind === "codex"
+        return baseKind(kind) === "codex"
             ? ["resume", sessionId]
             : ["--resume", sessionId]
     }
@@ -848,9 +854,16 @@ export function createWorkerService({
         // both are known, with the same herdr session id.
         const adoptName = (last && last.name) || base
         const existing = fresh ? null : await getAgent(adoptName)
+        // a CLI several kinds share (claude: claude / klaude) says nothing
+        // about the account: adopt it only with a record naming our kind
+        const sharedCli =
+            existing &&
+            AGENT_KINDS.filter((k) => baseKind(k) === existing.kind).length > 1
         if (
             existing &&
-            existing.kind === kind &&
+            // herdr knows the CLI; the record knows the account
+            existing.kind === baseKind(kind) &&
+            (last ? last.kind === kind : !sharedCli) &&
             existing.paneId &&
             sameAgent(last, existing)
         ) {
@@ -1223,7 +1236,10 @@ export function createWorkerService({
         if (status === "working") limited.delete(s.id)
         if (status === "working" && prev !== "working") await leaveReview(id)
         if (status === "blocked") await markBlocked(id, s)
-        if (s.kind === "claude" && (status === "blocked" || status === "idle"))
+        if (
+            baseKind(s.kind) === "claude" &&
+            (status === "blocked" || status === "idle")
+        )
             await checkUsage(id, s)
         if (s.close_after && (await settleCloseAfter(id, s, status))) return
         if (SENDABLE.includes(status)) await flushTask(id, { revive: false })
@@ -1269,9 +1285,11 @@ export function createWorkerService({
      * Close after clean (on the task chain): "working" marks that the agent
      * took the clean-up turn; once it is idle again with the prompt
      * delivered, the workspace closes if the task's folders are gone. Folders
-     * left after it worked mean the agent stopped (uncommitted or unpushed
-     * work): the workspace stays open, Now is raised. Returns true when the
-     * workspace was closed.
+     * left after it worked: the agent stopped (uncommitted or unpushed
+     * work), or its deletion still runs in the background and wakes it when
+     * done. The workspace stays open and Now is raised (once), but the close
+     * stays pending: the next time the agent works and goes idle, the
+     * folders are checked again. Returns true when the workspace was closed.
      */
     async function settleCloseAfter(id, s, status) {
         // the task was reopened meanwhile: no clean-up, no close
@@ -1292,7 +1310,7 @@ export function createWorkerService({
         if (status === "working") {
             if (!mark.working)
                 await sessions.update(s.id, {
-                    close_after: `clean:${mark.rowId}:working`,
+                    close_after: `clean:${mark.rowId}${mark.left ? ":left" : ""}:working`,
                 })
             return false
         }
@@ -1323,8 +1341,13 @@ export function createWorkerService({
                 return false
             }
         }
-        await sessions.update(s.id, { close_after: null })
+        // pending again, waiting for the agent's next turn; Leo is told
+        // once per clean-up (a new one gets a new mark)
+        await sessions.update(s.id, {
+            close_after: `clean:${mark.rowId}:left`,
+        })
         const folders = left.map((f) => f.folder)
+        if (mark.left) return false
         await patchFlags(
             id,
             { now: true, now_reason: CLEAN_LEFT_REASON },

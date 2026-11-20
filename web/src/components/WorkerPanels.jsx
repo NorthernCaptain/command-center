@@ -21,10 +21,9 @@ import {
     deliverableState,
     watchFor,
 } from "../lib/worker.js"
+import { AGENT_KIND_LABELS } from "../lib/constants.js"
 
 export { groupRounds, roundSummary }
-
-const KIND_NAMES = { claude: "Claude", codex: "Codex" }
 
 /** "#812" from a GitHub pull URL (or null). */
 export function prNumber(url) {
@@ -73,7 +72,9 @@ export function AgentPanel({ agent, outbox, task, onAction }) {
                         <AgentChip state={agent.state} name={agent.name} />
                     </dd>
                     <dt>kind</dt>
-                    <dd>{KIND_NAMES[agent.kind] || agent.kind || "—"}</dd>
+                    <dd>
+                        {AGENT_KIND_LABELS[agent.kind] || agent.kind || "—"}
+                    </dd>
                     <dt>name</dt>
                     <dd>{agent.name ? <code>{agent.name}</code> : "—"}</dd>
                     <dt>session</dt>
@@ -97,7 +98,7 @@ export function AgentPanel({ agent, outbox, task, onAction }) {
                 <p className="muted">
                     No live agent.
                     {task && task.worker_kind
-                        ? ` Last worker: ${KIND_NAMES[task.worker_kind] || task.worker_kind}.`
+                        ? ` Last worker: ${AGENT_KIND_LABELS[task.worker_kind] || task.worker_kind}.`
                         : ""}
                 </p>
             )}
@@ -190,18 +191,27 @@ const dlvKey = (d, i) => `${i}:${d.repo}:${d.pr || d.branch}:${d.disposition}`
  * on a SOC2-area task, its change record (changeRecord: the task payload's
  * change_record).
  */
-export function DeliverablesSummary({ deliverables, prs, changeRecord }) {
+export function DeliverablesSummary({
+    deliverables,
+    prs,
+    changeRecord,
+    manual,
+}) {
     const list = deliverables || []
+    const manualList = manual || []
     const blocking = list.filter(
         (d) => !deliverableState(d, watchFor(prs, d)).done
     )
+    const manualOpen = manualList.filter((m) => !m.done_at)
+    const total = list.length + manualList.length
+    const blocked = blocking.length + manualOpen.length
     const record = changeRecordBlocker(changeRecord)
-    if (record || blocking.length)
+    if (record || blocked)
         return (
             <div className="dlv-summary is-blocked" role="status">
                 <strong>
-                    {blocking.length
-                        ? `${blocking.length} of ${list.length} block Done`
+                    {blocked
+                        ? `${blocked} of ${total} block Done`
                         : "The SOC2 change record blocks Done"}
                 </strong>
                 <ul>
@@ -211,13 +221,16 @@ export function DeliverablesSummary({ deliverables, prs, changeRecord }) {
                             {deliverableState(d, watchFor(prs, d)).reason}
                         </li>
                     ))}
+                    {manualOpen.map((m) => (
+                        <li key={m.id}>manual: {m.text} (not checked off)</li>
+                    ))}
                     {record ? (
                         <li className="dlv-record">SOC2: {record}</li>
                     ) : null}
                 </ul>
             </div>
         )
-    if (!list.length)
+    if (!total)
         return (
             <p className="dlv-summary is-clear" role="status">
                 ✓ No deliverables: nothing blocks Done.
@@ -225,7 +238,11 @@ export function DeliverablesSummary({ deliverables, prs, changeRecord }) {
         )
     return (
         <p className="dlv-summary is-clear" role="status">
-            ✓ All {list.length} done (merged or no change): nothing blocks Done.
+            ✓ All {total} done (
+            {manualList.length
+                ? "merged, no change or checked off"
+                : "merged or no change"}
+            ): nothing blocks Done.
         </p>
     )
 }
@@ -234,18 +251,27 @@ export function DeliverablesSummary({ deliverables, prs, changeRecord }) {
  * deliverables: task.deliverables; prs: pr_watch rows; candidates:
  * [{ repo, url, reason }] (unclaimed PRs on the branch).
  * onNoChange(repo, created_at), onClaim(url) -> Promise.
+ * manual: task.manual_deliverables (Leo's checklist, e.g. a manual install
+ * after merge); onAddManual(text), onSetManual(id, done),
+ * onRemoveManual(id) -> Promise.
  */
 export function DeliverablesPanel({
     deliverables,
     prs,
     changeRecord,
     candidates,
+    manual,
     onNoChange,
     onClaim,
+    onAddManual,
+    onSetManual,
+    onRemoveManual,
 }) {
     const list = deliverables || []
     const cands = candidates || []
+    const manualList = manual || []
     const [url, setUrl] = useState("")
+    const [step, setStep] = useState("")
     const [busy, setBusy] = useState(null)
 
     async function run(key, fn) {
@@ -266,6 +292,7 @@ export function DeliverablesPanel({
                 deliverables={list}
                 prs={prs}
                 changeRecord={changeRecord}
+                manual={manualList}
             />
             {list.length ? (
                 <ul className="dlv-list">
@@ -352,6 +379,90 @@ export function DeliverablesPanel({
             ) : (
                 <p className="muted">No work repos yet.</p>
             )}
+
+            <h3 className="panel-sub">
+                Manual
+                <span className="lane-count">
+                    {manualList.filter((m) => !m.done_at).length}
+                </span>
+            </h3>
+            {manualList.length ? (
+                <ul className="dlv-list">
+                    {manualList.map((m) => (
+                        <li
+                            key={m.id}
+                            className={`dlv dlv-manual ${m.done_at ? "is-done" : "is-blocking"}`}
+                        >
+                            <div className="dlv-head">
+                                <label className="dlv-check">
+                                    <input
+                                        type="checkbox"
+                                        checked={Boolean(m.done_at)}
+                                        disabled={busy !== null}
+                                        onChange={(e) => {
+                                            const done = e.target.checked
+                                            run(`m-${m.id}`, () =>
+                                                onSetManual(m.id, done)
+                                            )
+                                        }}
+                                    />
+                                    <span>{m.text}</span>
+                                </label>
+                                <span className="dlv-verdict">
+                                    {m.done_at
+                                        ? `done ${relativeTime(m.done_at)}`
+                                        : "blocks Done"}
+                                </span>
+                                <button
+                                    type="button"
+                                    className="btn btn-ghost btn-xs"
+                                    aria-label={`Remove ${m.text}`}
+                                    disabled={busy !== null}
+                                    onClick={() =>
+                                        run(`rm-${m.id}`, () =>
+                                            onRemoveManual(m.id)
+                                        )
+                                    }
+                                >
+                                    Remove
+                                </button>
+                            </div>
+                        </li>
+                    ))}
+                </ul>
+            ) : (
+                <p className="muted">
+                    None. Add one for work outside the PRs (a manual install
+                    after merge): the task closes only once it is checked off.
+                </p>
+            )}
+            <form
+                className="dlv-claim"
+                onSubmit={async (e) => {
+                    e.preventDefault()
+                    const value = step.trim()
+                    if (!value) return
+                    if (await run("manual-add", () => onAddManual(value)))
+                        setStep("")
+                }}
+            >
+                <input
+                    className="input input-sm"
+                    type="text"
+                    maxLength={300}
+                    placeholder="e.g. Install on the farm after merge"
+                    aria-label="Manual deliverable"
+                    value={step}
+                    onChange={(e) => setStep(e.target.value)}
+                />
+                <button
+                    type="submit"
+                    className="btn btn-sm"
+                    disabled={busy !== null || !step.trim()}
+                >
+                    Add
+                </button>
+            </form>
 
             <h3 className="panel-sub">
                 Unclaimed PRs

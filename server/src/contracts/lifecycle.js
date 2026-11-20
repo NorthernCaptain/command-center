@@ -192,6 +192,26 @@ export function snoozePatch(until) {
     return withSnoozeFlags({ status: "waiting", snooze_until: until })
 }
 
+/** Manual deliverables not checked off yet: they block "done" too. */
+export function openManual(task) {
+    return ((task && task.manual_deliverables) || []).filter((m) => !m.done_at)
+}
+
+/** Now reason while merged PRs wait on manual deliverables. */
+export const MANUAL_REASON = "Manual deliverables left"
+
+/**
+ * "done" refusal text for what still blocks it (repo deliverables, then
+ * manual ones), or null when nothing does.
+ */
+export function doneBlockers(task) {
+    const parts = [
+        ...openDeliverables(task).map((d) => `${d.repo}@${d.branch}`),
+        ...openManual(task).map((m) => `manual: ${m.text}`),
+    ]
+    return parts.length ? parts.join(", ") : null
+}
+
 /** Deliverables that block "done" (not merged and not marked no_change). */
 export function openDeliverables(task) {
     return ((task && task.deliverables) || []).filter(

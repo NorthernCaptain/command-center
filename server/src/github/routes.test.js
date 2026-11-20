@@ -22,6 +22,9 @@ function makeApp({ viewer = false } = {}) {
         claim: jest.fn(async () => ({ ok: true })),
         setNoChange: jest.fn(async (id, repo) => ({ task: { id, repo } })),
         reopenItem: jest.fn(async (id, item) => ({ item: { id: item } })),
+        addManual: jest.fn(async (id, text) => ({ item: { id: "m1", text } })),
+        setManual: jest.fn(async (id, item, done) => ({ item, done })),
+        removeManual: jest.fn(async (id, item) => ({ removed: item })),
     }
     const app = express()
     const api = express.Router()
@@ -107,6 +110,38 @@ describe("mountGithub", () => {
         expect(bad.status).toBe(400)
     })
 
+    test("manual deliverables: add, check off, remove", async () => {
+        const { app, prWatcher } = makeApp()
+        const add = await request(app)
+            .post("/api/tasks/3/manual-deliverables")
+            .send({ text: "  Install on the farm  " })
+        expect(add.status).toBe(200)
+        expect(prWatcher.addManual).toHaveBeenCalledWith(
+            3,
+            "Install on the farm"
+        )
+        for (const text of ["", "   ", "x".repeat(301)]) {
+            const bad = await request(app)
+                .post("/api/tasks/3/manual-deliverables")
+                .send({ text })
+            expect(bad.status).toBe(400)
+        }
+        const done = await request(app)
+            .patch("/api/tasks/3/manual-deliverables/m1")
+            .send({ done: true })
+        expect(done.body).toEqual({ item: "m1", done: true })
+        expect(prWatcher.setManual).toHaveBeenCalledWith(3, "m1", true)
+        const bad = await request(app)
+            .patch("/api/tasks/3/manual-deliverables/m1")
+            .send({ done: "yes" })
+        expect(bad.status).toBe(400)
+        const del = await request(app).delete(
+            "/api/tasks/3/manual-deliverables/m1"
+        )
+        expect(del.body).toEqual({ removed: "m1" })
+        expect(prWatcher.removeManual).toHaveBeenCalledWith(3, "m1")
+    })
+
     test("bad task id and viewers", async () => {
         const { app } = makeApp()
         expect(
@@ -118,6 +153,9 @@ describe("mountGithub", () => {
             ["post", "/api/tasks/1/prs/claim"],
             ["post", "/api/tasks/1/deliverables/r"],
             ["patch", "/api/tasks/1/feedback/x"],
+            ["post", "/api/tasks/1/manual-deliverables"],
+            ["patch", "/api/tasks/1/manual-deliverables/m1"],
+            ["delete", "/api/tasks/1/manual-deliverables/m1"],
         ]) {
             const res = await request(viewer.app)[method](path).send({})
             expect(res.status).toBe(403)

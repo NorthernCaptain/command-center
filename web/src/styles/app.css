@@ -2752,6 +2752,26 @@ textarea.chatbar-input {
     overflow-wrap: anywhere;
 }
 
+.dlv-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    min-width: 0;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+    cursor: pointer;
+}
+
+.dlv-check input {
+    margin-top: 2px;
+    flex: none;
+}
+
+.dlv-manual.is-done .dlv-check span {
+    color: var(--text-dim);
+    text-decoration: line-through;
+}
+
 .dlv-candidate .btn {
     justify-self: start;
 }

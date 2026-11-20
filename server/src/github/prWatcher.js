@@ -11,7 +11,10 @@
 //  2. per claimed PR: new feedback items (deterministic classification),
 //     verification of agent-resolved items, merge / close, pr_watch row
 //  3. rounds: new items join the queued round while a delivered round is
-//     still open; otherwise they start a new round that is delivered now
+//     still open; otherwise they start a new round. Rounds are numbered per
+//     task but gated per PR: a PR's oldest open round is sent unless it was
+//     already sent for that PR, so feedback on one PR never waits for
+//     another PR's open round
 //  4. close condition (fresh discovery, then enqueueCloseOut)
 //
 // Every operation on one task runs through a per-task queue, so a poll, a
@@ -24,7 +27,9 @@ import {
     currentDeliverable,
     FOLLOW_UP_STATUSES,
     latestDeliverable,
+    MANUAL_REASON,
     openDeliverables,
+    openManual,
 } from "../contracts/lifecycle.js"
 import { enqueueCloseOut as defaultEnqueueCloseOut } from "../agent/jobs/close_out.js"
 import { currentRound, feedbackDedupeKey } from "../contracts/feedback.js"
@@ -104,6 +109,20 @@ const RECORD_REASON = "SOC2 change record missing"
 const ROUND_EVENT = "feedback_round_delivered"
 const ROUND_FAILED_EVENT = "feedback_round_failed"
 const ROUND_SEALED_EVENT = "feedback_round_sealed"
+/** attemptKey of a round event without an item list: every PR. */
+const ANY_PR = "*"
+const attemptKey = (pr, round) => `${pr}\n${round}`
+const OUTCOME_RANK = { failed: 3, unwired: 2, blocked: 1, delivered: 0 }
+/** The worst of several delivery results (failed > unwired > blocked). */
+function worstOutcome(list) {
+    return list.reduce(
+        (w, r) =>
+            (OUTCOME_RANK[r.outcome] ?? 3) > (OUTCOME_RANK[w.outcome] ?? 3)
+                ? r
+                : w,
+        { outcome: "delivered" }
+    )
+}
 const DELIVERED = new Set(["sent", "queued"])
 const BLOCKED_REASON = "Agent blocked — feedback waiting"
 const FEEDBACK_REASON = "PR feedback"
@@ -114,6 +133,19 @@ const ACTOR = "system"
 export const AUTO_MERGE_SETTING = "github.auto_merge"
 /** GitHub merge states with nothing blocking (checks green, no conflict). */
 const MERGEABLE_STATES = new Set(["CLEAN", "HAS_HOOKS"])
+/**
+ * Required checks green, but a check that is not required failed or is
+ * still running (e.g. CodeQL). Mergeable once every check has finished and
+ * passed or failed: each failed one is then a ci_failure feedback item that
+ * must be settled (fixed, or declined / answered and verified) before the
+ * merge. Any other end (CANCELLED, ACTION_REQUIRED, STALE) raises no item,
+ * so it keeps the PR unmerged.
+ */
+const UNSTABLE = "UNSTABLE"
+const settledCheck = (c) =>
+    c.status === "COMPLETED" &&
+    (PASSED_CONCLUSIONS.has(c.conclusion) ||
+        FAILED_CONCLUSIONS.has(c.conclusion))
 const OPINIONS = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"])
 const CONFLICT_REASON = "PR merge conflict: prompt not delivered"
 
@@ -127,15 +159,18 @@ export function hasConflict(pr) {
 
 /**
  * Is a PR ready to merge? GitHub's merge state has nothing blocking
- * (checks, conflicts, required reviews), GitHub's review decision is
- * APPROVED or none (no review required), and the current head commit is
+ * (required checks, conflicts, required reviews; UNSTABLE, a failed check
+ * that is not required, only once every check passed or failed), GitHub's
+ * review decision is APPROVED or none (no review required), and the current head commit is
  * approved: some reviewer's latest opinion is an approval of that commit
  * and no reviewer's latest opinion is a change request. An approval of an
  * older commit never merges a newer one.
  */
 export function mergeReady(pr) {
     if (!pr || pr.isDraft) return false
-    if (!MERGEABLE_STATES.has(pr.mergeStateStatus)) return false
+    if (pr.mergeStateStatus === UNSTABLE) {
+        if (!(pr.statusCheckRollup || []).every(settledCheck)) return false
+    } else if (!MERGEABLE_STATES.has(pr.mergeStateStatus)) return false
     if (pr.reviewDecision && pr.reviewDecision !== "APPROVED") return false
     const latest = new Map()
     const reviews = [...(pr.reviews || [])].sort(
@@ -946,12 +981,73 @@ export function createPrWatcher({
     }
 
     /**
-     * Rounds whose prompt reached a final outcome: delivered (sent/queued)
-     * or failed (failed/uncertain, never auto-resent). Either way the round
-     * is "in progress" until its items are resolved.
+     * PR rounds named by round events of `types`: keys are
+     * attemptKey(pr, round) for the PRs of the event's items; an event
+     * without an item list counts for every PR (attemptKey(ANY_PR, round)).
      */
-    const attemptedRounds = (taskId) =>
-        roundsWith(taskId, [ROUND_EVENT, ROUND_FAILED_EVENT])
+    async function prRoundsWith(taskId, types) {
+        const [events, items] = await Promise.all([
+            store.listEvents(taskId, { limit: 100000 }),
+            store.listFeedback(taskId),
+        ])
+        const prOf = new Map(items.map((i) => [i.id, i.pr]))
+        const out = new Set()
+        for (const e of events) {
+            if (!types.includes(e.type)) continue
+            const round = Number(e.data && e.data.round)
+            const ids = e.data && e.data.items
+            if (!Array.isArray(ids)) {
+                out.add(attemptKey(ANY_PR, round))
+                continue
+            }
+            for (const id of ids)
+                if (prOf.has(id)) out.add(attemptKey(prOf.get(id), round))
+        }
+        return out
+    }
+
+    /**
+     * PR rounds whose prompt reached a final outcome: delivered (sent /
+     * queued) or failed (failed/uncertain, never auto-resent). Either way
+     * the round is "in progress" for that PR until its items are resolved.
+     */
+    const attemptedPrRounds = (taskId) =>
+        prRoundsWith(taskId, [ROUND_EVENT, ROUND_FAILED_EVENT])
+
+    /** Does a set from prRoundsWith cover this PR's round? */
+    const covers = (set, pr, round) =>
+        set.has(attemptKey(pr, round)) || set.has(attemptKey(ANY_PR, round))
+
+    /**
+     * The open work per PR: each PR's current round (its oldest open one)
+     * with that round's open actionable items, and whether the round was
+     * already attempted for that PR. Sorted by round, then PR.
+     */
+    async function prRounds(taskId, items) {
+        const attempted = await attemptedPrRounds(taskId)
+        const open = items.filter((i) => i.actionable && i.status === "open")
+        return [...new Set(open.map((i) => i.pr))]
+            .map((pr) => {
+                const round = currentRound(items, pr)
+                return {
+                    pr,
+                    round,
+                    list: open.filter((i) => i.pr === pr && i.round === round),
+                    attempted: covers(attempted, pr, round),
+                }
+            })
+            .sort((a, b) => a.round - b.round || a.pr.localeCompare(b.pr))
+    }
+
+    /** [{ pr, round, list }] grouped by round: Map round -> items. */
+    function byRound(work) {
+        const out = new Map()
+        for (const w of work) {
+            if (!out.has(w.round)) out.set(w.round, [])
+            out.get(w.round).push(...w.list)
+        }
+        return out
+    }
 
     /**
      * Rounds whose membership is frozen: deliver() was called for them (any
@@ -1066,29 +1162,27 @@ export function createPrWatcher({
         return items.filter((i) => !finished.has(i.pr))
     }
 
-    /** The task's current round: the oldest open round over its PRs. */
-    function oldestOpenRound(items) {
-        const open = items.filter((i) => i.actionable && i.status === "open")
-        const rounds = [...new Set(open.map((i) => i.pr))]
-            .map((pr) => currentRound(items, pr))
-            .sort((a, b) => a - b)
-        return rounds.length ? rounds[0] : null
-    }
-
     /**
-     * Seal `round` (its items are frozen once its prompt is persisted) and
-     * deliver it under the round dedupe keys; records delivered / failed.
+     * Seal `round` for the PRs in `list` (a PR's items are frozen once its
+     * prompt is persisted; a round can go out PR by PR, so each PR is sealed
+     * on its own) and deliver it under the round dedupe keys; records
+     * delivered / failed.
      * @returns {Promise<{ outcome, error? }>}
      */
     async function deliverRound(taskId, round, list, summary) {
         if (workerService && feedbackPrompt) {
-            const sealed = await sealedRounds(taskId)
-            if (!sealed.has(round))
+            const frozen = await prRoundsWith(taskId, [
+                ROUND_EVENT,
+                ROUND_FAILED_EVENT,
+                ROUND_SEALED_EVENT,
+            ])
+            const fresh = list.filter((i) => !covers(frozen, i.pr, round))
+            if (fresh.length)
                 await store.appendEvent(
                     taskId,
                     {
                         type: ROUND_SEALED_EVENT,
-                        data: { round, items: list.map((i) => i.id) },
+                        data: { round, items: fresh.map((i) => i.id) },
                     },
                     ACTOR
                 )
@@ -1140,7 +1234,7 @@ export function createPrWatcher({
                     conflictPrompt({
                         task,
                         pr: d.pr,
-                        branch: d.branch || task.branch,
+                        branch: pr.headRefName || d.branch || task.branch,
                         base,
                     }),
                     {
@@ -1175,62 +1269,62 @@ export function createPrWatcher({
         }
     }
 
-    /** Deliver the oldest queued round unless an attempted one is open. */
+    /**
+     * Per PR: deliver its current (oldest open) round unless that round was
+     * already sent for it; a PR whose sent round is still open waits, the
+     * others do not. Returns the lowest round delivered, or null.
+     */
     async function maybeDeliver(taskId, summary) {
         const items = await liveFeedback(taskId)
-        const attempted = await attemptedRounds(taskId)
-        const open = items.filter((i) => i.actionable && i.status === "open")
-        if (open.some((i) => attempted.has(i.round))) return null
-        // per PR the current round is its oldest open one (shared helper, so
-        // the worker service's "Address feedback" agrees); rounds are per
-        // task, so the task's current round is the oldest of those
-        const round = oldestOpenRound(items)
-        if (round === null) return null
-        const list = open.filter((i) => i.round === round)
-        const res = await deliverRound(taskId, round, list, summary)
-        if (res.outcome !== "delivered") return null
-        summary.delivered_round = round
-        return round
+        const due = (await prRounds(taskId, items)).filter((w) => !w.attempted)
+        let first = null
+        for (const [round, list] of byRound(due)) {
+            const res = await deliverRound(taskId, round, list, summary)
+            if (res.outcome !== "delivered") continue
+            if (first === null) first = round
+        }
+        if (first !== null) summary.delivered_round = first
+        return first
     }
 
     /**
      * Leo's "Address feedback" click. Goes through the same round queue as
-     * the automatic delivery: the oldest open round only (later rounds keep
-     * waiting), sealed before its prompt is persisted. A round that was
-     * already sent (or failed) is sent again under a fresh key, because the
-     * click is an explicit request.
-     * @returns {Promise<{ round, resent, delivery: { status, error? } }>}
+     * the automatic delivery, per PR: each PR's oldest open round (its later
+     * rounds keep waiting), sealed before its prompt is persisted. A PR
+     * round that was already sent (or failed) is sent again under a fresh
+     * key, because the click is an explicit request.
+     * @returns {Promise<{ round, rounds, resent,
+     *                     delivery: { status, error? } }>}
+     *   round = the lowest round sent; delivery = the worst outcome.
      */
     function addressFeedback(taskId) {
         const id = Number(taskId)
         return serial(id, async () => {
             const summary = { errors: [] }
             const items = await liveFeedback(id)
-            const round = oldestOpenRound(items)
-            if (round === null)
+            const work = await prRounds(id, items)
+            if (!work.length)
                 throw new AppError(
                     "no_open_feedback",
                     `T-${id} has no open feedback`,
                     { status: 409 }
                 )
-            const list = items.filter(
-                (i) => i.actionable && i.status === "open" && i.round === round
-            )
-            const attempted = await attemptedRounds(id)
-            let res
-            let resent = false
-            if (!attempted.has(round)) {
-                res = await deliverRound(id, round, list, summary)
-            } else {
-                resent = true
-                const stamp = clock.now().getTime()
-                res = await deliverItems(
+            const outcomes = []
+            for (const [round, list] of byRound(
+                work.filter((w) => !w.attempted)
+            ))
+                outcomes.push(await deliverRound(id, round, list, summary))
+            const again = work.filter((w) => w.attempted)
+            const stamp = clock.now().getTime()
+            for (const [round, list] of byRound(again)) {
+                const res = await deliverItems(
                     id,
                     list,
                     round,
                     (pr) => `manual-${prKey(pr)}-${round}-${stamp}`,
                     summary
                 )
+                outcomes.push(res)
                 await store.appendEvent(
                     id,
                     {
@@ -1245,6 +1339,7 @@ export function createPrWatcher({
                 )
             }
             emit("feedback.updated", id)
+            const res = worstOutcome(outcomes)
             const status =
                 res.outcome === "delivered"
                     ? "queued"
@@ -1252,8 +1347,9 @@ export function createPrWatcher({
                       ? "failed"
                       : res.outcome
             return {
-                round,
-                resent,
+                round: work[0].round,
+                rounds: [...new Set(work.map((w) => w.round))],
+                resent: again.length > 0,
                 delivery: {
                     status,
                     ...(res.error ? { error: res.error } : {}),
@@ -1470,6 +1566,42 @@ export function createPrWatcher({
         emit("feedback.updated", taskId)
     }
 
+    /**
+     * An open PR's head branch is its deliverable's branch: one recorded
+     * under another branch (moved by an older branch registration) follows
+     * the PR again, and so does the task's branch when it pointed there in
+     * the main repo. Feedback and conflict prompts name this branch.
+     */
+    async function followHead(taskId, d, pr) {
+        const head = pr.headRefName
+        if (!head || head === d.branch) return
+        let from = null
+        await mutateTask(
+            taskId,
+            (task) => {
+                const i = (task.deliverables || []).findIndex(
+                    (x) => x.pr === d.pr
+                )
+                const cur = i >= 0 ? task.deliverables[i] : null
+                if (!cur || cur.merged_at || cur.branch === head) return null
+                from = cur.branch
+                const patch = {
+                    deliverables: task.deliverables.map((x, j) =>
+                        j === i ? { ...x, branch: head } : x
+                    ),
+                }
+                if (task.branch === from && isMainRepo(task, d.repo))
+                    patch.branch = head
+                return patch
+            },
+            { reason: `PR head branch ${head} in ${d.repo}` }
+        )
+        if (from !== null) {
+            log.info({ taskId, pr: d.pr, from, head }, "deliverable branch")
+            d.branch = head
+        }
+    }
+
     async function pollPr(taskId, d, summary, out) {
         const ref = parsePrUrl(d.pr)
         if (!ref) throw new Error(`bad PR url ${d.pr}`)
@@ -1485,6 +1617,7 @@ export function createPrWatcher({
         // state wins when present: a reopened PR may still carry closedAt
         let closed =
             !merged && (pr.state ? pr.state === "CLOSED" : Boolean(pr.closedAt))
+        if (!merged && !closed) await followHead(taskId, d, pr)
         if (!merged && !closed) {
             const fresh = extractItems({
                 pr,
@@ -1715,6 +1848,7 @@ export function createPrWatcher({
         )
             return
         if (await waitForChangeRecord(task, summary)) return
+        if (await waitForManual(task, summary)) return
         // enqueueCloseOut dedupes against a queued/running/parked close_out;
         // after a failed job the next poll retries.
         const { existing } = enqueueCloseOut(jobRunner, taskId)
@@ -1752,6 +1886,34 @@ export function createPrWatcher({
         await notify(
             `T-${task.id}: ${RECORD_REASON}`,
             `All PRs are merged. Fill ${record.missing.join(", ")} in "${record.section}" to close it out.`
+        )
+        return true
+    }
+
+    /**
+     * Every PR is merged but manual deliverables are not checked off: no
+     * close-out yet. Leo is told (Now flag, notification,
+     * close_out_waiting_manual event) once per set of open ones; checking
+     * the last one re-runs the poll, which closes out. True while waiting.
+     */
+    async function waitForManual(task, summary) {
+        const open = openManual(task)
+        if (!open.length) return false
+        const items = open.map((m) => m.id).join(",")
+        summary.manual_open = open.map((m) => m.id)
+        const last = (await store.listEvents(task.id, { limit: 200 })).find(
+            (e) => e.type === "close_out_waiting_manual"
+        )
+        if (last && (last.data && last.data.items) === items) return true
+        await store.appendEvent(
+            task.id,
+            { type: "close_out_waiting_manual", data: { items } },
+            ACTOR
+        )
+        await flagNow(task.id, MANUAL_REASON)
+        await notify(
+            `T-${task.id}: ${MANUAL_REASON}`,
+            `All PRs are merged. Check off: ${open.map((m) => m.text).join("; ")}`
         )
         return true
     }
@@ -2139,6 +2301,132 @@ export function createPrWatcher({
         return res
     }
 
+    // ---- manual deliverables (Leo's checklist) --------------------------
+
+    /** A done or cancelled task takes no manual deliverable changes. */
+    function refuseClosed(task) {
+        if (CLOSED_STATUSES.includes(task.status))
+            throw new AppError(
+                "invalid_state",
+                `T-${task.id} is ${task.status}`,
+                { status: 409 }
+            )
+    }
+
+    /**
+     * Patch for manual deliverables `list`: the "waiting on manual" Now flag
+     * goes once none is open.
+     */
+    function manualPatch(task, list) {
+        const patch = { manual_deliverables: list }
+        if (
+            !list.some((m) => !m.done_at) &&
+            task.flags &&
+            task.flags.now_reason === MANUAL_REASON
+        )
+            patch.flags = { now: false, now_reason: null }
+        return patch
+    }
+
+    /** Re-evaluate the close condition soon, off the request path. */
+    function pollSoon(id, why) {
+        clock.setTimeout(() => {
+            pollTask(id).catch((err) =>
+                log.warn({ err: err.message, id }, `poll after ${why}`)
+            )
+        }, 0)
+    }
+
+    /** Leo adds a manual deliverable (e.g. "install on the farm"). */
+    async function addManual(taskId, text) {
+        const id = Number(taskId)
+        const item = {
+            id: `m${crypto.randomBytes(4).toString("hex")}`,
+            text,
+            created_at: now(),
+            done_at: null,
+        }
+        const task = await serial(id, () =>
+            mutateTask(
+                id,
+                (t) => {
+                    refuseClosed(t)
+                    return manualPatch(t, [
+                        ...(t.manual_deliverables || []),
+                        item,
+                    ])
+                },
+                { actor: "me", reason: `manual deliverable: ${text}` }
+            )
+        )
+        emit("pr.updated", id)
+        return { task, item }
+    }
+
+    /**
+     * Leo checks a manual deliverable off (done) or back on. The last one
+     * checked lets the next poll close the task out.
+     */
+    async function setManual(taskId, itemId, done) {
+        const id = Number(taskId)
+        let text = null
+        const task = await serial(id, () =>
+            mutateTask(
+                id,
+                (t) => {
+                    refuseClosed(t)
+                    const list = t.manual_deliverables || []
+                    const m = list.find((x) => x.id === itemId)
+                    if (!m)
+                        throw new NotFoundError(
+                            `manual deliverable ${itemId} on T-${id}`
+                        )
+                    text = m.text
+                    if (Boolean(m.done_at) === done) return null
+                    return manualPatch(
+                        t,
+                        list.map((x) =>
+                            x === m ? { ...x, done_at: done ? now() : null } : x
+                        )
+                    )
+                },
+                {
+                    actor: "me",
+                    reason: `manual deliverable ${done ? "done" : "not done"}: ${itemId}`,
+                }
+            )
+        )
+        emit("pr.updated", id)
+        if (done) pollSoon(id, "manual deliverable done")
+        return { task, text }
+    }
+
+    /** Leo removes a manual deliverable (no longer needed). */
+    async function removeManual(taskId, itemId) {
+        const id = Number(taskId)
+        const task = await serial(id, () =>
+            mutateTask(
+                id,
+                (t) => {
+                    refuseClosed(t)
+                    const list = t.manual_deliverables || []
+                    if (!list.some((x) => x.id === itemId))
+                        throw new NotFoundError(
+                            `manual deliverable ${itemId} on T-${id}`
+                        )
+                    return manualPatch(
+                        t,
+                        list.filter((x) => x.id !== itemId)
+                    )
+                },
+                { actor: "me", reason: `manual deliverable removed: ${itemId}` }
+            )
+        )
+        emit("pr.updated", id)
+        pollSoon(id, "manual deliverable removed")
+        return { task }
+    }
+
     /** Leo flips a no_action item back to open. */
     function reopenItem(taskId, itemId) {
         const id = Number(taskId)
@@ -2172,8 +2460,15 @@ export function createPrWatcher({
             // Leo's call but sends the worker nothing
             const finished = (await finishedPrs(id)).has(rec.pr)
             if (!finished && ["pr_open", "pr_feedback"].includes(task.status)) {
-                const delivered = await sealedRounds(id)
-                if (delivered.has(rec.round)) {
+                // this PR's prompt for the round is frozen (sent, failed or
+                // persisted while blocked) without the item: send it on its
+                // own. Otherwise the PR's own round queue picks it up.
+                const frozen = await prRoundsWith(id, [
+                    ROUND_EVENT,
+                    ROUND_FAILED_EVENT,
+                    ROUND_SEALED_EVENT,
+                ])
+                if (covers(frozen, rec.pr, rec.round)) {
                     await deliverItems(
                         id,
                         [rec],
@@ -2241,6 +2536,9 @@ export function createPrWatcher({
         claim,
         ownsBranch,
         setNoChange,
+        addManual,
+        setManual,
+        removeManual,
         reopenItem,
         roundResolved,
         candidates,

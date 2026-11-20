@@ -206,6 +206,14 @@ export function changeRecordBlocker(rec) {
         : `add a "${rec.section}" section to the artifact and fill ${labels}`
 }
 
+/**
+ * Manual deliverables not checked off: they keep the task from Done too.
+ * Mirrors server/src/contracts/lifecycle.js openManual.
+ */
+export function openManual(task) {
+    return ((task && task.manual_deliverables) || []).filter((m) => !m.done_at)
+}
+
 /** Deliverables that keep the task from Done. */
 export function blockingDeliverables(task, prs) {
     return ((task && task.deliverables) || []).filter(

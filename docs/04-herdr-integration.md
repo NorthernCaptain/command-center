@@ -128,8 +128,8 @@ the tree AGENTS.md "only on the user's command" rules are satisfied.
 |---|---|---|
 | **Create PR** (click) | `ready_for_pr` | "Create the PR now: follow tree AGENTS.md §5 (pr skill) for each work repo. Put the line `Command-Center-Task: T-123` in each PR description. Then cc_add_link each PR URL." |
 | **PR feedback** (automatic; also a manual **Address feedback** button) | `pr_feedback` | See the template below. |
-| **Clean folders** (click) | `done` | "Clean: follow tree AGENTS.md §6 for slug k7q2." |
-| **Close agent** with **Clean folders** checked (default on a `done` task with folders) | `done` | The same Clean prompt. The session is marked `close_after` with the prompt's outbox row (recorded before the prompt is sent); once that row was sent and the agent has worked and is idle again with no `…--<slug>` folder left, the service closes its workspace. A failed or cancelled prompt cancels the close. Folders left after the turn: the workspace stays open, Now "Clean-up left folders; agent kept open". |
+| **Clean folders** (click) | `done` | "Clean: follow tree AGENTS.md §6 for slug k7q2. Delete in the foreground (never as a background command) and report only once the folders are gone: the workspace closes when you go idle without them." |
+| **Close agent** with **Clean folders** checked (default on a `done` task with folders) | `done` | The same Clean prompt. The session is marked `close_after` with the prompt's outbox row (recorded before the prompt is sent); once that row was sent and the agent has worked and is idle again with no `…--<slug>` folder left, the service closes its workspace. A failed or cancelled prompt cancels the close. Folders left after the turn: the workspace stays open, Now "Clean-up left folders; agent kept open" (raised once), and the close stays pending: the agent's next turn (e.g. a background deletion that finishes and wakes it) is checked again, and its workspace closes once the folders are gone. |
 | Task moved to `done` (close-out or Done) or `cancelled`, setting `workers.auto_clean_on_done` on (default) | `done`, `cancelled` | The same as **Close agent** + **Clean folders**, by the service (event `agent_close_requested` with `auto: true`). A busy or blocked agent gets the prompt once it is idle (the close stays pending). No folders: an idle agent is closed (`agent_closed` with `after: "done"`). No live agent but folders left: the agent is started again (resumed, or relaunched with a clean-up-only prompt) for the clean-up, then closed (`agent_cleanup_started`). An agent that is gone or busy without folders is skipped (`agent_auto_close_skipped`). On `cancelled` the Clean prompt is forced: the folders go even with uncommitted or unpushed work. |
 | **Send to agent** (inline comment) | any active | "Re T-123 artifact, about '<quote>': <comment>" |
 
@@ -165,8 +165,10 @@ force-push), don't do it. Ask me here instead.
 
 Delivery: automatic as soon as the watcher records actionable items (queued
 until the agent is idle; the agent is revived if gone). If a new round
-arrives while the agent is still on the previous one, it is queued and
-sent after the agent's `cc_feedback` calls for the current round.
+arrives while the agent is still on the previous one for the same PR, it is
+queued and sent after the agent's `cc_feedback` calls for that PR's current
+round. Rounds are gated per PR: a round still open on one PR (say, waiting
+for Leo) never holds back feedback on another PR of the task.
 
 Delivery rules:
 - Send only when the agent is `idle`/`done`. If it is `working`, queue it
@@ -198,12 +200,22 @@ by the same kind. If the kind was switched since (e.g. out of Claude
 credits → Codex), or there is no session id, start fresh with the artifact,
 the folder names and the feedback history as context.
 
-## Worker kind: Claude or Codex
+## Worker kind: Claude, Klaude or Codex
 
 Default worker is **Claude**. I can switch to **Codex** at any time, for
-example when Claude credits run out:
+example when Claude credits run out, or to **Klaude**: Claude Code signed
+in with a second account.
 
-- **Global default** in Settings (`workers.default_kind = claude | codex`)
+- **Klaude** is a kind of its own (task `worker_kind`, sessions, review
+  agents, usage limits per kind), run as herdr's `claude` kind (the same
+  CLI, flags, resume and MCP args) in a workspace whose env comes from
+  config `agents.klaude.env` (default `CLAUDE_CONFIG_DIR=~/.claude-klaude`,
+  the second account's login; the shared settings, skills and hooks are
+  symlinks there). A Claude session is only resumed by its own kind (the
+  session lives in that account's config dir), and a running agent of
+  the other account is never adopted.
+- **Global default** in Settings (`workers.default_kind = claude | klaude |
+  codex`)
   and a **per-task override** on the task page. It applies to the next
   launch or revive. A running agent is never swapped mid-session.
 - The service tells me when a Claude worker hits usage limits. herdr's

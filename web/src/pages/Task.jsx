@@ -57,6 +57,7 @@ import {
 import { snoozeTask } from "../lib/snooze.js"
 import {
     blockingDeliverables,
+    openManual,
     changeRecordBlocker,
     clearsWhenSeen,
     actionToast,
@@ -301,6 +302,7 @@ export default function TaskPage({ id }) {
         files: (data.files || []).length,
         deliverables:
             blockingDeliverables(task, data.prs).length +
+            openManual(task).length +
             (changeRecordBlocker(data.change_record) ? 1 : 0),
     }
 
@@ -505,6 +507,20 @@ export default function TaskPage({ id }) {
             if (res && res.task)
                 setData((prev) => ({ ...prev, task: res.task }))
             toast.success(`${repo}: no change`)
+            reload()
+        } catch (err) {
+            toast.error(err)
+            throw err
+        }
+    }
+
+    /** Manual deliverables: each call returns { task }. */
+    async function manualOp(fn, message) {
+        try {
+            const res = await fn()
+            if (res && res.task)
+                setData((prev) => ({ ...prev, task: res.task }))
+            if (message) toast.success(message)
             reload()
         } catch (err) {
             toast.error(err)
@@ -758,8 +774,24 @@ export default function TaskPage({ id }) {
                 prs={data.prs}
                 changeRecord={data.change_record}
                 candidates={data.pr_candidates}
+                manual={task.manual_deliverables}
                 onNoChange={noChange}
                 onClaim={claim}
+                onAddManual={(text) =>
+                    manualOp(
+                        () => api.addManualDeliverable(id, text),
+                        "Manual deliverable added"
+                    )
+                }
+                onSetManual={(itemId, done) =>
+                    manualOp(() => api.setManualDeliverable(id, itemId, done))
+                }
+                onRemoveManual={(itemId) =>
+                    manualOp(
+                        () => api.removeManualDeliverable(id, itemId),
+                        "Manual deliverable removed"
+                    )
+                }
             />
         ) : currentTab === "feedback" ? (
             <FeedbackPanel feedback={data.feedback} onReopen={reopenFeedback} />

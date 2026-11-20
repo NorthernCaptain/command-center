@@ -24,7 +24,11 @@
 // recorded as "asana_completed".
 
 import { z } from "zod"
-import { canTransition, openDeliverables } from "../../contracts/lifecycle.js"
+import {
+    canTransition,
+    openDeliverables,
+    openManual,
+} from "../../contracts/lifecycle.js"
 import { AppError } from "../../util/errors.js"
 import {
     assertChangeRecord,
@@ -79,6 +83,15 @@ export function assertClosable(task) {
             { status: 409 }
         )
     }
+    const manual = openManual(task)
+    if (manual.length)
+        throw new AppError(
+            "deliverables_open",
+            `T-${task.id} has manual deliverables not checked off: ${manual
+                .map((m) => m.text)
+                .join(", ")}`,
+            { status: 409 }
+        )
 }
 
 /**

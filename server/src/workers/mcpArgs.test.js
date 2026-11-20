@@ -36,6 +36,14 @@ describe("mcpLaunchArgs", () => {
         expect(args).not.toContain("--strict-mcp-config")
     })
 
+    test("klaude: the same MCP setup as claude (it runs the claude CLI)", () => {
+        const opts = { url: URL_, headersHelper: "/h.sh" }
+        expect(mcpLaunchArgs("klaude", opts)).toEqual(
+            mcpLaunchArgs("claude", opts)
+        )
+        expect(mcpLaunchArgs("klaude", opts)).not.toEqual([])
+    })
+
     test("codex: -c overrides reading the token and task from the env", () => {
         expect(mcpLaunchArgs("codex", { url: URL_ })).toEqual([
             "-c",
@@ -64,6 +72,7 @@ describe("mcpLaunchArgs", () => {
             "check_for_update_on_startup=false",
         ])
         expect(quietLaunchArgs("claude")).toEqual([])
+        expect(quietLaunchArgs("klaude")).toEqual([])
     })
 
     test("other kinds or no url: nothing", () => {

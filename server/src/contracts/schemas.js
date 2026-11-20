@@ -7,6 +7,7 @@
 // schemas. See docs/implementation/contracts.md for the semantics.
 
 import { z } from "zod"
+import { AGENT_KINDS } from "./agentKinds.js"
 
 export const STATUSES = [
     "inbox",
@@ -55,7 +56,7 @@ export const LINK_TYPES = [
 export const VISIBILITY = ["auto", "shared", "private"]
 export const COMMENT_INTENTS = ["note", "ask", "change", "chat"]
 export const COMMENT_STATUSES = ["open", "working", "resolved", "orphaned"]
-export const WORKER_KINDS = ["claude", "codex"]
+export const WORKER_KINDS = AGENT_KINDS
 
 const isoDate = z.string().datetime({ offset: true })
 
@@ -98,6 +99,17 @@ export const DeliverableSchema = z.object({
     merged_at: isoDate.nullable().default(null),
 })
 
+/**
+ * A deliverable outside any repo (a manual install after merge, say): Leo
+ * checks it off. An unchecked one blocks Done like an unmerged PR.
+ */
+export const ManualDeliverableSchema = z.object({
+    id: z.string().min(1).max(40),
+    text: z.string().min(1).max(300),
+    created_at: isoDate,
+    done_at: isoDate.nullable().default(null),
+})
+
 export const AnchorSchema = z.object({
     section: z.string().nullable().default(null),
     exact: z.string().min(1),
@@ -125,6 +137,7 @@ export const TaskSchema = z.object({
     branch: z.string().nullable().default(null),
     slug: z.string().nullable().default(null),
     deliverables: z.array(DeliverableSchema).default([]),
+    manual_deliverables: z.array(ManualDeliverableSchema).default([]),
     asana: z
         .object({
             gid: z.string().nullable().default(null),

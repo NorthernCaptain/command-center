@@ -33,28 +33,31 @@ export const USAGE_LIMIT_ERROR = "usage limit"
  * configuration. The web client imports this list too (keep this module
  * free of node and zod imports).
  */
+const CLAUDE_MODELS = [
+    {
+        id: "opus-medium",
+        model: "opus",
+        effort: "medium",
+        label: "Opus, medium",
+    },
+    { id: "opus-high", model: "opus", effort: "high", label: "Opus, high" },
+    {
+        id: "sonnet-high",
+        model: "sonnet",
+        effort: "high",
+        label: "Sonnet, high",
+    },
+    {
+        id: "sonnet-xhigh",
+        model: "sonnet",
+        effort: "xhigh",
+        label: "Sonnet, xhigh",
+    },
+]
 export const REVIEW_MODELS = {
-    claude: [
-        {
-            id: "opus-medium",
-            model: "opus",
-            effort: "medium",
-            label: "Opus, medium",
-        },
-        { id: "opus-high", model: "opus", effort: "high", label: "Opus, high" },
-        {
-            id: "sonnet-high",
-            model: "sonnet",
-            effort: "high",
-            label: "Sonnet, high",
-        },
-        {
-            id: "sonnet-xhigh",
-            model: "sonnet",
-            effort: "xhigh",
-            label: "Sonnet, xhigh",
-        },
-    ],
+    claude: CLAUDE_MODELS,
+    // the second Claude account: the same models
+    klaude: CLAUDE_MODELS,
     codex: [
         {
             id: "terra-medium",
@@ -78,8 +81,12 @@ export const REVIEW_MODELS = {
 }
 export const DEFAULT_REVIEW_MODEL = "default"
 export const REVIEW_MODEL_IDS = [
-    DEFAULT_REVIEW_MODEL,
-    ...Object.values(REVIEW_MODELS).flatMap((list) => list.map((m) => m.id)),
+    ...new Set([
+        DEFAULT_REVIEW_MODEL,
+        ...Object.values(REVIEW_MODELS).flatMap((list) =>
+            list.map((m) => m.id)
+        ),
+    ]),
 ]
 
 /** The review model `id` of agent `kind`, or null (default / another kind's). */

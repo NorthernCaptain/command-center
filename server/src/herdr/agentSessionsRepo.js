@@ -7,10 +7,11 @@
 // ended_at IS NULL; at most one live row per task (enforced here: create()
 // ends the previous live row with state "replaced").
 
+import { AGENT_KINDS } from "../contracts/agentKinds.js"
 import { ValidationError } from "../util/errors.js"
 import { systemClock } from "../util/clock.js"
 
-export const SESSION_KINDS = ["claude", "codex"]
+export const SESSION_KINDS = AGENT_KINDS
 
 function toSession(row) {
     if (!row) return null

@@ -614,7 +614,7 @@ describe("cc_add_link: branch of a claimed PR", () => {
         )
     })
 
-    test("with a follow-up PR's deliverable only the repo's current one moves", async () => {
+    test("a new branch next to an open PR is a pending follow-up; the PR keeps its head", async () => {
         const merged = {
             repo: "aws-lambda",
             branch: BRANCH,
@@ -642,9 +642,12 @@ describe("cc_add_link: branch of a claimed PR", () => {
             repo: "aws-lambda",
         })
         let t = await getTask()
-        expect(t.deliverables.map((d) => [d.pr, d.branch])).toEqual([
-            [merged.pr, BRANCH],
-            [open.pr, "fix/next"],
+        expect(
+            t.deliverables.map((d) => [d.pr, d.branch, d.disposition])
+        ).toEqual([
+            [merged.pr, BRANCH, "pr"],
+            [open.pr, BRANCH, "pr"],
+            [null, "fix/next", "pending"],
         ])
         const r = await tools.cc_add_link({
             task_id: id,
@@ -654,15 +657,62 @@ describe("cc_add_link: branch of a claimed PR", () => {
             branch: "fix/later",
         })
         expect(r.ok).toBe(true)
+        // the pending follow-up is the one in work: it moves
         expect(r.deliverable).toMatchObject({
-            pr: open.pr,
+            pr: null,
             branch: "fix/later",
         })
         t = await getTask()
         expect(t.deliverables.map((d) => [d.pr, d.branch])).toEqual([
             [merged.pr, BRANCH],
-            [open.pr, "fix/later"],
+            [open.pr, BRANCH],
+            [null, "fix/later"],
         ])
+    })
+
+    test("a work folder on a new branch next to an open PR adds a pending follow-up", async () => {
+        const open = {
+            repo: "aws-lambda",
+            branch: BRANCH,
+            role: "work",
+            created_at: "2026-11-07T11:00:00.000Z",
+            disposition: "pr",
+            pr: "https://github.com/acme/aws-lambda/pull/2",
+            claimed_at: "2026-11-07T12:00:00.000Z",
+            merged_at: null,
+        }
+        await store.updateTask(id, { deliverables: [open] }, { actor: "me" })
+        const r = await tools.cc_add_link({
+            task_id: id,
+            type: "folder",
+            url: `/Users/me/work/tree/aws-lambda--fix-mirror--k7q2`,
+            role: "work",
+            branch: "fix/mirror",
+        })
+        expect(r.ok).toBe(true)
+        expect(r.deliverable).toMatchObject({
+            pr: null,
+            branch: "fix/mirror",
+            disposition: "pending",
+        })
+        const t = await getTask()
+        expect(t.deliverables.map((d) => [d.pr, d.branch])).toEqual([
+            [open.pr, BRANCH],
+            [null, "fix/mirror"],
+        ])
+        // a folder without a branch named falls to the repo's current
+        // deliverable: the pending follow-up
+        const again = await tools.cc_add_link({
+            task_id: id,
+            type: "folder",
+            url: `/Users/me/work/tree/aws-lambda--${BRANCH}--k7q2`,
+            role: "work",
+        })
+        expect(again.ok).toBe(true)
+        expect(again.deliverable).toMatchObject({
+            pr: null,
+            branch: "fix/mirror",
+        })
     })
 
     test("merged deliverables keep their branch; a new branch after them is a pending follow-up", async () => {
@@ -1753,6 +1803,38 @@ describe("cc_report", () => {
         ])
     })
 
+    test("no_change_repos skips a repo whose deliverable Leo dropped", async () => {
+        const t4 = await seedTask({ deliverables: [dlv("aws-lambda")] })
+        await store.appendEvent(
+            t4,
+            {
+                type: "deliverable_dropped",
+                data: { repo: "mobile-old", reason: "repo removed" },
+            },
+            "me"
+        )
+        const r = await tools.cc_report({
+            task_id: t4,
+            status: "ready_for_pr",
+            summary: "done",
+            work_repos: ["aws-lambda"],
+            no_change_repos: ["Mobile-Old"],
+        })
+        expect(r.ok).toBe(true)
+        // a repo never on the task is still an error
+        await expectError(
+            tools.cc_report({
+                task_id: t4,
+                status: "ready_for_pr",
+                summary: "done",
+                work_repos: ["aws-lambda"],
+                no_change_repos: ["web-trace"],
+            }),
+            "validation",
+            400
+        )
+    })
+
     test("no_change_repos is rejected for other statuses, unknown repos, overlaps and PRs", async () => {
         const t3 = await seedTask({
             deliverables: [
@@ -1926,6 +2008,30 @@ describe("cc_feedback", () => {
             "validation",
             400
         )
+    })
+
+    test("round_resolved is per PR: another PR's open item in the round does not count", async () => {
+        await store.appendFeedback(
+            id,
+            item({
+                id: "gh-rc-77",
+                kind: "review_comment",
+                pr: "https://github.com/acme/other/pull/5",
+                url: "https://github.com/acme/other/pull/5#x",
+            })
+        )
+        await fb({
+            item_id: "ci-unit-abc1234",
+            status: "fixed",
+            commit: "abc1234",
+        })
+        const r = await fb({
+            item_id: "gh-rc-1",
+            status: "answered",
+            reply_url: "https://github.com/x#r2",
+        })
+        expect(r.round_resolved).toBe(true)
+        expect(deps.prWatcher.roundResolved).toHaveBeenCalledWith(id)
     })
 
     test("resolving the last open item of a round calls roundResolved", async () => {

@@ -11,6 +11,7 @@
 // Every run state change goes through one serial chain, so the slot count
 // and the queue never race.
 
+import { baseKind } from "../contracts/agentKinds.js"
 import nodeFs from "node:fs"
 import path from "node:path"
 import {
@@ -87,7 +88,7 @@ export const REVIEW_AGENT_ENV = { REVIEW_ORCH_SKIP: "1" }
  * only in the reviews folder) while gh works and clones over SSH.
  */
 export function reviewSandboxArgs(kind) {
-    return kind === "codex"
+    return baseKind(kind) === "codex"
         ? [
               "--sandbox",
               "workspace-write",
@@ -103,7 +104,7 @@ export function reviewSandboxArgs(kind) {
 export function reviewModelArgs(kind, id) {
     const m = reviewModel(kind, id)
     if (!m) return []
-    return kind === "codex"
+    return baseKind(kind) === "codex"
         ? [
               "-m",
               m.model,
@@ -999,8 +1000,9 @@ export function createReviewService({
             const ws = await herdr.workspaceCreate({
                 cwd: dir,
                 label: title,
+                // agentEnv(kind): the kind's account too (klaude)
                 env: {
-                    ...agentEnv(),
+                    ...agentEnv(kind),
                     ...REVIEW_AGENT_ENV,
                     CC_REVIEW_ID: String(run.id),
                 },
@@ -1013,14 +1015,14 @@ export function createReviewService({
             if (await cancelled()) return
             await herdr.agentStart({
                 name,
-                kind,
+                kind: baseKind(kind),
                 paneId: ws.paneId,
                 args: [
                     ...mcpArgs(kind),
                     ...quietLaunchArgs(kind),
                     ...reviewSandboxArgs(kind),
                     ...reviewModelArgs(kind, run.agent_model),
-                    ...(kind === "claude" ? ["--name", title] : []),
+                    ...(baseKind(kind) === "claude" ? ["--name", title] : []),
                 ],
                 timeoutMs: startTimeoutMs,
             })

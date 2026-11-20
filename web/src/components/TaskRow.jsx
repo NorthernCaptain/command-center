@@ -17,7 +17,7 @@ import {
 } from "../lib/constants.js"
 import { formatDue, relativeTime } from "../lib/time.js"
 import { taskPrs } from "../lib/links.js"
-import { blockingDeliverables } from "../lib/worker.js"
+import { blockingDeliverables, openManual } from "../lib/worker.js"
 
 const START_STATUSES = ["inbox", "ready", "active"]
 const SOURCE_PILL = { slack: "Slack" }
@@ -41,14 +41,17 @@ export const PR_BADGES = {
 }
 
 /**
- * What the row offers. done: no deliverable blocks Done (it would fail
+ * What the row offers. done: no deliverable (repo or manual) blocks Done (it would fail
  * otherwise); start: a repo is set, no agent runs and Start is possible.
  */
 export function rowActions(task, agent, features = {}) {
     const open = isOpenStatus(task.status)
     const live = isLiveAgent(agent)
     return {
-        done: open && blockingDeliverables(task, []).length === 0,
+        done:
+            open &&
+            blockingDeliverables(task, []).length === 0 &&
+            openManual(task).length === 0,
         start:
             Boolean(features.workers) &&
             START_STATUSES.includes(task.status) &&

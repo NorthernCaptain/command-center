@@ -69,6 +69,7 @@ import {
 import { createGithub } from "./github/index.js"
 import { createReviews } from "./reviews/index.js"
 import { mcpLaunchArgs, REVIEW_HEADER_ENV } from "./workers/mcpArgs.js"
+import { kindEnv } from "./contracts/agentKinds.js"
 import { createPhase3 } from "./phase3/index.js"
 import { startListeners } from "./http/server.js"
 import { createTaskFiles } from "./files/taskFiles.js"
@@ -402,7 +403,8 @@ export function createSystem({ config, overrides = {} }) {
         bus,
         clock,
         log,
-        agentEnv: () => ({
+        agentEnv: (kind) => ({
+            ...kindEnv(kind, config.agents),
             CC_URL: `http://127.0.0.1:${localPort}`,
             CC_TOKEN: auth.localToken() || "",
         }),

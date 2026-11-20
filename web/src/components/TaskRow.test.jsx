@@ -40,6 +40,29 @@ function renderRow(task, { agent, features = ALL_FEATURES, role } = {}) {
     return handlers
 }
 
+describe("rowActions: manual deliverables", () => {
+    test("an unchecked manual deliverable hides Done", () => {
+        const m = (done_at) => ({
+            id: "m1",
+            text: "Install",
+            created_at: "2026-11-07T09:00:00.000Z",
+            done_at,
+        })
+        expect(
+            rowActions(sampleTask({ manual_deliverables: [m(null)] }), null)
+                .done
+        ).toBe(false)
+        expect(
+            rowActions(
+                sampleTask({
+                    manual_deliverables: [m("2026-11-07T10:00:00.000Z")],
+                }),
+                null
+            ).done
+        ).toBe(true)
+    })
+})
+
 describe("rowActions", () => {
     const W = { workers: true }
     it("Done only when no deliverable blocks it", () => {

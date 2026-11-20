@@ -246,7 +246,7 @@ export function isForcedClean(text) {
 }
 
 export function cleanPrompt({ task }) {
-    const base = `Clean: follow tree AGENTS.md §6 for slug ${task.slug}.`
+    const base = `Clean: follow tree AGENTS.md §6 for slug ${task.slug}. Delete in the foreground (never as a background command) and report only once the folders are gone: the workspace closes when you go idle without them.`
     if (task.status !== "cancelled") return base
     return [
         `T-${task.id} was cancelled: stop any work on it.`,

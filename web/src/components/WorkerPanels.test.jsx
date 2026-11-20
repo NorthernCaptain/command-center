@@ -168,6 +168,15 @@ describe("AgentPanel", () => {
         expect(
             screen.getByText("No live agent. Last worker: Codex.")
         ).toBeInTheDocument()
+        rerender(
+            <AgentPanel
+                agent={null}
+                task={sampleTask({ worker_kind: "klaude" })}
+            />
+        )
+        expect(
+            screen.getByText("No live agent. Last worker: Klaude.")
+        ).toBeInTheDocument()
         rerender(<AgentPanel agent={null} task={sampleTask()} />)
         expect(screen.getByText("No live agent.")).toBeInTheDocument()
         rerender(
@@ -247,6 +256,110 @@ describe("DeliverablesPanel", () => {
         )
         expect(
             screen.getByText("None found on the task branches.")
+        ).toBeInTheDocument()
+    })
+
+    it("manual deliverables: add, check off, uncheck, remove", async () => {
+        const onAddManual = jest
+            .fn()
+            .mockRejectedValueOnce(new Error("no"))
+            .mockResolvedValueOnce()
+        const onSetManual = jest.fn(async () => {})
+        const onRemoveManual = jest.fn(async () => {})
+        const manual = [
+            { id: "m1", text: "Install on the farm", done_at: null },
+            { id: "m2", text: "Tell QA", done_at: "2026-11-07T08:00:00Z" },
+        ]
+        render(
+            <DeliverablesPanel
+                deliverables={[]}
+                candidates={[]}
+                manual={manual}
+                onNoChange={jest.fn()}
+                onClaim={jest.fn()}
+                onAddManual={onAddManual}
+                onSetManual={onSetManual}
+                onRemoveManual={onRemoveManual}
+            />
+        )
+        // the summary counts the open one
+        expect(screen.getByText("1 of 2 block Done")).toBeInTheDocument()
+        expect(
+            screen.getByText("manual: Install on the farm (not checked off)")
+        ).toBeInTheDocument()
+        expect(screen.getByText("blocks Done")).toBeInTheDocument()
+        expect(screen.getByText(/^done /)).toBeInTheDocument()
+        const install = screen.getByRole("checkbox", {
+            name: "Install on the farm",
+        })
+        const qa = screen.getByRole("checkbox", { name: "Tell QA" })
+        expect(install).not.toBeChecked()
+        expect(qa).toBeChecked()
+        fireEvent.click(install)
+        await waitFor(() =>
+            expect(onSetManual).toHaveBeenCalledWith("m1", true)
+        )
+        await waitFor(() => expect(qa).not.toBeDisabled())
+        fireEvent.click(qa)
+        await waitFor(() =>
+            expect(onSetManual).toHaveBeenLastCalledWith("m2", false)
+        )
+        await waitFor(() => expect(qa).not.toBeDisabled())
+        fireEvent.click(screen.getByRole("button", { name: "Remove Tell QA" }))
+        await waitFor(() => expect(onRemoveManual).toHaveBeenCalledWith("m2"))
+
+        const input = screen.getByLabelText("Manual deliverable")
+        const add = screen.getByRole("button", { name: "Add" })
+        expect(add).toBeDisabled()
+        fireEvent.submit(add.closest("form")) // empty: ignored
+        expect(onAddManual).not.toHaveBeenCalled()
+        fireEvent.change(input, { target: { value: " Restart the box " } })
+        await waitFor(() => expect(add).not.toBeDisabled())
+        fireEvent.click(add)
+        await waitFor(() =>
+            expect(onAddManual).toHaveBeenCalledWith("Restart the box")
+        )
+        // rejected: the text stays for another try
+        await waitFor(() => expect(add).not.toBeDisabled())
+        expect(input).toHaveValue(" Restart the box ")
+        fireEvent.click(add)
+        await waitFor(() => expect(input).toHaveValue(""))
+    })
+
+    it("summary: every manual deliverable checked off clears it", () => {
+        render(
+            <DeliverablesSummary
+                deliverables={[
+                    {
+                        repo: "a",
+                        branch: "b",
+                        disposition: "pr",
+                        merged_at: "2026-11-07T08:00:00Z",
+                    },
+                ]}
+                manual={[
+                    { id: "m1", text: "x", done_at: "2026-11-07T08:00:00Z" },
+                ]}
+            />
+        )
+        expect(
+            screen.getByText(
+                "✓ All 2 done (merged, no change or checked off): nothing blocks Done."
+            )
+        ).toBeInTheDocument()
+    })
+
+    it("no manual deliverables: the hint", () => {
+        render(
+            <DeliverablesPanel
+                deliverables={[]}
+                candidates={[]}
+                onNoChange={jest.fn()}
+                onClaim={jest.fn()}
+            />
+        )
+        expect(
+            screen.getByText(/Add one for work outside the PRs/)
         ).toBeInTheDocument()
     })
 

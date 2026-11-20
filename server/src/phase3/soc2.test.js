@@ -84,6 +84,99 @@ describe("parseChangeRecord", () => {
         expect(r.missing).toEqual(["why", "risk", "rollback", "tested"])
     })
 
+    test("values nested under a label count, and stay part of it", () => {
+        const body = [
+            "## Change record (SOC2)",
+            "- What: move previews to a wildcard",
+            "  - infrastructure: a new zone",
+            "    - Tailscale: split nameserver",
+            "- Why: cert limit",
+            "- Risk: Medium.",
+            "- Rollback:",
+            "  1. Publish the previous images.",
+            "  2. Redeploy.",
+            "",
+            "  The zones are inert without those.",
+            "- Tested:",
+            "  - Before merge: CI green",
+            "    - jest 10/10",
+            "- Approved by:",
+            "  <!-- who -->",
+            "- Evidence:",
+            "not nested, ends Evidence",
+            "  - stray: line",
+        ].join("\n")
+        const r = parseChangeRecord(body)
+        expect(r.missing).toEqual([])
+        expect(r.fields.what).toBe(
+            "move previews to a wildcard\n- infrastructure: a new zone\n" +
+                "  - Tailscale: split nameserver"
+        )
+        expect(r.fields.rollback).toBe(
+            "1. Publish the previous images.\n2. Redeploy.\n\n" +
+                "The zones are inert without those."
+        )
+        expect(r.fields.tested).toBe("- Before merge: CI green\n  - jest 10/10")
+        expect(r.fields.approved_by).toBe("")
+        expect(r.fields.evidence).toBe("")
+        // Nested "label: value" lines are not fields of their own.
+        expect(Object.keys(r.fields)).toEqual([
+            "what",
+            "why",
+            "risk",
+            "rollback",
+            "tested",
+            "approved_by",
+            "evidence",
+        ])
+    })
+
+    test("an empty label stays missing when only an unindented line follows", () => {
+        const body = [
+            "## Change record (SOC2)",
+            "- What: x",
+            "- Why: y",
+            "- Risk: z",
+            "- Rollback:",
+            "restore it",
+            "- Tested: yes",
+        ].join("\n")
+        expect(parseChangeRecord(body).missing).toEqual(["rollback"])
+    })
+
+    test("nested placeholders stay missing", () => {
+        const body = [
+            "## Change record (SOC2)",
+            "- What: x",
+            "- Why: y",
+            "- Risk: z",
+            "- Rollback:",
+            "  - TBD",
+            "  1. …",
+            "- Tested:",
+            "  …",
+            "  <!-- how -->",
+        ].join("\n")
+        expect(parseChangeRecord(body).missing).toEqual(["rollback", "tested"])
+    })
+
+    test("labels nested under an intro line still count", () => {
+        const body = [
+            "## Change record (SOC2)",
+            "- Fields:",
+            "  - What: x",
+            "  - Why: y",
+            "  - Risk: z",
+            "  - Rollback:",
+            "    1. revert",
+            "  - Tested: CI",
+        ].join("\n")
+        const r = parseChangeRecord(body)
+        expect(r.missing).toEqual([])
+        expect(r.fields.fields).toBe("")
+        expect(r.fields.rollback).toBe("1. revert")
+    })
+
     test("missing section and empty artifacts", () => {
         expect(parseChangeRecord("# T-1\n\n## Plan\n- What: x")).toEqual({
             present: false,
@@ -341,7 +434,7 @@ describe("toMarkdown", () => {
                         why: "y",
                         risk: "r",
                         rollback: "b",
-                        tested: "t",
+                        tested: "1. step\n2. step",
                         evidence: "",
                         ticket: "SEC-1",
                         other: "",
@@ -383,6 +476,7 @@ describe("toMarkdown", () => {
         expect(md).toContain("## T-5 — Rotate\nkeys")
         expect(md).toContain("- Asana: https://asana/9")
         expect(md).toContain("- What: w\n- Why: y\n- Risk: r")
+        expect(md).toContain("- Tested: 1. step\n  2. step")
         expect(md).toContain("- Evidence: —")
         expect(md).not.toContain("- Approved by:")
         expect(md).toContain("- ticket: SEC-1")

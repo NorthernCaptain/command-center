@@ -6,6 +6,10 @@
 // Review models come from their server contract (plain, no zod): one list
 // for the Settings choices and the server's validation.
 import {
+    AGENT_KIND_LABELS,
+    AGENT_KINDS,
+} from "../../../server/src/contracts/agentKinds.js"
+import {
     DEFAULT_REVIEW_MODEL,
     REVIEW_MODELS,
     reviewModel,
@@ -51,7 +55,8 @@ export const LANES = [
     "done",
 ]
 export const PROVIDERS = ["claude-sdk", "claude-cli", "codex"]
-export const WORKER_KINDS = ["claude", "codex"]
+export const WORKER_KINDS = AGENT_KINDS
+export { AGENT_KIND_LABELS }
 /** "claude (Opus, high)", or just the kind on its default model. */
 export function reviewAgentLabel(kind, id) {
     const m = reviewModel(kind, id)

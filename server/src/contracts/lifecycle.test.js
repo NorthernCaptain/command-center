@@ -15,6 +15,9 @@ import {
     snoozePatch,
     withSnoozeFlags,
     openDeliverables,
+    openManual,
+    doneBlockers,
+    MANUAL_REASON,
     canCreatePr,
     currentDeliverable,
     latestDeliverable,
@@ -175,6 +178,37 @@ describe("openDeliverables", () => {
         expect(openDeliverables({ deliverables: [a, m, n] })).toEqual([a])
         expect(openDeliverables({})).toEqual([])
         expect(openDeliverables(null)).toEqual([])
+    })
+})
+
+describe("manual deliverables", () => {
+    const open = { id: "m1", text: "Install", done_at: null }
+    const done = { id: "m2", text: "Tell QA", done_at: "t" }
+
+    test("openManual: the unchecked ones", () => {
+        expect(openManual({ manual_deliverables: [open, done] })).toEqual([
+            open,
+        ])
+        expect(openManual({})).toEqual([])
+        expect(openManual(null)).toEqual([])
+    })
+
+    test("doneBlockers lists repo deliverables, then manual ones", () => {
+        const d = {
+            repo: "web",
+            branch: "t1",
+            merged_at: null,
+            disposition: "pr",
+        }
+        expect(
+            doneBlockers({
+                deliverables: [d],
+                manual_deliverables: [open, done],
+            })
+        ).toBe("web@t1, manual: Install")
+        expect(doneBlockers({ manual_deliverables: [done] })).toBeNull()
+        expect(doneBlockers(null)).toBeNull()
+        expect(MANUAL_REASON).toBe("Manual deliverables left")
     })
 })
 

@@ -52,7 +52,7 @@ describe("github index", () => {
         ).toBeNull()
         const api = express.Router()
         mod.mount(api, { parse: () => ({}), parseTaskId: Number })
-        expect(api.stack.length).toBe(4)
+        expect(api.stack.length).toBe(7)
         expect(await mod.taskExtras(1, {})).toEqual({
             prs: [],
             pr_candidates: [],

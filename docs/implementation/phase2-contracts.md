@@ -329,8 +329,9 @@ Rules (docs 03/04 are the spec):
 - `cc_feedback`: item must exist and be `open`; status ∈ fixed | answered |
   declined; `fixed` needs `commit`; comment/review kinds need `reply_url`;
   `ci_failure` allows `fixed` (commit) or `declined` (reply_url). Appends
-  the item record (`verified:false`). When every item of the round is
-  resolved → `prWatcher.roundResolved(taskId)` (status back to `pr_open`).
+  the item record (`verified:false`). When every item of the round on that
+  item's PR is resolved → `prWatcher.roundResolved(taskId)` (status back to
+  `pr_open` once no PR has open items).
 - `cc_schedule`: `at` is ISO or a phrase (dateParser); `action ∈
   surface | prompt_agent | center_job`; `prompt` required for `prompt_agent`.
 - `cc_create_task`: capture with `source_type:"manual"`, text = title +
@@ -449,8 +450,11 @@ attached; a PR that is already merged is recorded as merged at claim time
    `open`), status → `pr_feedback`, `flags.now`, notify, and
    `workerService.deliver(feedbackPrompt, { reason:"pr_feedback",
    dedupeKey:"round-<pr>-<round>" })`. If a round is still open, the new
-   items join a **queued** round: delivered after the current one resolves
-   (`roundResolved` triggers it).
+   items join a **queued** round. Round numbers are per task, the gating is
+   per PR: each PR's oldest open round is sent unless it was already sent
+   for that PR, so a PR waits only for its own open round (`roundResolved`
+   triggers the next). "Address feedback" does the same per PR and re-sends
+   a PR round that was already sent.
 4. **Verification** of agent-resolved items (`verified:false`, status
    fixed/answered/declined), per the doc 03 table: `fixed` → the commit
    exists on the PR (`commitsSince`), and for `ci_failure` the same check
@@ -513,7 +517,11 @@ timestamp, file, dashboardUrl } | null` — reads the newest
    })`. The scheduler gets `workerService` injected late (like `jobRunner`).
 2. **SOC2 change record** (`soc2.js`): for tasks with `area ∈ SOC2_AREAS`
    the artifact's "Change record (SOC2)" section must contain non-empty
-   `What:`, `Why:`, `Risk:`, `Rollback:`, `Tested:` lines before **done**.
+   `What:`, `Why:`, `Risk:`, `Rollback:`, `Tested:` labels before **done**.
+   A label's value is the text on its line plus any lines nested deeper
+   under it (sub-items, numbered steps, indented paragraphs), so
+   `- Rollback:` followed by indented steps counts as filled. Nested
+   `x: y` lines belong to their label, not fields of their own.
    `assertChangeRecord(task, artifact)` throws 409 `change_record_missing`
    listing missing fields; called from `close_out.assertClosable` callers
    (app startCloseOut, close_out prepare/apply) and from the store's done

@@ -5,7 +5,8 @@
 
 // SOC2 change records. Tasks in SOC2_AREAS (infra, access, security, soc2)
 // cannot move to done until the artifact's "Change record (SOC2)" section
-// has non-empty What / Why / Risk / Rollback / Tested lines. The evidence
+// has non-empty What / Why / Risk / Rollback / Tested labels (a value on the
+// label's line, or lines nested under it). The evidence
 // export collects the done tasks of a date range with their change record,
 // PRs, Asana link and decisions (JSON or Markdown).
 
@@ -49,6 +50,25 @@ function cleanValue(raw) {
     return PLACEHOLDERS.has(v.toLowerCase()) ? "" : v
 }
 
+const indentOf = (line) => line.length - line.trimStart().length
+
+const LIST_MARK_RE = /^\s*(?:[-*+]|\d+[.)])\s+/
+
+/**
+ * Nested lines under a label, without comments, dedented; "" when none or
+ * when every line is only a placeholder ("  - TBD", "  …").
+ */
+function nestedValue(lines) {
+    const text = lines.map((l) => l.replace(/<!--.*?-->/g, "").trimEnd())
+    const used = text.filter((l) => l.trim())
+    if (!used.some((l) => cleanValue(l.replace(LIST_MARK_RE, "")))) return ""
+    const cut = Math.min(...used.map(indentOf))
+    return text
+        .map((l) => l.slice(Math.min(cut, indentOf(l))))
+        .join("\n")
+        .trim()
+}
+
 /** True when the task's area needs a change record before done. */
 export function requiresChangeRecord(task) {
     return Boolean(task) && SOC2_AREAS.includes(task.area)
@@ -70,17 +90,40 @@ function contentOf(artifact) {
 export function parseChangeRecord(artifact) {
     const body = getSectionBody(contentOf(artifact), SOC2_SECTION)
     const fields = {}
-    if (body !== null) {
-        for (const line of body.split("\n")) {
-            const m = LINE_RE.exec(line)
-            if (!m) continue
-            const key = fieldKey(m[1])
-            if (!key) continue
-            const value = cleanValue(m[2])
-            // The first non-empty value wins (duplicate labels).
-            if (!fields[key]) fields[key] = value
-        }
+    // A label line at the section's label indent starts a field; deeper
+    // lines below it (sub-items, numbered steps, paragraphs) are its value
+    // too, so "- Rollback:" followed by nested steps is filled. The label
+    // indent is that of the first known label (What, Why, ...), so labels
+    // nested under an intro line ("- Fields:") still count.
+    const lines = body === null ? [] : body.split("\n")
+    const labelIndents = lines
+        .map((line) => [LINE_RE.exec(line), indentOf(line)])
+        .filter(([m]) => m)
+    const known = labelIndents.find(([m]) => fieldKey(m[1]) in LABELS)
+    let base = (known || labelIndents[0] || [])[1] ?? null
+    let open = null
+    const close = () => {
+        if (!open) return
+        const nested = nestedValue(open.lines)
+        const value = [open.value, nested].filter(Boolean).join("\n")
+        // The first non-empty value wins (duplicate labels).
+        if (!fields[open.key]) fields[open.key] = value
+        open = null
     }
+    for (const line of lines) {
+        const indent = indentOf(line)
+        const m = LINE_RE.exec(line)
+        if (m && indent <= base) {
+            close()
+            const key = fieldKey(m[1])
+            if (key) open = { key, value: cleanValue(m[2]), lines: [] }
+            continue
+        }
+        if (!line.trim()) open?.lines.push(line)
+        else if (open && indent > base) open.lines.push(line)
+        else close()
+    }
+    close()
     const missing = REQUIRED_FIELDS.filter((k) => !fields[k])
     return { present: body !== null, fields, missing }
 }
@@ -240,6 +283,12 @@ function mdText(value) {
         .trim()
 }
 
+/** "- Label: value", nested lines of a multi-line value indented under it. */
+function fieldLine(label, value) {
+    const text = mdText(value) || "—"
+    return `- ${label}: ${text.split("\n").join("\n  ")}`
+}
+
 /** Markdown rendering of exportEvidence() output. */
 export function toMarkdown(evidence) {
     const lines = [
@@ -260,11 +309,11 @@ export function toMarkdown(evidence) {
         const rec = t.change_record || {}
         for (const key of Object.keys(LABELS)) {
             if (key in rec || REQUIRED_FIELDS.includes(key))
-                lines.push(`- ${LABELS[key]}: ${mdText(rec[key]) || "—"}`)
+                lines.push(fieldLine(LABELS[key], rec[key]))
         }
         for (const [key, value] of Object.entries(rec)) {
             if (key === "missing" || key in LABELS) continue
-            lines.push(`- ${key}: ${mdText(value) || "—"}`)
+            lines.push(fieldLine(key, value))
         }
         if (rec.missing && rec.missing.length)
             lines.push(

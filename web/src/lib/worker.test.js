@@ -10,6 +10,7 @@ import {
     TABS,
     actionToast,
     blockingDeliverables,
+    openManual,
     deliverableState,
     watchFor,
     visibleTabs,
@@ -259,6 +260,14 @@ describe("deliverable state (what blocks Done)", () => {
         expect(watchFor(null, d("pr", { pr: PR }))).toBeNull()
         expect(watchFor(rows, null)).toBeNull()
         expect(watchFor(rows, d("pr", { pr: "https://nope" }))).toBeNull()
+    })
+
+    it("openManual lists unchecked manual deliverables", () => {
+        const a = { id: "m1", text: "x", done_at: null }
+        const b = { id: "m2", text: "y", done_at: "t" }
+        expect(openManual({ manual_deliverables: [a, b] })).toEqual([a])
+        expect(openManual({})).toEqual([])
+        expect(openManual(null)).toEqual([])
     })
 
     it("blockingDeliverables lists what keeps the task from Done", () => {

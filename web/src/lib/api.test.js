@@ -266,6 +266,23 @@ describe("routes", () => {
             { disposition: "no_change", created_at: "2026-11-07" },
         ],
         [
+            () => api.addManualDeliverable(5, "Install"),
+            "POST",
+            "/api/tasks/5/manual-deliverables",
+            { text: "Install" },
+        ],
+        [
+            () => api.setManualDeliverable(5, "m1", true),
+            "PATCH",
+            "/api/tasks/5/manual-deliverables/m1",
+            { done: true },
+        ],
+        [
+            () => api.removeManualDeliverable(5, "m1"),
+            "DELETE",
+            "/api/tasks/5/manual-deliverables/m1",
+        ],
+        [
             () => api.reopenFeedback(5, "gh-rc-1"),
             "PATCH",
             "/api/tasks/5/feedback/gh-rc-1",

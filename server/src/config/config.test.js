@@ -25,6 +25,10 @@ test("defaults derive paths from home and root", () => {
     expect(c.center.areaRepos).toEqual({})
     expect(c.git.authorEmail).toBe("command-center@localhost")
     expect(c.push.subject).toBe("mailto:command-center@localhost")
+    // the second Claude account: its own config dir
+    expect(c.agents.klaude.env).toEqual({
+        CLAUDE_CONFIG_DIR: "/h/.claude-klaude",
+    })
 })
 
 test("missing config file uses defaults", () => {

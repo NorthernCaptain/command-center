@@ -16,6 +16,8 @@ const DispositionBody = z.object({
     created_at: z.string().min(1).max(64).optional(),
 })
 const FeedbackPatchBody = z.object({ status: z.literal("open") })
+const ManualBody = z.object({ text: z.string().trim().min(1).max(300) })
+const ManualPatchBody = z.object({ done: z.boolean() })
 
 /**
  * @param {import("express").Router} api
@@ -51,6 +53,32 @@ export function mountGithub(api, helpers, { prWatcher }) {
         res.json(
             await prWatcher.setNoChange(id, req.params.repo, createdAt || null)
         )
+    })
+
+    // manual deliverables: Leo's checklist next to the PRs (a manual
+    // install after merge); an unchecked one blocks Done
+    api.post("/tasks/:id/manual-deliverables", async (req, res) => {
+        ownerOnly(req)
+        const id = parseTaskId(req.params.id)
+        const { text } = parse(ManualBody, req.body || {}, "manual deliverable")
+        res.json(await prWatcher.addManual(id, text))
+    })
+
+    api.patch("/tasks/:id/manual-deliverables/:item", async (req, res) => {
+        ownerOnly(req)
+        const id = parseTaskId(req.params.id)
+        const { done } = parse(
+            ManualPatchBody,
+            req.body || {},
+            "manual deliverable"
+        )
+        res.json(await prWatcher.setManual(id, req.params.item, done))
+    })
+
+    api.delete("/tasks/:id/manual-deliverables/:item", async (req, res) => {
+        ownerOnly(req)
+        const id = parseTaskId(req.params.id)
+        res.json(await prWatcher.removeManual(id, req.params.item))
     })
 
     api.patch("/tasks/:id/feedback/:item", async (req, res) => {

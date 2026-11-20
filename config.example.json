@@ -31,6 +31,11 @@
     "center": {
         "areaRepos": { "batch": "your-batch-repo", "web": "your-web-repo" }
     },
+    "agents": {
+        "klaude": {
+            "env": { "CLAUDE_CONFIG_DIR": "/Users/you/.claude-klaude" }
+        }
+    },
     "review": { "archiveDir": "/Users/you/work/review/reviews" },
     "reviews": { "dir": "/Users/you/work/reviews" },
     "push": { "subject": "mailto:you@example.com" }

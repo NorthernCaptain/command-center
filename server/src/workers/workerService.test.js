@@ -24,6 +24,9 @@ import {
     USAGE_LIMIT_RE,
     UNCERTAIN_REASON,
 } from "./workerService.js"
+import { cleanPrompt } from "./prompts.js"
+
+const CLEAN_K7Q2 = cleanPrompt({ task: { slug: "k7q2", status: "done" } })
 
 // ---- fakes (follow phase2-contracts.md A) ----------------------------------
 
@@ -425,6 +428,48 @@ describe("startTask", () => {
             data: { state: "idle" },
         })
         expect(env.store.eventTypes()).toContain("agent_started")
+    })
+
+    test("klaude: herdr's claude, in a workspace with its account's env", async () => {
+        const env = setup({
+            config: {
+                treeDir: "/tree",
+                agents: { klaude: { env: { CLAUDE_CONFIG_DIR: "/h/.k" } } },
+            },
+        })
+        env.store.seed(makeTask(1))
+        await env.svc.startTask(1, { kind: "klaude" })
+        expect(env.herdr.workspaceCreate.mock.calls[0][0].env).toEqual({
+            CLAUDE_CONFIG_DIR: "/h/.k",
+            CC_TASK_ID: "1",
+            CC_URL: "http://127.0.0.1:7788",
+            CC_TOKEN: "tok",
+        })
+        expect(env.herdr.agentStart.mock.calls[0][0]).toMatchObject({
+            kind: "claude",
+            args: ["--name", "T-1 Fix upload retry 1"],
+        })
+        expect(env.store.task(1).worker_kind).toBe("klaude")
+        expect((await env.sessions.current(1)).kind).toBe("klaude")
+        // a relaunch resumes the klaude session with claude's flag, in
+        // the klaude account again
+        await env.svc.action(1, "stop")
+        env.herdr.agents.clear()
+        const r = await env.svc.action(1, "relaunch")
+        expect(r.session).toMatchObject({ kind: "klaude" })
+        const again = env.herdr.agentStart.mock.calls.at(-1)[0]
+        expect(again.kind).toBe("claude")
+        expect(again.args).toContain("--resume")
+        expect(
+            env.herdr.workspaceCreate.mock.calls.at(-1)[0].env
+        ).toMatchObject({ CLAUDE_CONFIG_DIR: "/h/.k" })
+        // another account's agent still running is not adopted
+        await env.svc.action(1, "stop")
+        env.herdr.agents.set(NAME, { kind: "claude", paneId: "p9" })
+        await env.store.updateTask(1, { worker_kind: "claude" }, {})
+        const c = await env.svc.action(1, "relaunch", { kind: "claude" })
+        expect(c.adopted).toBe(false)
+        await env.svc.stop()
     })
 
     test("work repos get deliverables; warnings are returned; existing kept", async () => {
@@ -1473,6 +1518,18 @@ describe("revive", () => {
         })
     })
 
+    test("a claude-CLI agent without a session record is never adopted (account unknown)", async () => {
+        const env = setup()
+        await started(env)
+        await env.svc.action(1, "stop")
+        // the session records are gone; a claude agent runs under our name
+        env.sessions.history = async () => []
+        env.herdr.agents.set(NAME, { kind: "claude", paneId: "p1" })
+        const r = await env.svc.revive(1)
+        expect(r.adopted).toBeUndefined()
+        expect(env.store.eventTypes()).not.toContain("agent_adopted")
+    })
+
     test("a suffixed launch is revived under its own name, never the base occupant", async () => {
         const env = setup()
         // someone else's agent holds the base name
@@ -1717,9 +1774,7 @@ describe("actions", () => {
         env.store.tasks.get(1).slug = "k7q2"
         const r = await env.svc.action(1, "clean")
         expect(r.delivery.status).toBe("sent")
-        expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(
-            "Clean: follow tree AGENTS.md §6 for slug k7q2."
-        )
+        expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(CLEAN_K7Q2)
     })
 
     test("focus needs a live agent", async () => {
@@ -1836,9 +1891,7 @@ describe("actions", () => {
                 close_after: `clean:${r.delivery.outbox_id}`,
                 delivery: { status: "sent" },
             })
-            expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(
-                "Clean: follow tree AGENTS.md §6 for slug k7q2."
-            )
+            expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(CLEAN_K7Q2)
             const row = r.delivery.outbox_id
             expect((await env.sessions.current(1)).close_after).toBe(
                 `clean:${row}`
@@ -1869,13 +1922,16 @@ describe("actions", () => {
             await env.svc.stop()
         })
 
-        test("folders left after the turn: stays open, Now raised", async () => {
+        test("folders left after the turn: stays open, Now raised, the close waits for the next turn", async () => {
             const env = await doneWithAgent()
             await env.svc.action(1, "close-agent", { clean: true })
             await status(env, "working")
             await status(env, "idle")
             expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
-            expect((await env.sessions.current(1)).close_after).toBeNull()
+            // pending again, reported, without the "worked" mark
+            expect((await env.sessions.current(1)).close_after).toMatch(
+                /^clean:\d+:left$/
+            )
             expect(env.store.tasks.get(1).flags).toMatchObject({
                 now: true,
                 now_reason: CLEAN_LEFT_REASON,
@@ -1890,14 +1946,55 @@ describe("actions", () => {
                 (e) => e.type === "agent_close_skipped"
             )
             expect(skipped.data.folders).toEqual([FOLDER.folder])
-            // later idles do nothing more
+            // another turn that leaves them (Leo opened the task, its Now
+            // was cleared): no second Now or notification
+            env.store.tasks.get(1).flags = {
+                ...env.store.tasks.get(1).flags,
+                now: false,
+                now_reason: null,
+            }
+            await status(env, "working")
+            expect((await env.sessions.current(1)).close_after).toMatch(
+                /^clean:\d+:left:working$/
+            )
+            await status(env, "idle")
+            expect(env.store.tasks.get(1).flags.now).toBe(false)
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            expect(env.notifier.notify).toHaveBeenCalledTimes(1)
+            expect(
+                env.store.events.filter((e) => e.type === "agent_close_skipped")
+            ).toHaveLength(1)
+            // a second Clean and close that leaves them too: reported again
+            await env.svc.action(1, "close-agent", { clean: true })
             await status(env, "working")
             await status(env, "idle")
-            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
-            // a second Clean and close removes them: closed, flag cleared
+            expect(env.notifier.notify).toHaveBeenCalledTimes(2)
+            expect(env.store.tasks.get(1).flags.now_reason).toBe(
+                CLEAN_LEFT_REASON
+            )
+            // a third Clean and close removes them: closed, flag cleared
             await env.svc.action(1, "close-agent", { clean: true })
             await status(env, "working")
             env.identity.scanFolders.mockImplementation(() => [])
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
+            expect(env.store.tasks.get(1).flags).toMatchObject({
+                now: false,
+                now_reason: null,
+            })
+            await env.svc.stop()
+        })
+
+        test("a background deletion that ends after the idle: the agent's next turn closes it", async () => {
+            const env = await doneWithAgent()
+            await env.svc.action(1, "close-agent", { clean: true })
+            await status(env, "working")
+            // idle while rm -rf still runs in the background
+            await status(env, "idle")
+            expect(env.herdr.workspaceClose).not.toHaveBeenCalled()
+            // the deletion finishes and wakes the agent; it reports, goes idle
+            env.identity.scanFolders.mockImplementation(() => [])
+            await status(env, "working")
             await status(env, "idle")
             expect(env.herdr.workspaceClose).toHaveBeenCalledWith("w1")
             expect(env.store.tasks.get(1).flags).toMatchObject({
@@ -2065,10 +2162,18 @@ describe("actions", () => {
         test("parseCloseAfter", () => {
             expect(parseCloseAfter("clean:12")).toEqual({
                 rowId: 12,
+                left: false,
                 working: false,
             })
+            expect(parseCloseAfter("clean:7:left:working")).toEqual({
+                rowId: 7,
+                left: true,
+                working: true,
+            })
+            expect(parseCloseAfter("clean:7:working:left")).toBeNull()
             expect(parseCloseAfter("clean:7:working")).toEqual({
                 rowId: 7,
+                left: false,
                 working: true,
             })
             expect(parseCloseAfter("clean:pending")).toBeNull()
@@ -3123,9 +3228,7 @@ describe("auto clean and close after done", () => {
     test("done -> clean-up prompt, then the workspace closes", async () => {
         const env = await withAgent()
         await toDone(env)
-        expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(
-            "Clean: follow tree AGENTS.md §6 for slug k7q2."
-        )
+        expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(CLEAN_K7Q2)
         const cur = await env.sessions.current(1)
         expect(parseCloseAfter(cur.close_after)).toMatchObject({
             working: false,
@@ -3228,7 +3331,7 @@ describe("auto clean and close after done", () => {
         const cur = await env.sessions.current(1)
         const pendingClean = await env.outbox.enqueue({
             task_id: 1,
-            text: "Clean: follow tree AGENTS.md §6 for slug k7q2.",
+            text: CLEAN_K7Q2,
             reason: "clean",
         })
         await env.sessions.update(cur.id, {
@@ -3471,9 +3574,7 @@ describe("auto clean and close after done", () => {
         expect(mark.rowId).not.toBe(forced)
         env.herdr.setStatus(NAME, "idle")
         await status(env, "idle")
-        expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(
-            "Clean: follow tree AGENTS.md §6 for slug k7q2."
-        )
+        expect(env.herdr.agentPrompt.mock.calls.at(-1)[1]).toBe(CLEAN_K7Q2)
         expect(
             env.herdr.agentPrompt.mock.calls.some(([, t]) =>
                 /was cancelled/.test(t)
@@ -3630,9 +3731,7 @@ describe("auto clean and close after done", () => {
             // the clean-up prompt follows the resume prompt
             expect(prompts).toHaveLength(2)
             const clean = prompts[1]
-            expect(clean).toContain(
-                "Clean: follow tree AGENTS.md §6 for slug k7q2."
-            )
+            expect(clean).toContain(CLEAN_K7Q2)
             expect(/was cancelled/.test(clean)).toBe(st === "cancelled")
             await st2("working")
             env.identity.scanFolders.mockImplementation(() => [])
@@ -3657,9 +3756,7 @@ describe("auto clean and close after done", () => {
         const prompts = env.herdr.agentPrompt.mock.calls
             .slice(before)
             .map((c) => c[1])
-        expect(prompts).toEqual([
-            "Clean: follow tree AGENTS.md §6 for slug k7q2.",
-        ])
+        expect(prompts).toEqual([CLEAN_K7Q2])
         expect(env.store.eventTypes()).not.toContain("agent_prompts_dropped")
         await env.svc.stop()
     })

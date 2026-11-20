@@ -119,6 +119,7 @@ async function setup({
     status = "ready_for_pr",
     asana = true,
     opts = {},
+    branch = "t1-fix",
 } = {}) {
     const gh = {
         lists: {},
@@ -143,7 +144,7 @@ async function setup({
             title: "Fix upload retry",
             kind: "agent_task",
             status,
-            branch: "t1-fix",
+            branch,
             slug: "k7q2",
             deliverables,
             asana: asana ? { gid: "99" } : undefined,
@@ -1935,6 +1936,202 @@ describe("feedback rounds", () => {
         )
     })
 
+    /** Task with two claimed PRs (PR_URL on REPO, PR2_URL on REPO2). */
+    async function twoPrSetup() {
+        const ctx = await setup({
+            status: "pr_open",
+            deliverables: [
+                deliv(REPO, {
+                    disposition: "pr",
+                    pr: PR_URL,
+                    claimed_at: "2026-11-07T11:00:00.000Z",
+                }),
+                deliv(REPO2, {
+                    disposition: "pr",
+                    pr: PR2_URL,
+                    claimed_at: "2026-11-07T11:00:00.000Z",
+                }),
+            ],
+        })
+        ctx.claims.claim({
+            url: PR2_URL,
+            task_id: 1,
+            repo: REPO2,
+            number: 44,
+            branch: "t1-fix",
+        })
+        ctx.gh.prs[`${REPO}#812`] = fullPr()
+        ctx.gh.prs[`${REPO2}#44`] = fullPr({ url: PR2_URL, number: 44 })
+        return ctx
+    }
+    const rc2 = (id) => rc(id, { html_url: `${PR2_URL}#discussion_r${id}` })
+    const keys = (ws) => ws.deliver.mock.calls.map((c) => c[2].dedupeKey)
+
+    test("rounds are gated per PR: one PR's open round does not hold another PR's feedback", async () => {
+        const { gh, watcher, workerService } = await twoPrSetup()
+        gh.rcs[`${REPO}#812`] = [rc(1001)]
+        gh.rcs[`${REPO2}#44`] = [rc2(2001)]
+        await watcher.pollTask(1)
+        expect(keys(workerService)).toEqual([
+            "round-aws-lambda-812-1",
+            "round-infrastructure-44-1",
+        ])
+        // REPO2's part of round 1 is settled; REPO's waits (e.g. on Leo)
+        await resolve("gh-rc-2001", { status: "answered", reply_url: "r" })
+        const r = await watcher.roundResolved(1)
+        expect(r.delivered_round).toBeNull()
+        // a new review comment on REPO2: round 2, sent now for REPO2 only
+        gh.rcs[`${REPO2}#44`] = [
+            rc2(2001),
+            // the agent's thread reply (PR author: no_action)
+            rc(2003, {
+                html_url: `${PR2_URL}#discussion_r2003`,
+                user: { login: "leo", type: "User" },
+                in_reply_to_id: 2001,
+                created_at: "2026-11-07T11:40:00Z",
+            }),
+            rc2(2002),
+        ]
+        const s = await watcher.pollTask(1)
+        expect((await feedback())["gh-rc-2002"].round).toBe(2)
+        expect(s.delivered_round).toBe(2)
+        expect(keys(workerService)).toEqual([
+            "round-aws-lambda-812-1",
+            "round-infrastructure-44-1",
+            "round-infrastructure-44-2",
+        ])
+        // a new comment on REPO waits for REPO's round 1 (now round 3)
+        gh.rcs[`${REPO}#812`] = [rc(1001), rc(1002)]
+        await watcher.pollTask(1)
+        expect((await feedback())["gh-rc-1002"].round).toBe(3)
+        expect(workerService.deliver).toHaveBeenCalledTimes(3)
+        // REPO's round 1 settled: its round 3 goes out
+        await resolve("gh-rc-1001", { status: "answered", reply_url: "r" })
+        const next = await watcher.roundResolved(1)
+        expect(next.delivered_round).toBe(3)
+        expect(keys(workerService).at(-1)).toBe("round-aws-lambda-812-3")
+    })
+
+    test("a round queued for two PRs goes out for the PR that is free", async () => {
+        const { gh, watcher, workerService } = await twoPrSetup()
+        gh.rcs[`${REPO}#812`] = [rc(1001)]
+        await watcher.pollTask(1)
+        // round 2 gets items on both PRs while REPO's round 1 is open
+        gh.rcs[`${REPO}#812`] = [rc(1001), rc(1002)]
+        gh.rcs[`${REPO2}#44`] = [rc2(2001)]
+        await watcher.pollTask(1)
+        const items = await feedback()
+        expect(items["gh-rc-1002"].round).toBe(2)
+        expect(items["gh-rc-2001"].round).toBe(2)
+        expect(keys(workerService)).toEqual([
+            "round-aws-lambda-812-1",
+            "round-infrastructure-44-2",
+        ])
+        // REPO's round 1 settled: REPO's part of round 2 follows
+        await resolve("gh-rc-1001", { status: "answered", reply_url: "r" })
+        await watcher.roundResolved(1)
+        expect(keys(workerService).at(-1)).toBe("round-aws-lambda-812-2")
+        expect(workerService.deliver).toHaveBeenCalledTimes(3)
+    })
+
+    test("addressFeedback per PR: re-sends a sent round, sends a fresh one", async () => {
+        const { gh, watcher, workerService } = await twoPrSetup()
+        workerService.deliver.mockResolvedValueOnce({ status: "queued" })
+        gh.rcs[`${REPO}#812`] = [rc(1001)]
+        await watcher.pollTask(1)
+        // REPO2's round 2 is held back by a blocked delivery
+        workerService.deliver.mockResolvedValueOnce({ status: "blocked" })
+        gh.rcs[`${REPO2}#44`] = [rc2(2001)]
+        await watcher.pollTask(1)
+        workerService.deliver.mockClear()
+        const r = await watcher.addressFeedback(1)
+        expect(r).toMatchObject({
+            round: 1,
+            rounds: [1, 2],
+            resent: true,
+            delivery: { status: "queued" },
+        })
+        const sent = keys(workerService)
+        expect(sent[0]).toBe("round-infrastructure-44-2")
+        expect(sent[1]).toMatch(/^manual-aws-lambda-812-1-\d+$/)
+        expect(await eventsOf("feedback_round_resent")).toHaveLength(1)
+    })
+
+    test("reopen in a round sealed only for another PR waits for its own PR's queue", async () => {
+        const { gh, watcher, workerService } = await twoPrSetup()
+        gh.rcs[`${REPO}#812`] = [rc(1001)]
+        await watcher.pollTask(1)
+        // round 2: a LGTM on REPO (no_action) and a comment on REPO2 (sent)
+        gh.prs[`${REPO}#812`] = fullPr({
+            comments: [{ id: 70, author: { login: "ann" }, body: "LGTM" }],
+        })
+        gh.rcs[`${REPO2}#44`] = [rc2(2001)]
+        await watcher.pollTask(1)
+        expect(keys(workerService)).toEqual([
+            "round-aws-lambda-812-1",
+            "round-infrastructure-44-2",
+        ])
+        // Leo reopens the LGTM: REPO's round 1 is still open, so it waits
+        const res = await watcher.reopenItem(1, "gh-ic-70")
+        expect(res.item.round).toBe(2)
+        expect(workerService.deliver).toHaveBeenCalledTimes(2)
+        // REPO's round 1 settled: REPO's round 2 carries the reopened item
+        await resolve("gh-rc-1001", { status: "answered", reply_url: "r" })
+        await watcher.roundResolved(1)
+        const last = workerService.deliver.mock.calls.at(-1)
+        expect(last[2].dedupeKey).toBe("round-aws-lambda-812-2")
+        expect(last[1]).toContain("gh-ic-70")
+        expect(workerService.deliver).toHaveBeenCalledTimes(3)
+    })
+
+    test("a round is sealed per PR: a reopen after a blocked part is sent on its own", async () => {
+        const { gh, watcher, workerService } = await twoPrSetup()
+        const queued = workerService.deliver.getMockImplementation()
+        workerService.deliver.mockImplementation(async (id, text, o) =>
+            o.dedupeKey === "round-aws-lambda-812-2"
+                ? { status: "blocked" }
+                : queued(id, text, o)
+        )
+        gh.rcs[`${REPO}#812`] = [rc(1001)]
+        await watcher.pollTask(1)
+        // round 2 on both PRs: REPO2's part goes out (sealing it for REPO2)
+        gh.prs[`${REPO}#812`] = fullPr({
+            comments: [{ id: 70, author: { login: "ann" }, body: "LGTM" }],
+        })
+        gh.rcs[`${REPO}#812`] = [rc(1001), rc(1002)]
+        gh.rcs[`${REPO2}#44`] = [rc2(2001)]
+        await watcher.pollTask(1)
+        // REPO's part of round 2 follows, but the agent is blocked: its
+        // prompt waits in the outbox, frozen without gh-ic-70
+        await resolve("gh-rc-1001", { status: "answered", reply_url: "r" })
+        await watcher.roundResolved(1)
+        const sealed = (await eventsOf("feedback_round_sealed")).map(
+            (e) => e.data
+        )
+        expect(sealed).toContainEqual({ round: 2, items: ["gh-rc-2001"] })
+        expect(sealed).toContainEqual({ round: 2, items: ["gh-rc-1002"] })
+        // the reopened item can't join that prompt: it is sent on its own
+        await watcher.reopenItem(1, "gh-ic-70")
+        expect(keys(workerService).at(-1)).toMatch(
+            /^reopen-aws-lambda-812-gh-ic-70-\d+$/
+        )
+    })
+
+    test("a round event without an item list holds every PR (older records)", async () => {
+        const { gh, watcher, workerService } = await twoPrSetup()
+        gh.rcs[`${REPO2}#44`] = [rc2(2001)]
+        workerService.deliver.mockResolvedValueOnce({ status: "blocked" })
+        await watcher.pollTask(1)
+        await store.appendEvent(
+            1,
+            { type: "feedback_round_delivered", data: { round: 1 } },
+            "system"
+        )
+        workerService.deliver.mockClear()
+        await watcher.pollTask(1)
+        expect(workerService.deliver).not.toHaveBeenCalled()
+    })
+
     test("a PR merged with open feedback no longer holds the task in pr_feedback", async () => {
         const { gh, watcher, claims } = await setup({
             status: "pr_open",
@@ -2312,6 +2509,45 @@ describe("auto-merge", () => {
         expect(mergeReady(ready({ mergeStateStatus: "HAS_HOOKS" }))).toBe(true)
         expect(mergeReady(ready({ mergeStateStatus: "BLOCKED" }))).toBe(false)
         expect(mergeReady(ready({ mergeStateStatus: "UNKNOWN" }))).toBe(false)
+        // UNSTABLE: a failed check that is not required; only once every
+        // check has finished (the failed ones are feedback items)
+        const check = (status, conclusion) => ({
+            name: "x",
+            status,
+            conclusion,
+        })
+        expect(mergeReady(ready({ mergeStateStatus: "UNSTABLE" }))).toBe(true)
+        expect(
+            mergeReady(
+                ready({
+                    mergeStateStatus: "UNSTABLE",
+                    statusCheckRollup: [
+                        check("COMPLETED", "SUCCESS"),
+                        check("COMPLETED", "FAILURE"),
+                    ],
+                })
+            )
+        ).toBe(true)
+        expect(
+            mergeReady(
+                ready({
+                    mergeStateStatus: "UNSTABLE",
+                    statusCheckRollup: [
+                        check("COMPLETED", "FAILURE"),
+                        check("IN_PROGRESS", null),
+                    ],
+                })
+            )
+        ).toBe(false)
+        for (const end of ["CANCELLED", "ACTION_REQUIRED", "STALE"])
+            expect(
+                mergeReady(
+                    ready({
+                        mergeStateStatus: "UNSTABLE",
+                        statusCheckRollup: [check("COMPLETED", end)],
+                    })
+                )
+            ).toBe(false)
         expect(mergeReady(ready({ isDraft: true }))).toBe(false)
         expect(mergeReady(ready({ reviewDecision: "CHANGES_REQUESTED" }))).toBe(
             false
@@ -2456,6 +2692,45 @@ describe("auto-merge", () => {
         expect(gh.mergePr).toHaveBeenCalledTimes(1)
     })
 
+    test("UNSTABLE: a failed optional check merges only once its item is settled", async () => {
+        const { gh, watcher, workerService } = await claimedSetup()
+        workerService.runWhenIdle = idleRunner(false)
+        gh.mergePr = jest.fn(async () => {})
+        const checks = [
+            {
+                name: "CodeQL",
+                status: "COMPLETED",
+                conclusion: "FAILURE",
+                detailsUrl: "https://example.com/runs/9",
+            },
+        ]
+        gh.prs[`${REPO}#812`] = ready({
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollup: checks,
+        })
+        await watcher.pollTask(1)
+        const id = ciItemId("CodeQL", HEAD, PR_URL)
+        expect((await feedback())[id].status).toBe("open")
+        expect(gh.mergePr).not.toHaveBeenCalled()
+        // the agent declines it with a Re: comment on the PR
+        await resolve(id, { status: "declined", note: "pre-existing alerts" })
+        gh.prs[`${REPO}#812`] = ready({
+            mergeStateStatus: "UNSTABLE",
+            statusCheckRollup: checks,
+            comments: [
+                {
+                    id: 77,
+                    author: { login: "leo" },
+                    body: "Re: https://example.com/runs/9 pre-existing",
+                    createdAt: "2026-11-07T12:10:00Z",
+                },
+            ],
+        })
+        await watcher.pollTask(1)
+        expect((await feedback())[id].verified).toBe(true)
+        expect(gh.mergePr).toHaveBeenCalledTimes(1)
+    })
+
     test("a failed merge is logged once per head and retried next poll", async () => {
         const { gh, watcher, workerService } = await claimedSetup()
         workerService.runWhenIdle = idleRunner(false)
@@ -2556,6 +2831,56 @@ describe("merge conflicts", () => {
         gh.prs[`${REPO}#812`] = fullPr({ mergeable: "MERGEABLE" })
         expect((await watcher.pollTask(1)).conflicts).toEqual([])
         expect(workerService.deliver).toHaveBeenCalledTimes(2) // the same head is never handed over twice
+    })
+
+    test("a deliverable recorded under another branch follows the open PR's head", async () => {
+        const { gh, watcher, workerService } = await claimedSetup({
+            opts: { conflictPrompt },
+            deliverables: [
+                deliv(REPO, {
+                    branch: "t1-mirror",
+                    disposition: "pr",
+                    pr: PR_URL,
+                    claimed_at: "2026-11-07T11:00:00.000Z",
+                }),
+            ],
+            branch: "t1-mirror",
+        })
+        await store.updateTask(
+            1,
+            { repos: [{ name: REPO, role: "main" }] },
+            { actor: "me" }
+        )
+        workerService.deliver = jest.fn(async () => ({ status: "sent" }))
+        gh.prs[`${REPO}#812`] = conflicting()
+        await watcher.pollTask(1)
+        expect(workerService.deliver).toHaveBeenCalledWith(
+            1,
+            `conflict ${PR_URL} t1-fix main`,
+            expect.anything()
+        )
+        const t = await getTask()
+        expect(t.deliverables[0].branch).toBe("t1-fix")
+        expect(t.branch).toBe("t1-fix")
+    })
+
+    test("the task's branch moves only when it was the deliverable's old one", async () => {
+        const { gh, watcher } = await claimedSetup({
+            deliverables: [
+                deliv(REPO, {
+                    branch: "t1-mirror",
+                    disposition: "pr",
+                    pr: PR_URL,
+                    claimed_at: "2026-11-07T11:00:00.000Z",
+                }),
+            ],
+            branch: "t1-elsewhere",
+        })
+        gh.prs[`${REPO}#812`] = fullPr()
+        await watcher.pollTask(1)
+        const t = await getTask()
+        expect(t.deliverables[0].branch).toBe("t1-fix")
+        expect(t.branch).toBe("t1-elsewhere")
     })
 
     test("a prompt waiting in the queue is announced once", async () => {
@@ -2923,6 +3248,134 @@ describe("merge, close and close-out", () => {
 })
 
 // ---------------------------------------------------------------------------
+
+describe("manual deliverables", () => {
+    const mergedPr = () =>
+        fullPr({
+            state: "MERGED",
+            mergedAt: "2026-11-07T11:58:00Z",
+            closedAt: "2026-11-07T11:58:00Z",
+        })
+
+    test("merged PRs wait for manual deliverables; the last one checked closes out", async () => {
+        const { gh, watcher, jobRunner, notifier } = await claimedSetup()
+        const { item: a } = await watcher.addManual(1, "Install on the farm")
+        const { item: b } = await watcher.addManual(1, "Tell QA")
+        expect(a).toMatchObject({ text: "Install on the farm", done_at: null })
+        expect(a.id).toMatch(/^m[0-9a-f]{8}$/)
+        gh.prs[`${REPO}#812`] = mergedPr()
+        const s = await watcher.pollTask(1)
+        expect(s.close_out).toBe(false)
+        expect(s.manual_open).toEqual([a.id, b.id])
+        expect(jobRunner.enqueue).not.toHaveBeenCalled()
+        expect((await getTask()).flags).toMatchObject({
+            now: true,
+            now_reason: "Manual deliverables left",
+        })
+        expect(notifier.notify).toHaveBeenCalledWith(
+            expect.objectContaining({
+                title: "T-1: Manual deliverables left",
+            })
+        )
+        expect(await eventsOf("close_out_waiting_manual")).toHaveLength(1)
+        // the same open set: not told again
+        notifier.notify.mockClear()
+        await watcher.pollTask(1)
+        expect(notifier.notify).not.toHaveBeenCalled()
+        expect(await eventsOf("close_out_waiting_manual")).toHaveLength(1)
+
+        // one checked off: told again with what is left
+        const r = await watcher.setManual(1, a.id, true)
+        expect(r.text).toBe("Install on the farm")
+        expect(r.task.manual_deliverables[0].done_at).toBe(
+            clock.now().toISOString()
+        )
+        await clock.advance(0)
+        await watcher.pollTask(1) // the poll it started (in flight)
+        expect(await eventsOf("close_out_waiting_manual")).toHaveLength(2)
+        expect((await getTask()).flags.now_reason).toBe(
+            "Manual deliverables left"
+        )
+        // the same state again: nothing changes
+        const same = await watcher.setManual(1, a.id, true)
+        expect(same.task.manual_deliverables[0].done_at).toBe(
+            r.task.manual_deliverables[0].done_at
+        )
+
+        // the last one: the flag goes and the close-out is queued
+        const last = await watcher.setManual(1, b.id, true)
+        expect(last.task.flags).toMatchObject({ now: false, now_reason: null })
+        await clock.advance(0)
+        await watcher.pollTask(1)
+        expect(jobRunner.enqueue).toHaveBeenCalledWith(
+            "close_out",
+            {},
+            { task_id: 1 }
+        )
+    })
+
+    test("unchecking, removing and refusals", async () => {
+        const { watcher } = await claimedSetup()
+        const { item } = await watcher.addManual(1, "Install")
+        await watcher.setManual(1, item.id, true)
+        let t = (await watcher.setManual(1, item.id, false)).task
+        expect(t.manual_deliverables[0].done_at).toBeNull()
+        await expect(watcher.setManual(1, "nope", true)).rejects.toMatchObject({
+            status: 404,
+        })
+        await expect(watcher.removeManual(1, "nope")).rejects.toMatchObject({
+            status: 404,
+        })
+        // removing the last open one clears the waiting flag
+        await store.updateTask(
+            1,
+            { flags: { now: true, now_reason: "Manual deliverables left" } },
+            { actor: "me" }
+        )
+        t = (await watcher.removeManual(1, item.id)).task
+        expect(t.manual_deliverables).toEqual([])
+        expect(t.flags).toMatchObject({ now: false, now_reason: null })
+        // another Now reason stays
+        await store.updateTask(
+            1,
+            { flags: { now: true, now_reason: "Ready for PR" } },
+            { actor: "me" }
+        )
+        const { item: x } = await watcher.addManual(1, "x")
+        t = (await watcher.removeManual(1, x.id)).task
+        expect(t.flags.now_reason).toBe("Ready for PR")
+        // a closed task takes no changes
+        await store.updateTask(1, { status: "cancelled" }, { actor: "me" })
+        await expect(watcher.addManual(1, "late")).rejects.toMatchObject({
+            status: 409,
+            code: "invalid_state",
+        })
+    })
+
+    test("Done is refused while a manual deliverable is open", async () => {
+        await setup({ deliverables: [], status: "review" })
+        await store.updateTask(
+            1,
+            {
+                manual_deliverables: [
+                    {
+                        id: "m1",
+                        text: "Install",
+                        created_at: "2026-11-07T10:00:00.000Z",
+                        done_at: null,
+                    },
+                ],
+            },
+            { actor: "me" }
+        )
+        await expect(
+            store.updateTask(1, { status: "done" }, { actor: "me" })
+        ).rejects.toMatchObject({
+            code: "deliverables_open",
+            message: expect.stringContaining("manual: Install"),
+        })
+    })
+})
 
 describe("review tasks and PRs from other branches", () => {
     test("isWatched: PR statuses, or review with a claimed PR (merged too)", () => {

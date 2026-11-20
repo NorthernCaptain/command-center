@@ -3,6 +3,8 @@
  * MIT license.
  */
 
+import { baseKind } from "../contracts/agentKinds.js"
+
 // Launch flags that give a worker the command-center MCP server directly,
 // so a worker never depends on a global registration (~/.claude.json,
 // ~/.codex/config.toml). No secret goes on the command line: the token and
@@ -36,7 +38,9 @@ export const tomlString = (s) => JSON.stringify(String(s))
  * esc) that blocks the start or swallows the first prompt.
  */
 export function quietLaunchArgs(kind) {
-    return kind === "codex" ? ["-c", "check_for_update_on_startup=false"] : []
+    return baseKind(kind) === "codex"
+        ? ["-c", "check_for_update_on_startup=false"]
+        : []
 }
 
 /** Caller headers a task worker sends: header -> env var. */
@@ -46,7 +50,8 @@ export const REVIEW_HEADER_ENV = { "X-CC-Review": "CC_REVIEW_ID" }
 
 /**
  * Args to put before the agent's own args (resume etc.).
- * @param {string} kind  "claude" | "codex" (anything else: none)
+ * @param {string} kind  an agent kind (by its CLI: claude | codex; anything
+ *        else: none)
  * @param {{ url: string, headersHelper?: string, headerEnv?: object }} opts
  *        headerEnv: codex env_http_headers (claude's helper reads the env)
  * @returns {string[]}
@@ -60,6 +65,7 @@ export function mcpLaunchArgs(
     } = {}
 ) {
     if (!url) return []
+    kind = baseKind(kind)
     if (kind === "claude") {
         const config = {
             mcpServers: {

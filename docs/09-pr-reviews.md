@@ -96,11 +96,15 @@ From GitHub (source of truth), per PR:
   wanted, still eligible, still needs a review).
 - At most `reviews.parallel` (default 4) agents run; the queue starts the
   next one (oldest first) as soon as a slot frees up.
-- Agent kind: `reviews.agent_kind` (default `claude`).
+- Agent kind: `reviews.agent_kind` (default `claude`): `claude`,
+  `klaude` (the second Claude account, docs/04: herdr's claude kind with
+  config `agents.klaude.env`; its own usage limit, so it can be the
+  fallback of `claude`) or `codex`.
 - Model and effort (Settings, per kind): `reviews.agent_model` for the
   review agent, `reviews.fallback_model` for the fallback (default
   `default`: the CLI's own configuration). Claude: `opus-medium`,
-  `opus-high`, `sonnet-high`, `sonnet-xhigh` (`--model <m> --effort <e>`).
+  `opus-high`, `sonnet-high`, `sonnet-xhigh` (`--model <m> --effort <e>`;
+  Klaude the same).
   Codex: `terra-medium`, `terra-high`, `terra-xhigh` (`-m gpt-6.1-terra
   -c model_reasoning_effort="<e>"`). The list is `REVIEW_MODELS` in
   `server/src/contracts/reviews.js` (the web client imports it too).
@@ -311,7 +315,12 @@ claimed, open PR of ours:
   older commit never merges a newer one), and no reviewer's latest
   opinion is a change request;
 - `mergeStateStatus` is `CLEAN` (or `HAS_HOOKS`): required checks green, no
-  conflicts, nothing else blocking;
+  conflicts, nothing else blocking. `UNSTABLE` (required checks green, a
+  check that is not required failed, e.g. CodeQL) also merges, but only once
+  every check has passed or failed (a cancelled or stale check keeps it
+  unmerged): each failed check is a `ci_failure` feedback
+  item, so the agent must fix it or decline / answer it (verified by its
+  `Re:` comment) first;
 - every actionable feedback item on that PR is settled (verified after
   its fix or answer; checked after this poll's verification), and the
   task's agent is not at work: nothing queued, being sent or just sent,

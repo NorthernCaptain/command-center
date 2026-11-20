@@ -32,7 +32,7 @@ import {
     isShared,
     isViewerLink,
     laneOf,
-    openDeliverables,
+    doneBlockers,
 } from "../contracts/lifecycle.js"
 import {
     AppError,
@@ -504,16 +504,15 @@ export function createStore({
                         details: { from: err.from, to: err.to },
                     })
                 }
-                // Done needs every deliverable merged or no_change, whoever
-                // asks; checked on the merged task, under the task lock.
+                // Done needs every deliverable merged or no_change and every
+                // manual one checked, whoever asks; checked on the merged
+                // task, under the task lock.
                 if (next.status === "done") {
-                    const open = openDeliverables(next)
-                    if (open.length)
+                    const blockers = doneBlockers(next)
+                    if (blockers)
                         throw new AppError(
                             "deliverables_open",
-                            `T-${id} has deliverables that are not merged or no_change: ${open
-                                .map((d) => `${d.repo}@${d.branch}`)
-                                .join(", ")}`,
+                            `T-${id} has deliverables that are not merged or no_change: ${blockers}`,
                             { status: 409 }
                         )
                 }

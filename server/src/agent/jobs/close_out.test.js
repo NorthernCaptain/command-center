@@ -211,6 +211,26 @@ describe("close_out", () => {
         expect(asanaService.complete).not.toHaveBeenCalled()
     })
 
+    test("an unchecked manual deliverable blocks close-out", async () => {
+        const { ctx, asanaService } = setup({
+            asana: ASANA,
+            deliverables: [dl({ merged_at: "2026-11-05T00:00:00.000Z" })],
+            manual_deliverables: [
+                {
+                    id: "m1",
+                    text: "Install on the farm",
+                    created_at: "2026-11-05T00:00:00.000Z",
+                    done_at: null,
+                },
+            ],
+        })
+        await expect(job.prepare(ctx)).rejects.toMatchObject({
+            code: "deliverables_open",
+            message: expect.stringContaining("Install on the farm"),
+        })
+        expect(asanaService.complete).not.toHaveBeenCalled()
+    })
+
     test("an unmerged PR is re-checked on GitHub first: merged meanwhile -> closes", async () => {
         const store0 = createFakeStore({
             tasks: [

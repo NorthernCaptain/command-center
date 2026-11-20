@@ -223,6 +223,14 @@ export function createApi({ fetch: fetchImpl, base = "" } = {}) {
                 disposition,
                 ...(createdAt ? { created_at: createdAt } : {}),
             }),
+        addManualDeliverable: (id, text) =>
+            request("POST", `${t(id)}/manual-deliverables`, { text }),
+        setManualDeliverable: (id, itemId, done) =>
+            request("PATCH", `${t(id)}/manual-deliverables/${enc(itemId)}`, {
+                done,
+            }),
+        removeManualDeliverable: (id, itemId) =>
+            request("DELETE", `${t(id)}/manual-deliverables/${enc(itemId)}`),
         reopenFeedback: (id, itemId) =>
             request("PATCH", `${t(id)}/feedback/${enc(itemId)}`, {
                 status: "open",

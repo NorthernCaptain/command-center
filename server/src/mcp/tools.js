@@ -631,20 +631,21 @@ export function createAgentTools({
             if (cleared) patch.flags = cleared
             if (a.repo === mainRepoOf(task)) patch.branch = a.url
             const deliverables = task.deliverables || []
-            // the repo's deliverable in work (a follow-up PR adds one);
-            // merged ones keep their branch
+            // the repo's pending deliverable moves to the branch; one with a
+            // PR keeps its branch (the PR's head)
             // a deliverable already on that branch (an older PR worked on
             // again) is the one: no other deliverable moves
             const onIt = deliverables.some(
                 (d) => d.repo === a.repo && d.branch === a.url
             )
             const cur = onIt ? null : currentDeliverable(deliverables, a.repo)
-            if (cur)
+            if (cur && !cur.pr)
                 patch.deliverables = deliverables.map((d) =>
                     d === cur ? { ...d, branch: a.url } : d
                 )
-            // every one merged, and a new branch: follow-up work, a pending
-            // deliverable of its own (its PR is found on that branch)
+            // the repo's PRs (open or merged), and a new branch: follow-up
+            // work, a pending deliverable of its own (its PR is found on
+            // that branch)
             else if (
                 !onIt &&
                 followUpOk(task) &&
@@ -783,7 +784,7 @@ export function createAgentTools({
                 const deliverables = task.deliverables || []
                 // the repo's deliverable in work; when every one is merged,
                 // the newest stands for the repo and keeps its branch
-                // when every one is merged, a folder on a new branch is
+                // when the repo has PRs, a folder on a new branch is
                 // follow-up work: a pending deliverable of its own
                 // the deliverable on the branch named (an older PR worked on
                 // again) is the one; else the current one moves to it
@@ -798,7 +799,15 @@ export function createAgentTools({
                           )
                           .pop()
                     : null
-                const cur = onIt ? null : currentDeliverable(deliverables, repo)
+                // one with a PR keeps its branch (the PR's head): another
+                // branch is follow-up work, not a move
+                const work = onIt
+                    ? null
+                    : currentDeliverable(deliverables, repo)
+                const cur =
+                    work && work.pr && a.branch && a.branch !== work.branch
+                        ? null
+                        : work
                 deliverable =
                     onIt ||
                     cur ||
@@ -917,13 +926,24 @@ export function createAgentTools({
      * The agent says these deliverables need no change: pending ->
      * no_change (like Leo's "No change" button), under the task lock.
      * Unknown repos and repos that already have a PR are rejected; repos
-     * already no_change are left as they are.
+     * already no_change are left as they are, and so are repos whose
+     * deliverable Leo dropped (he took the repo off the task).
      */
     async function markNoChange(taskId, repos, actor) {
         const same = (x, y) => x.toLowerCase() === y.toLowerCase()
         const changed = await locked(taskId, async () => {
             const { task: cur } = await store.getTask(taskId)
             const dl = cur.deliverables || []
+            // read under the lock: a drop (deliverable gone + its event)
+            // is seen whole
+            const dropped = (await store.listEvents(taskId, { limit: 1000 }))
+                .filter((e) => e.type === "deliverable_dropped")
+                .map((e) => String((e.data && e.data.repo) || ""))
+            repos = repos.filter(
+                (r) =>
+                    dl.some((d) => same(d.repo, r)) ||
+                    !dropped.some((x) => same(x, r))
+            )
             const unknown = repos.filter(
                 (r) => !dl.some((d) => same(d.repo, r))
             )
@@ -1157,8 +1177,9 @@ export function createAgentTools({
                 },
                 actor
             )
+            // rounds are gated per PR: this PR's part of the round
             const round = items
-                .filter((i) => i.round === item.round)
+                .filter((i) => i.round === item.round && i.pr === item.pr)
                 .map((i) => (i.id === item.id ? saved : i))
             const resolved = round.every((i) => i.status !== "open")
             if (a.status === "declined") {

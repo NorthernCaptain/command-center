@@ -17,10 +17,11 @@ import { z } from "zod"
 import { AREAS, STATUSES } from "../../contracts/schemas.js"
 import {
     canTransition,
+    doneBlockers,
     SNOOZE_ENDED,
     snoozePatch,
 } from "../../contracts/lifecycle.js"
-import { enqueueCloseOut, openDeliverables } from "./close_out.js"
+import { enqueueCloseOut } from "./close_out.js"
 import { nowLine, systemPrompt, untrusted } from "../prompts.js"
 import { assertTaskChangeRecord } from "../../phase3/soc2.js"
 import { errMessage, resolveWhen } from "./util.js"
@@ -136,11 +137,9 @@ const HANDLERS = {
             if (!canTransition(task.status, a.status))
                 throw new Error(`cannot go from ${task.status} to ${a.status}`)
             if (a.status === "done") {
-                const open = openDeliverables(task)
-                if (open.length)
-                    throw new Error(
-                        `deliverables not merged: ${open.map((d) => `${d.repo}@${d.branch}`).join(", ")}`
-                    )
+                const blockers = doneBlockers(task)
+                if (blockers)
+                    throw new Error(`deliverables not done: ${blockers}`)
                 // SOC2 areas: 409 change_record_missing without What / Why /
                 // Risk / Rollback / Tested in the artifact.
                 await assertTaskChangeRecord(ctx.store, task)

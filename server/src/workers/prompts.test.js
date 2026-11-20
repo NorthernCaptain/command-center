@@ -201,12 +201,12 @@ test("cleanupStartPrompt: clean-up only, then the action", () => {
 
 test("clean / send / resume prompts", () => {
     expect(cleanPrompt({ task })).toBe(
-        "Clean: follow tree AGENTS.md §6 for slug k7q2."
+        "Clean: follow tree AGENTS.md §6 for slug k7q2. Delete in the foreground (never as a background command) and report only once the folders are gone: the workspace closes when you go idle without them."
     )
     // a cancelled task: forced, its work is dropped
     const forced = cleanPrompt({ task: { ...task, status: "cancelled" } })
     expect(forced).toMatch(/^T-123 was cancelled: stop any work on it\. /)
-    expect(forced).toContain("Clean: follow tree AGENTS.md §6 for slug k7q2.")
+    expect(forced).toContain(cleanPrompt({ task }))
     expect(forced).toContain(
         "even if they have uncommitted or unpushed changes"
     )

@@ -20,5 +20,5 @@ test("re-exports the herdr bridge API", () => {
         expect(typeof herdr[name]).toBe("function")
     expect(herdr.HERDR_PROTOCOL).toBe(22)
     expect(herdr.DEFAULT_SOCKET_PATH).toBe("~/.config/herdr/herdr.sock")
-    expect(herdr.SESSION_KINDS).toEqual(["claude", "codex"])
+    expect(herdr.SESSION_KINDS).toEqual(["claude", "klaude", "codex"])
 })

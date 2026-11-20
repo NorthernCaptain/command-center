@@ -14,6 +14,7 @@ import {
     extractUrl,
     firstLine,
     mapError,
+    droppedDeliverables,
     normalizeRepos,
     parseTaskId,
     validateTaskPatch,
@@ -2336,6 +2337,81 @@ describe("repos: list and PATCH validation", () => {
             patch: { repos: [] },
         })
         expect(cleared.body.task.repos).toEqual([])
+    })
+
+    test("PATCH repos: a removed repo's deliverable without a PR is dropped", async () => {
+        const h = withRepos({ list: () => table })
+        const pending = (repo) => ({
+            repo,
+            branch: "t1-x",
+            role: "work",
+            created_at: "2026-11-17T10:00:00.000Z",
+            disposition: "pending",
+            pr: null,
+            claimed_at: null,
+            merged_at: null,
+        })
+        const withPr = {
+            ...pending("web-trace"),
+            disposition: "pr",
+            pr: "https://github.com/acme/web-trace/pull/3",
+        }
+        await h.store.updateTask(
+            1,
+            {
+                repos: [
+                    { name: "aws-batch", role: "main" },
+                    { name: "web-trace", role: "ref" },
+                ],
+                deliverables: [pending("aws-batch"), withPr],
+            },
+            { actor: "me" }
+        )
+        // a ref repo with a PR taken off: the PR stays
+        const res = await bearer(request(h.local).patch("/api/tasks/1")).send({
+            patch: { repos: [{ name: "AWS-Batch", role: "main" }] },
+        })
+        expect(res.status).toBe(200)
+        expect(res.body.task.deliverables).toEqual([
+            pending("aws-batch"),
+            withPr,
+        ])
+        const dropEvents = () =>
+            h.store.calls
+                .filter((c) => c[0] === "appendEvent")
+                .map((c) => c[2])
+                .filter((e) => e.type === "deliverable_dropped")
+                .map((e) => e.data)
+        expect(dropEvents()).toEqual([])
+        const off = await bearer(request(h.local).patch("/api/tasks/1")).send({
+            patch: { repos: [{ name: "web-trace", role: "main" }] },
+        })
+        expect(off.status).toBe(200)
+        // the repo taken off: its pending deliverable goes
+        expect(off.body.task.deliverables).toEqual([withPr])
+        expect(dropEvents()).toEqual([
+            { repo: "aws-batch", reason: "repo removed" },
+        ])
+        // the drop writes the deliverables read: pinned to that revision
+        const writes = h.store.calls.filter((c) => c[0] === "updateTask")
+        expect(writes.at(-1)[3].baseRevision).toEqual(expect.any(String))
+        expect(writes.at(-2)[3].baseRevision).toBeUndefined()
+    })
+
+    test("droppedDeliverables: only pending ones of removed repos", () => {
+        const before = {
+            repos: [{ name: "a" }, { name: "B" }],
+            deliverables: [
+                { repo: "a", disposition: "pending", pr: null },
+                { repo: "b", disposition: "pending", pr: null },
+                { repo: "b", disposition: "no_change", pr: null },
+                { repo: "c", disposition: "pending", pr: null },
+            ],
+        }
+        expect(droppedDeliverables(before, [{ name: "A" }])).toEqual([
+            { repo: "b", disposition: "pending", pr: null },
+        ])
+        expect(droppedDeliverables({}, [])).toEqual([])
     })
 
     test("normalizeRepos without a table keeps names as typed", () => {

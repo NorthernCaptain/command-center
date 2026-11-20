@@ -5,10 +5,14 @@
 
 import { useEffect, useState } from "react"
 import { api as defaultApi } from "../lib/api.js"
-import { SETTINGS_DEFAULTS, WORKER_KINDS } from "../lib/constants.js"
+import {
+    AGENT_KIND_LABELS,
+    SETTINGS_DEFAULTS,
+    WORKER_KINDS,
+} from "../lib/constants.js"
 import { useKnownRepos } from "./RepoPicker.jsx"
 
-export const WORKER_KIND_LABELS = { claude: "Claude", codex: "Codex" }
+export const WORKER_KIND_LABELS = AGENT_KIND_LABELS
 
 /** workers.default_kind from a flat or nested settings object. */
 export function defaultKindOf(settings) {

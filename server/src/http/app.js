@@ -199,6 +199,22 @@ export function validateTaskPatch(raw) {
 }
 
 /**
+ * Deliverables a repos change leaves without a reason: pending ones (no PR
+ * yet) of repos the change takes off the task. A deliverable with a PR,
+ * merged or no_change stays (history, or a PR still to follow).
+ */
+export function droppedDeliverables(before, repos) {
+    const key = (s) => String(s || "").toLowerCase()
+    const kept = new Set((repos || []).map((r) => key(r.name)))
+    const removed = new Set(
+        (before.repos || []).map((r) => key(r.name)).filter((n) => !kept.has(n))
+    )
+    return (before.deliverables || []).filter(
+        (d) => removed.has(key(d.repo)) && d.disposition === "pending" && !d.pr
+    )
+}
+
+/**
  * Task repos from a PATCH: names resolved against the known repo table
  * (case-insensitive, canonical spelling; unknown names are a 400 when the
  * table is available), duplicates dropped, at most one "main".
@@ -873,13 +889,39 @@ export function createApp({
             // A new due date (or a task turned into a reminder) moves its
             // due-date reminder.
             const dueChange = "due_at" in patch || patch.kind === "reminder"
-            const before = dueChange ? (await store.getTask(id)).task : null
+            const read =
+                dueChange || patch.repos ? await store.getTask(id) : null
+            const before = read ? read.task : null
+            // a repo taken off the task: its deliverable that still waits
+            // for a PR goes too (Leo corrected a wrong repo)
+            const dropped = patch.repos
+                ? droppedDeliverables(before, patch.repos)
+                : []
+            if (dropped.length)
+                patch.deliverables = before.deliverables.filter(
+                    (d) => !dropped.includes(d)
+                )
             result = await store.updateTask(id, patch, {
                 actor: ACTOR,
-                baseRevision: body.base_revision,
+                // the deliverables written are the ones read: a change made
+                // since (a writer outside this lock) is a 409, not lost
+                baseRevision:
+                    body.base_revision ||
+                    (dropped.length ? read.revision : undefined),
             })
+            // still inside the task lock (the one cc_report's markNoChange
+            // takes): the deliverable and its drop event change together
+            for (const d of dropped)
+                await store.appendEvent(
+                    id,
+                    {
+                        type: "deliverable_dropped",
+                        data: { repo: d.repo, reason: "repo removed" },
+                    },
+                    ACTOR
+                )
             if (
-                before &&
+                dueChange &&
                 (before.due_at !== result.task.due_at ||
                     before.kind !== result.task.kind)
             ) {

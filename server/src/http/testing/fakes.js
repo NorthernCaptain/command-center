@@ -157,6 +157,11 @@ export function createFakeStore({ bus, clock }) {
         async listFeedback() {
             return []
         },
+        async appendEvent(id, event, actor) {
+            get(id)
+            store.calls.push(["appendEvent", id, event, actor])
+            return { ...event, actor, at: clock.now().toISOString() }
+        },
         async listEvents(id, opts) {
             return [{ type: "created", id, opts }]
         },

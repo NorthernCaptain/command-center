@@ -2023,6 +2023,68 @@ describe("Task page: worker flow (phase 2)", () => {
         })
     })
 
+    it("deliverables: manual ones are added, checked off and removed", async () => {
+        const manual = [
+            {
+                id: "m1",
+                text: "Install on the farm",
+                created_at: "2026-11-07T09:00:00.000Z",
+                done_at: null,
+            },
+        ]
+        let adds = 0
+        const f = await setupWorker(
+            {
+                "POST /api/tasks/12/manual-deliverables": () =>
+                    ++adds === 1
+                        ? reply(409, { message: "T-12 is done" })
+                        : { task: sampleTask({ status: "pr_feedback" }) },
+                "PATCH /api/tasks/12/manual-deliverables/m1": {
+                    task: sampleTask({ status: "pr_feedback" }),
+                },
+                "DELETE /api/tasks/12/manual-deliverables/m1": {},
+            },
+            workerResponse({}, { manual_deliverables: manual })
+        )
+        // the open one counts on the tab
+        expect(tab("Deliverables")).toHaveTextContent(/\d$/)
+        fireEvent.click(tab("Deliverables"))
+        fireEvent.click(
+            screen.getByRole("checkbox", { name: "Install on the farm" })
+        )
+        await waitFor(() =>
+            expect(
+                f.find("PATCH", "/api/tasks/12/manual-deliverables/m1")
+            ).toHaveLength(1)
+        )
+        expect(
+            f.find("PATCH", "/api/tasks/12/manual-deliverables/m1")[0].body
+        ).toEqual({ done: true })
+        const remove = screen.getByRole("button", {
+            name: "Remove Install on the farm",
+        })
+        await waitFor(() => expect(remove).not.toBeDisabled())
+        fireEvent.click(remove)
+        expect(
+            await screen.findByText("Manual deliverable removed")
+        ).toBeInTheDocument()
+
+        const input = screen.getByLabelText("Manual deliverable")
+        fireEvent.change(input, { target: { value: "Tell QA" } })
+        const add = screen.getByRole("button", { name: "Add" })
+        await waitFor(() => expect(add).not.toBeDisabled())
+        fireEvent.click(add)
+        expect(await screen.findByText("T-12 is done")).toBeInTheDocument()
+        await waitFor(() => expect(add).not.toBeDisabled())
+        fireEvent.click(add)
+        expect(
+            await screen.findByText("Manual deliverable added")
+        ).toBeInTheDocument()
+        expect(
+            f.find("POST", "/api/tasks/12/manual-deliverables")[1].body
+        ).toEqual({ text: "Tell QA" })
+    })
+
     it("deliverables: no change errors and claims without a reason", async () => {
         await setupWorker({
             "POST /api/tasks/12/deliverables/web-app": reply(409, {

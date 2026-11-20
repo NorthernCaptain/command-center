@@ -44,6 +44,26 @@ describe("StartAgent", () => {
         expect(api.getSettings).not.toHaveBeenCalled()
     })
 
+    it("offers the second Claude account (Klaude)", async () => {
+        const onStart = jest.fn(async () => {})
+        render(
+            <StartAgent
+                task={withRepo({ worker_kind: "klaude" })}
+                onStart={onStart}
+                api={settingsApi({})}
+            />
+        )
+        expect(
+            screen.getByRole("option", { name: "Klaude" })
+        ).toBeInTheDocument()
+        fireEvent.click(
+            screen.getByRole("button", { name: "Start with Klaude" })
+        )
+        await waitFor(() =>
+            expect(onStart).toHaveBeenCalledWith("klaude", null)
+        )
+    })
+
     it("falls back to the settings default, and the user can pick", async () => {
         const api = settingsApi({ "workers.default_kind": "codex" })
         const onStart = jest.fn(async () => {})

@@ -57,6 +57,13 @@ export function defaultConfig({ home = os.homedir(), root = REPO_ROOT } = {}) {
             claudeConfigPath: path.join(home, ".claude.json"),
             serverName: null,
         },
+        // per agent kind: the env of its herdr workspace (docs/04). klaude
+        // is Claude Code signed in with a second account (its own config dir)
+        agents: {
+            klaude: {
+                env: { CLAUDE_CONFIG_DIR: path.join(home, ".claude-klaude") },
+            },
+        },
         // where worker agents check out repos (AGENTS.md lives there)
         treeDir: path.join(home, "work", "tree"),
         center: {
