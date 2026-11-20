@@ -13,6 +13,13 @@
 // the X-CC-Review header of a PR review agent (cc_review_report), agent the
 // X-CC-Agent header. The actor is "agent:<name>" from the header, else the
 // task's live session name, else "agent:unknown".
+//
+// Scope: an agent works on its own task and may also read and change the
+// other tasks of its family (same root of the parent chain: its parent,
+// siblings, spin-offs): cc_get_task, cc_update_task, cc_update_artifact,
+// cc_log_decision, cc_add_link (not folders / branches), cc_remove_link,
+// cc_remove_pr, cc_send_message. cc_report, cc_feedback, cc_schedule and
+// cc_attach_file stay on its own task.
 
 import { z } from "zod"
 import { REVIEW_VERDICTS } from "../contracts/reviews.js"
@@ -45,6 +52,7 @@ import {
     ValidationError,
 } from "../util/errors.js"
 import { systemClock } from "../util/clock.js"
+import { agentMessagePrompt } from "../workers/prompts.js"
 import { nullLogger } from "../util/logger.js"
 
 const TaskIdSchema = z
@@ -61,6 +69,9 @@ const SHA_RE = /^[0-9a-f]{7,40}$/i
 const ISO_RE =
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/
 const AGENT_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
+const CLOSED = ["done", "cancelled"]
+// at most this much of a message goes into the receiving agent's prompt
+const MAX_MESSAGE = 8000
 
 /** zod input schemas, one per tool (also used for the MCP tool listing). */
 export const TOOL_SCHEMAS = {
@@ -155,6 +166,28 @@ export const TOOL_SCHEMAS = {
         ),
         label: z.string().trim().min(1).max(200).optional(),
     }),
+    cc_update_task: z.object({
+        task_id: TaskIdSchema,
+        title: text(300).describe("New task title"),
+    }),
+    cc_remove_link: z
+        .object({
+            task_id: TaskIdSchema,
+            link_id: z.string().trim().min(1).max(100).optional(),
+            url: z.string().trim().min(1).max(2000).optional(),
+        })
+        .refine((v) => Boolean(v.link_id || v.url), {
+            message: "link_id or url is required",
+        }),
+    cc_remove_pr: z.object({
+        task_id: TaskIdSchema,
+        url: text(2000).describe("GitHub PR URL registered on the task"),
+        reason: z.string().trim().max(1000).optional(),
+    }),
+    cc_send_message: z.object({
+        task_id: TaskIdSchema.describe("The task whose agent gets the message"),
+        message: text(MAX_MESSAGE),
+    }),
     cc_review_report: z.object({
         review_id: z
             .union([z.number().int().positive(), z.string().regex(/^\d{1,9}$/)])
@@ -175,13 +208,21 @@ export const TOOL_NAMES = Object.keys(TOOL_SCHEMAS)
 
 export const TOOL_DESCRIPTIONS = {
     cc_get_task:
-        "Task brief: task (repos, branch, slug, status), artifact + revision, open comments, links, deliverables, open PR feedback items, Asana URL, attached files (with their local path).",
+        "Task brief: task (repos, branch, slug, status), artifact + revision, open comments, links, deliverables, open PR feedback items, Asana URL, attached files (with their local path). Your task or any task of its family (parent, siblings, spin-offs).",
+    cc_update_task:
+        "Rename a task (yours or one of its family) when its goal changed. The goal itself (Summary, Acceptance, Plan) is in the artifact: change it with cc_update_artifact.",
     cc_update_artifact:
-        "Replace or append one artifact section. replace requires base_revision (stale_revision returns the current revision and content); append may omit it.",
+        "Replace or append one artifact section, on your task or one of its family (e.g. Summary / Acceptance when the goal got broader or narrower, or the parent's Progress). replace requires base_revision (stale_revision returns the current revision and content); append may omit it.",
     cc_log_decision:
-        'Append "date · author · decision · rationale" to the Decisions section.',
+        'Append "date · author · decision · rationale" to the Decisions section (your task or one of its family).',
     cc_add_link:
-        "Register a folder (role ref|work; work adds a deliverable), branch (with repo; checked for uniqueness before you create it), PR (claimed against the task), or doc link.",
+        "Register a folder (role ref|work; work adds a deliverable), branch (with repo; checked for uniqueness before you create it), PR (claimed against the task), or doc link. Folders and branches: your own task only; PRs and other links: any task of its family.",
+    cc_remove_link:
+        "Remove a link (by link_id from cc_get_task, or url) from your task or one of its family (branch and folder links: your own task only). Not for PRs (cc_remove_pr), parent / spin-off links (cc_reparent_task), attachments, work folders or a deliverable's branch.",
+    cc_remove_pr:
+        "Take a PR off a task (yours or one of its family) that it does not belong to: its deliverable goes back to waiting for a PR (or goes, if it was a follow-up), its open feedback items are dropped. A merged PR stays. Register it on the right task with cc_add_link(type=pr).",
+    cc_send_message:
+        "Send a message to the agent of another task of your family (e.g. tell the parent about an important change, or a sibling what to do now that the logic changed). It is delivered to that agent (relaunched if it was closed) and shown on that task; a task with no agent yet keeps it as an open comment for when one starts. The receiver can answer with cc_send_message.",
     cc_report:
         "Report status: ready_for_pr (requires work_repos), review (non-code result), blocked, or progress. The summary is appended to Progress. With review or ready_for_pr, no_change_repos marks deliverables that need no change (so the task can close without a PR there).",
     cc_feedback:
@@ -343,14 +384,29 @@ export function createAgentTools({
      * touch any.
      */
     async function checkFamily(taskId, ctx) {
-        const caller = callerOf(ctx)
+        let caller
+        try {
+            caller = callerOf(ctx)
+        } catch {
+            // a malformed X-CC-Task names no task: never the owner
+            checkCaller(taskId, ctx)
+        }
         if (caller === null || caller === taskId) return
+        const missing = (err) =>
+            err instanceof NotFoundError || (err && err.status === 404)
         // an unknown caller task has no family: always a mismatch
         const callerRoot = await rootOf(caller).catch((err) => {
-            if (err instanceof NotFoundError) return null
+            if (missing(err)) return null
             throw err
         })
-        if ((await rootOf(taskId)) === callerRoot) return
+        const root =
+            callerRoot === null
+                ? null
+                : await rootOf(taskId).catch((err) => {
+                      if (missing(err)) return undefined
+                      throw err
+                  })
+        if (callerRoot !== null && root === callerRoot) return
         throw new AppError(
             "wrong_task",
             `${taskKey(taskId)} is not in ${taskKey(caller)}'s task family`,
@@ -405,13 +461,18 @@ export function createAgentTools({
         return "agent:unknown"
     }
 
-    /** Validate, check the caller, load the task, resolve the actor. */
-    async function begin(name, args, ctx) {
+    /**
+     * Validate, check the caller, load the task, resolve the actor.
+     * family: any task of the caller's family (else only its own task); the
+     * actor is the calling agent, looked up on its own task.
+     */
+    async function begin(name, args, ctx, { family = false } = {}) {
         const a = validate(TOOL_SCHEMAS[name], args)
         const taskId = toTaskId(a.task_id)
-        checkCaller(taskId, ctx)
+        if (family) await checkFamily(taskId, ctx)
+        else checkCaller(taskId, ctx)
         const cur = await store.getTask(taskId)
-        const actor = await resolveActor(taskId, ctx)
+        const actor = await resolveActor(callerOf(ctx) ?? taskId, ctx)
         return { a, taskId, task: cur.task, actor }
     }
 
@@ -482,7 +543,9 @@ export function createAgentTools({
     // ---- tools ----------------------------------------------------------
 
     async function cc_get_task(args, ctx = {}) {
-        const { taskId, task } = await begin("cc_get_task", args, ctx)
+        const { taskId, task } = await begin("cc_get_task", args, ctx, {
+            family: true,
+        })
         const [artifact, comments, feedback] = await Promise.all([
             store.getArtifact(taskId),
             store.listComments(taskId),
@@ -524,7 +587,8 @@ export function createAgentTools({
         const { a, taskId, actor } = await begin(
             "cc_update_artifact",
             args,
-            ctx
+            ctx,
+            { family: true }
         )
         if (a.op === "replace" && !a.base_revision)
             throw new ValidationError(
@@ -562,7 +626,9 @@ export function createAgentTools({
     }
 
     async function cc_log_decision(args, ctx = {}) {
-        const { a, taskId, actor } = await begin("cc_log_decision", args, ctx)
+        const { a, taskId, actor } = await begin("cc_log_decision", args, ctx, {
+            family: true,
+        })
         const line = `- ${today()} · ${actor} · ${oneLine(a.decision)} · ${oneLine(a.rationale)}`
         const res = await appendSection(taskId, "Decisions", line, actor)
         return { revision: res.revision, line }
@@ -892,7 +958,11 @@ export function createAgentTools({
     }
 
     async function cc_add_link(args, ctx = {}) {
-        const { a, taskId, actor } = await begin("cc_add_link", args, ctx)
+        const { a, taskId, actor } = await begin("cc_add_link", args, ctx, {
+            family: true,
+        })
+        // folders and branches are where this agent works: its own task
+        if (a.type === "branch" || a.type === "folder") checkCaller(taskId, ctx)
         if (a.type === "branch") return addBranch(a, taskId, actor)
         if (a.type === "folder") return addFolder(a, taskId, actor)
         if (a.type === "pr") {
@@ -1413,6 +1483,199 @@ export function createAgentTools({
         }
     }
 
+    async function cc_update_task(args, ctx = {}) {
+        const { a, taskId, actor } = await begin("cc_update_task", args, ctx, {
+            family: true,
+        })
+        const title = oneLine(a.title)
+        return locked(taskId, async () => {
+            const { task } = await store.getTask(taskId)
+            if (task.title === title) return { ok: true, task, changed: false }
+            const res = await store.updateTask(
+                taskId,
+                { title },
+                { actor, reason: "renamed by agent" }
+            )
+            await store.appendEvent(
+                taskId,
+                { type: "renamed", data: { from: task.title, to: title } },
+                actor
+            )
+            return { ok: true, task: res.task, changed: true }
+        })
+    }
+
+    /** Why a link can't go through cc_remove_link, or null. */
+    function protectedLink(l, task) {
+        if (l.type === "file")
+            return "an attachment: Leo removes it in the Files tab"
+        if (l.type === "pr") return "a PR: use cc_remove_pr"
+        if (isParentLink(l) || l.role === SPIN_OFF_ROLE)
+            return "a parent / spin-off link: use cc_reparent_task"
+        if (l.type === "folder" && l.role === "work")
+            return "a work folder (a deliverable): report the repo in no_change_repos instead"
+        if (
+            l.type === "branch" &&
+            (task.deliverables || []).some(
+                (d) => d.branch === l.url && d.disposition !== "no_change"
+            )
+        )
+            return "the branch of a deliverable"
+        return null
+    }
+
+    async function cc_remove_link(args, ctx = {}) {
+        const { a, taskId, actor } = await begin("cc_remove_link", args, ctx, {
+            family: true,
+        })
+        return locked(taskId, async () => {
+            const { task } = await store.getTask(taskId)
+            const links = task.links || []
+            const hit = links.filter(
+                (l) =>
+                    (a.link_id && l.id === a.link_id) ||
+                    (a.url && l.url === a.url)
+            )
+            // branches and folders are where a task's agent works (a
+            // branch link reserves the name): like adding, own task only
+            if (hit.some((l) => l.type === "branch" || l.type === "folder"))
+                checkCaller(taskId, ctx)
+            if (!hit.length)
+                throw new NotFoundError(
+                    `link ${a.link_id || a.url} on ${taskKey(taskId)}`
+                )
+            const refused = hit
+                .map((l) => [l, protectedLink(l, task)])
+                .filter(([, why]) => why)
+            if (refused.length)
+                throw new AppError(
+                    "protected_link",
+                    `not removed: ${refused.map(([l, why]) => `${l.url} is ${why}`).join("; ")}`,
+                    { status: 409 }
+                )
+            await store.updateTask(
+                taskId,
+                { links: links.filter((l) => !hit.includes(l)) },
+                {
+                    actor,
+                    reason: `link removed: ${hit.map((l) => l.url).join(", ")}`,
+                }
+            )
+            return { ok: true, removed: hit }
+        })
+    }
+
+    async function cc_remove_pr(args, ctx = {}) {
+        const { a, taskId, actor } = await begin("cc_remove_pr", args, ctx, {
+            family: true,
+        })
+        if (!prWatcher || typeof prWatcher.unclaim !== "function")
+            throw unavailable("PR watcher")
+        const res = await prWatcher.unclaim(taskId, a.url, { actor })
+        if (res.ok && a.reason)
+            await appendSection(
+                taskId,
+                "Progress",
+                `- ${today()} · ${actor} · PR removed from the task: ${a.url} (${oneLine(a.reason)})`,
+                actor
+            )
+        return res
+    }
+
+    async function cc_send_message(args, ctx = {}) {
+        const { a, taskId, task, actor } = await begin(
+            "cc_send_message",
+            args,
+            ctx,
+            { family: true }
+        )
+        const fromId = callerOf(ctx)
+        if (fromId === taskId)
+            throw new ValidationError(
+                "that is your own task: write to its artifact instead"
+            )
+        if (CLOSED.includes(task.status))
+            throw new AppError(
+                "invalid_state",
+                `${taskKey(taskId)} is ${task.status}: its agent gets no more messages`,
+                { status: 409 }
+            )
+        const from = fromId ? (await store.getTask(fromId)).task : null
+        // no caller: Leo's own tools (cc CLI), not the receiving agent
+        const author = fromId ? actor : "me"
+        const sender = fromId ? actor.replace(/^agent:/, "") : null
+        const comment = await store.appendComment(
+            taskId,
+            {
+                parent_id: null,
+                anchor: null,
+                body: from
+                    ? `Message from the ${taskKey(from.id)} agent (${sender}):\n\n${a.message}`
+                    : `Message from the command center:\n\n${a.message}`,
+                intent: "note",
+                job_id: null,
+            },
+            author
+        )
+        let delivery = { status: "no_agent" }
+        if (!workerService) delivery = { status: "unavailable" }
+        else if (await workerService.agentState(taskId))
+            delivery = await workerService.deliver(
+                taskId,
+                agentMessagePrompt({ task, from, sender, message: a.message }),
+                { reason: "agent_message" }
+            )
+        const status = (delivery && delivery.status) || "unknown"
+        // a sent (or queued) message is with the agent; any other outcome
+        // (no agent yet, failed, uncertain) leaves an open comment the agent
+        // reads in cc_get_task
+        if (status === "sent" || status === "queued")
+            await store.setCommentStatus(
+                taskId,
+                comment.id,
+                {
+                    status: "resolved",
+                    resolution: `sent to the agent (${status})`,
+                },
+                author
+            )
+        await store.appendEvent(
+            taskId,
+            {
+                type: "agent_message",
+                data: {
+                    from_task: fromId,
+                    comment_id: comment.id,
+                    delivery: status,
+                },
+            },
+            author
+        )
+        if (fromId)
+            await store.appendEvent(
+                fromId,
+                {
+                    type: "agent_message_sent",
+                    data: {
+                        to_task: taskId,
+                        comment_id: comment.id,
+                        delivery: status,
+                    },
+                },
+                actor
+            )
+        return {
+            ok: true,
+            comment_id: comment.id,
+            delivery: status,
+            ...(status === "no_agent"
+                ? {
+                      note: `${taskKey(taskId)} has no agent yet: the message stays on the task as an open comment, which its agent reads when Leo starts it.`,
+                  }
+                : {}),
+        }
+    }
+
     async function cc_review_report(args, ctx = {}) {
         const a = validate(TOOL_SCHEMAS.cc_review_report, args)
         if (!reviewService) throw unavailable("PR reviews")
@@ -1448,6 +1711,10 @@ export function createAgentTools({
         cc_create_task: taskOnly(cc_create_task),
         cc_reparent_task: taskOnly(cc_reparent_task),
         cc_attach_file: taskOnly(cc_attach_file),
+        cc_update_task: taskOnly(cc_update_task),
+        cc_remove_link: taskOnly(cc_remove_link),
+        cc_remove_pr: taskOnly(cc_remove_pr),
+        cc_send_message: taskOnly(cc_send_message),
     }
 }
 

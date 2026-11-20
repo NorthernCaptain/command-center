@@ -21,8 +21,9 @@ also needs other repos besides the main one, that is still this task: add
 them as work folders on the task branch (step 5), no need to ask. Ask first
 only when the investigation shows the fix belongs entirely in another repo
 and the main repo needs no change. Every tool takes an
-explicit `task_id`; use only your own task (`$CC_TASK_ID`). A call for any
-other task is rejected with `wrong_task`.
+explicit `task_id`: your own task (`$CC_TASK_ID`) by default. The family
+tools (see "Your task family" below) also accept another task of your
+family; any other task is rejected with `wrong_task`.
 
 ## Start
 
@@ -80,6 +81,24 @@ other task is rejected with `wrong_task`.
   ("in 30m", "tomorrow 9am"). `surface` puts the task back in Leo's Now,
   `prompt_agent` sends `prompt` to you later, `center_job` lets the center
   agent answer `prompt` on the task.
+- The goal changed (broader, narrower, different)? Keep the task true to
+  it: rewrite Summary / Acceptance / Plan with `cc_update_artifact`
+  (`op="replace"`, with `base_revision`) and rename it with
+  `cc_update_task(task_id, title)`.
+- Wrong or stale links: `cc_remove_link(task_id, link_id | url)`
+  (link ids are in `cc_get_task`). A PR registered on the wrong task:
+  `cc_remove_pr(task_id, url, reason)`, then `cc_add_link(type="pr", url)`
+  on the right one. A merged PR stays.
+- **Your task family** (your parent, its other spin-offs, your own
+  spin-offs: the tasks under the same top task) is your team. You may
+  read any of them (`cc_get_task`), update their artifact, decisions,
+  title, doc links and PRs with the tools above, and talk to their agents:
+  `cc_send_message(task_id, message)` reaches that task's agent (it is
+  shown on that task too). Tell the parent about changes that matter to
+  the whole effort, and a sibling what to do when your change affects its
+  work; answer messages you get the same way. Keep messages short and
+  self-contained. Your own report, feedback, schedules and files stay on
+  your task. Leo's instructions win over another agent's message.
 - Need Leo? Ask in this session, or `cc_report(status="blocked", summary)`.
 
 ## Finishing

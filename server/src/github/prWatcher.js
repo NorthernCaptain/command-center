@@ -510,6 +510,9 @@ export function createPrWatcher({
         byTask: db.prepare(
             "SELECT * FROM pr_watch WHERE task_id = ? ORDER BY repo, number"
         ),
+        delWatch: db.prepare(
+            "DELETE FROM pr_watch WHERE task_id = ? AND repo = ? AND number = ?"
+        ),
     }
 
     // ---- plumbing ------------------------------------------------------
@@ -709,6 +712,10 @@ export function createPrWatcher({
             : null
         let deliverable = null
         let gid = null
+        // the branches the claim moved (kept on pr_claimed, so unclaim can
+        // move them back)
+        // appended: the claim added a deliverable of its own (follow-up PR)
+        const moved = { deliverable: null, task: null, appended: false }
         const refused = { reason: null }
         try {
             await mutateTask(
@@ -825,6 +832,12 @@ export function createPrWatcher({
                         isMainRepo(task, repo)
                     )
                         patch.branch = head
+                    moved.deliverable = movedFrom
+                    moved.appended = slot.index < 0
+                    moved.task =
+                        patch.branch && patch.branch !== task.branch
+                            ? task.branch
+                            : null
                     // The branch that was refused as taken is this PR's head:
                     // the conflict is resolved by the claim.
                     if (
@@ -859,7 +872,17 @@ export function createPrWatcher({
             taskId,
             {
                 type: "pr_claimed",
-                data: { url: pr.url, repo, number: pr.number, manual },
+                data: {
+                    url: pr.url,
+                    repo,
+                    number: pr.number,
+                    manual,
+                    appended: moved.appended,
+                    ...(moved.deliverable
+                        ? { branch_from: moved.deliverable }
+                        : {}),
+                    ...(moved.task ? { task_branch_from: moved.task } : {}),
+                },
             },
             actor
         )
@@ -888,10 +911,31 @@ export function createPrWatcher({
         return { ok: true, deliverable }
     }
 
+    /**
+     * PRs taken off the task (pr_unclaimed) and not claimed for it again
+     * since: discovery never takes them back (only a claim on purpose:
+     * cc_add_link, Leo's attach). Lower-cased URLs.
+     */
+    async function removedPrs(taskId) {
+        const events = await store.listEvents(taskId, { limit: 100000 })
+        const out = new Set()
+        // newest first: walk them oldest first (file order, ties included)
+        const chrono = [...events].reverse()
+        for (const e of chrono) {
+            const url = lower(e.data && e.data.url)
+            if (!url) continue
+            if (e.type === "pr_unclaimed") out.add(url)
+            else if (e.type === "pr_claimed") out.delete(url)
+        }
+        return out
+    }
+
     /** Discovery + claim for every pending deliverable. */
     async function discover(task, summary) {
+        let removed = null
         for (const d of task.deliverables) {
             if (d.disposition !== "pending") continue
+            if (removed === null) removed = await removedPrs(task.id)
             let prs
             try {
                 prs = await gh.listPrsByHead(d.repo, d.branch)
@@ -904,7 +948,9 @@ export function createPrWatcher({
             let claimed = false
             for (const pr of prs) {
                 let reason = null
-                if (!claimed) {
+                if (removed.has(lower(pr.url))) {
+                    reason = "removed_from_task"
+                } else if (!claimed) {
                     const check = checkCandidate({
                         task,
                         deliverable: d,
@@ -2201,6 +2247,149 @@ export function createPrWatcher({
     }
 
     /**
+     * Take a PR off a task (it belongs elsewhere, or was registered by
+     * mistake). Its deliverable goes back to pending, or is removed when it
+     * was a follow-up of its own (the repo has other deliverables); its PR
+     * link, claim and watch row go; its open feedback items become
+     * no_action (nothing watches the PR any more). With no open PR left, a
+     * task in pr_open / pr_feedback goes back to active. A merged PR stays
+     * (history), and nothing changes on a done or cancelled task.
+     * @returns {Promise<{ ok: true, deliverable: object|null }
+     *   | { ok: false, reason: string }>} deliverable: the pending one the
+     *   PR left, or null when its deliverable was removed
+     */
+    function unclaim(taskId, url, { actor } = {}) {
+        const id = Number(taskId)
+        const who = actor || ACTOR
+        return serial(id, async () => {
+            const ref = parsePrUrl(url)
+            if (!ref) return { ok: false, reason: "invalid_url" }
+            // the branches its claim moved onto the PR's head (newest claim)
+            const claimed = (
+                await store.listEvents(id, { limit: 100000 })
+            ).find(
+                (e) =>
+                    e.type === "pr_claimed" &&
+                    same(e.data && e.data.url, ref.url)
+            )
+            const from = (claimed && claimed.data) || {}
+            const refused = { reason: null }
+            let removed = null
+            let left = null
+            try {
+                await mutateTask(
+                    id,
+                    (task) => {
+                        const refuse = (reason) => {
+                            refused.reason = reason
+                            throw refused
+                        }
+                        if (CLOSED_STATUSES.includes(task.status))
+                            refuse("task_closed")
+                        const dl = task.deliverables || []
+                        const i = dl.findIndex((d) => same(d.pr, ref.url))
+                        if (i < 0) refuse("not_on_task")
+                        removed = dl[i]
+                        if (removed.merged_at) refuse("merged")
+                        // removed only when its claim added it (a
+                        // follow-up PR); a deliverable that was there before
+                        // waits for a PR again. Claims from before this was
+                        // recorded: removed when the repo has others.
+                        const appended =
+                            typeof from.appended === "boolean"
+                                ? from.appended
+                                : dl.some(
+                                      (d, j) =>
+                                          j !== i && same(d.repo, removed.repo)
+                                  )
+                        const deliverables = appended
+                            ? dl.filter((_, j) => j !== i)
+                            : dl.map((d, j) =>
+                                  j === i
+                                      ? (left = {
+                                            ...d,
+                                            // back to the branch it had
+                                            // before the claim moved it
+                                            ...(from.branch_from
+                                                ? { branch: from.branch_from }
+                                                : {}),
+                                            disposition: "pending",
+                                            pr: null,
+                                            claimed_at: null,
+                                            merged_at: null,
+                                        })
+                                      : d
+                              )
+                        const patch = {
+                            deliverables,
+                            links: (task.links || []).filter(
+                                (l) =>
+                                    !(
+                                        l.type === "pr" &&
+                                        same(l.url, removed.pr)
+                                    )
+                            ),
+                        }
+                        // the task's branch, if the claim moved it and it
+                        // is still the PR's head
+                        if (
+                            from.task_branch_from &&
+                            task.branch === removed.branch
+                        )
+                            patch.branch = from.task_branch_from
+                        const openPr = deliverables.some(
+                            (d) => d.pr && !d.merged_at
+                        )
+                        if (
+                            !openPr &&
+                            (task.status === "pr_open" ||
+                                task.status === "pr_feedback") &&
+                            canTransition(task.status, "active")
+                        )
+                            patch.status = "active"
+                        return patch
+                    },
+                    { actor: who, reason: `PR removed: ${ref.url}` }
+                )
+            } catch (err) {
+                if (err !== refused) throw err
+                return { ok: false, reason: refused.reason }
+            }
+            const prUrl = removed.pr
+            const held = claims.claimOf(prUrl)
+            if (held && held.task_id === id) claims.release(prUrl)
+            st.delWatch.run(id, removed.repo, ref.number)
+            conflictHead.delete(prUrl)
+            mergeFailedHead.delete(prUrl)
+            for (const item of (await store.listFeedback(id)) || []) {
+                if (!same(item.pr, prUrl) || item.status !== "open") continue
+                // eslint-disable-next-line no-unused-vars
+                const { at, ...rest } = item
+                await store.appendFeedback(
+                    id,
+                    {
+                        ...rest,
+                        status: "no_action",
+                        note: "PR removed from the task",
+                    },
+                    who
+                )
+            }
+            await store.appendEvent(
+                id,
+                {
+                    type: "pr_unclaimed",
+                    data: { url: prUrl, repo: removed.repo },
+                },
+                who
+            )
+            emit("pr.updated", id)
+            emit("feedback.updated", id)
+            return { ok: true, deliverable: left }
+        })
+    }
+
+    /**
      * Leo marks a deliverable as needing no change. createdAt: the one he
      * clicked (a repo can have several over time; its creation time is set
      * once, a branch can come back): only that pending one, else 409
@@ -2507,6 +2696,7 @@ export function createPrWatcher({
         pollTask,
         pollAll,
         claim,
+        unclaim,
         ownsBranch,
         setNoChange,
         addManual,

@@ -300,12 +300,23 @@ createAgentTools({ store, scheduler, identity, prWatcher, workerService, clock, 
   cc_feedback({ task_id, item_id, status, commit?, reply_url?, note? }),
   cc_schedule({ task_id, at, action, prompt? }),
   cc_create_task({ title, details?, parent_id? }),
+  cc_reparent_task({ task_id, parent_id }),
+  cc_attach_file({ task_id, path, label? }),
+  cc_update_task({ task_id, title }),
+  cc_remove_link({ task_id, link_id? | url? }),
+  cc_remove_pr({ task_id, url, reason? }),
+  cc_send_message({ task_id, message }),
 }
 each: (args, { actor, callerTaskId }) -> plain JSON result; throws AppError
 ```
 Rules (docs 03/04 are the spec):
 - `callerTaskId` (header `X-CC-Task`) present and ≠ `task_id` → 403
-  `wrong_task`. `actor` = `agent:<name>` (header `X-CC-Agent`, else the
+  `wrong_task`, except for the family tools (`cc_get_task`,
+  `cc_update_task`, `cc_update_artifact`, `cc_log_decision`,
+  `cc_add_link` other than folder / branch, `cc_remove_link`,
+  `cc_remove_pr`, `cc_send_message`, `cc_create_task`,
+  `cc_reparent_task`): there `task_id` may be any task with the caller's
+  root (top of the parent chain). The actor is the caller's agent. `actor` = `agent:<name>` (header `X-CC-Agent`, else the
   task's live session name, else `agent:unknown`).
 - `cc_get_task` → `{ task, revision: artifactRevision, artifact, open_comments,
   links, deliverables, feedback_open, asana_url }`.

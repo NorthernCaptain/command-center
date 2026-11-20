@@ -203,7 +203,7 @@ describe("helpers", () => {
     })
 
     test("a schema per tool", () => {
-        expect(TOOL_NAMES).toHaveLength(11)
+        expect(TOOL_NAMES).toHaveLength(15)
         for (const n of TOOL_NAMES) expect(TOOL_SCHEMAS[n]).toBeTruthy()
         expect(Object.keys(tools).sort()).toEqual([...TOOL_NAMES].sort())
     })
@@ -2548,5 +2548,386 @@ describe("cc_attach_file", () => {
             "validation",
             400
         )
+    })
+})
+
+describe("family tools", () => {
+    let child
+    let other
+    const asChild = () => ({ callerTaskId: `T-${child}` })
+
+    beforeEach(async () => {
+        child = (
+            await tools.cc_create_task(
+                { title: "Child", parent_id: id },
+                { callerTaskId: String(id) }
+            )
+        ).task.id
+        other = await seedTask({ title: "Other", branch: "t9-other" })
+    })
+
+    test("read and write the parent; another family is refused", async () => {
+        const brief = await tools.cc_get_task({ task_id: id }, asChild())
+        expect(brief.task.id).toBe(id)
+        await tools.cc_update_artifact(
+            {
+                task_id: id,
+                section: "Progress",
+                op: "append",
+                content: "- logic changed in the child",
+            },
+            asChild()
+        )
+        expect(await section("Progress")).toMatch(/logic changed in the child/)
+        const d = await tools.cc_log_decision(
+            { task_id: id, decision: "use v2", rationale: "simpler" },
+            asChild()
+        )
+        expect(d.line).toMatch(/agent:t1-fix-upload-retry · use v2/)
+        const link = await tools.cc_add_link(
+            { task_id: id, type: "doc", url: "https://example.com/spec" },
+            asChild()
+        )
+        expect(link.ok).toBe(true)
+        // folders and branches: own task only
+        await expectError(
+            tools.cc_add_link(
+                { task_id: id, type: "folder", url: "/tmp/x", role: "ref" },
+                asChild()
+            ),
+            "wrong_task",
+            403
+        )
+        await expectError(
+            tools.cc_get_task({ task_id: other }, asChild()),
+            "wrong_task",
+            403
+        )
+        await expectError(
+            tools.cc_update_task({ task_id: other, title: "x" }, asChild()),
+            "wrong_task",
+            403
+        )
+        // an unknown caller task has no family
+        await expectError(
+            tools.cc_get_task({ task_id: id }, { callerTaskId: "T-999" }),
+            "wrong_task",
+            403
+        )
+        // own-task tools stay own-task
+        await expectError(
+            tools.cc_report(
+                { task_id: id, status: "progress", summary: "x" },
+                asChild()
+            ),
+            "wrong_task",
+            403
+        )
+    })
+
+    test("cc_update_task renames, once", async () => {
+        const r = await tools.cc_update_task(
+            { task_id: id, title: "  Broader:   upload retry and resume " },
+            asChild()
+        )
+        expect(r).toMatchObject({ ok: true, changed: true })
+        expect((await getTask()).title).toBe("Broader: upload retry and resume")
+        expect((await store.listEvents(id))[0]).toMatchObject({
+            type: "renamed",
+            actor: "agent:t1-fix-upload-retry",
+            data: {
+                from: "Fix upload retry",
+                to: "Broader: upload retry and resume",
+            },
+        })
+        const again = await tools.cc_update_task(
+            { task_id: id, title: "Broader: upload retry and resume" },
+            asChild()
+        )
+        expect(again.changed).toBe(false)
+        await expectError(
+            tools.cc_update_task({ task_id: id }),
+            "validation",
+            400
+        )
+    })
+
+    test("cc_remove_link removes by id or url; protected links stay", async () => {
+        const a = await tools.cc_add_link(
+            { task_id: id, type: "doc", url: "https://example.com/a" },
+            {}
+        )
+        await tools.cc_add_link(
+            { task_id: id, type: "doc", url: "https://example.com/b" },
+            {}
+        )
+        const r1 = await tools.cc_remove_link(
+            { task_id: id, link_id: a.link.id },
+            asChild()
+        )
+        expect(r1.removed.map((l) => l.url)).toEqual(["https://example.com/a"])
+        await tools.cc_remove_link(
+            { task_id: id, url: "https://example.com/b" },
+            asChild()
+        )
+        const urls = (await getTask()).links.map((l) => l.url)
+        expect(urls).not.toContain("https://example.com/a")
+        expect(urls).not.toContain("https://example.com/b")
+        await expectError(
+            tools.cc_remove_link({ task_id: id, url: "https://nope" }, {}),
+            "not_found",
+            404
+        )
+        await expectError(
+            tools.cc_remove_link({ task_id: id }, {}),
+            "validation",
+            400
+        )
+        // the child's parent link: reparent instead
+        await expectError(
+            tools.cc_remove_link(
+                { task_id: child, url: `/t/${id}` },
+                asChild()
+            ),
+            "protected_link",
+            409
+        )
+        const stamp = "2026-11-07T11:00:00.000Z"
+        await store.updateTask(
+            id,
+            {
+                links: [
+                    {
+                        id: "l1",
+                        type: "file",
+                        url: "files/a.png",
+                        label: null,
+                        role: null,
+                        added_by: "me",
+                        at: stamp,
+                    },
+                    {
+                        id: "l2",
+                        type: "pr",
+                        url: PR,
+                        label: null,
+                        role: null,
+                        added_by: "me",
+                        at: stamp,
+                    },
+                    {
+                        id: "l3",
+                        type: "folder",
+                        url: "/w/x",
+                        label: null,
+                        role: "work",
+                        added_by: "me",
+                        at: stamp,
+                    },
+                    {
+                        id: "l4",
+                        type: "branch",
+                        url: BRANCH,
+                        label: null,
+                        role: null,
+                        added_by: "me",
+                        at: stamp,
+                    },
+                    {
+                        id: "l5",
+                        type: "folder",
+                        url: "/w/ref",
+                        label: null,
+                        role: "ref",
+                        added_by: "me",
+                        at: stamp,
+                    },
+                ],
+            },
+            { actor: "me" }
+        )
+        for (const [lid, why] of [
+            ["l1", /attachment/],
+            ["l2", /cc_remove_pr/],
+            ["l3", /work folder/],
+            ["l4", /branch of a deliverable/],
+        ])
+            await expect(
+                tools.cc_remove_link({ task_id: id, link_id: lid }, {})
+            ).rejects.toMatchObject({ code: "protected_link", message: why })
+        // a family member's folder or branch reservation: own task only
+        await store.updateTask(
+            id,
+            {
+                links: [
+                    ...(await getTask()).links,
+                    {
+                        id: "l6",
+                        type: "branch",
+                        url: "t1-spare",
+                        label: "aws-lambda",
+                        role: null,
+                        added_by: "me",
+                        at: stamp,
+                    },
+                ],
+            },
+            { actor: "me" }
+        )
+        for (const lid of ["l5", "l6"])
+            await expectError(
+                tools.cc_remove_link({ task_id: id, link_id: lid }, asChild()),
+                "wrong_task",
+                403
+            )
+        const ok = await tools.cc_remove_link(
+            { task_id: id, link_id: "l5" },
+            {}
+        )
+        expect(ok.ok).toBe(true)
+        const ok6 = await tools.cc_remove_link(
+            { task_id: id, link_id: "l6" },
+            { callerTaskId: String(id) }
+        )
+        expect(ok6.ok).toBe(true)
+    })
+
+    test("cc_remove_pr goes through the watcher; the reason goes to Progress", async () => {
+        deps.prWatcher.unclaim = jest.fn(async () => ({
+            ok: true,
+            deliverable: null,
+        }))
+        const r = await tools.cc_remove_pr(
+            { task_id: id, url: PR, reason: "belongs to T-9" },
+            asChild()
+        )
+        expect(r).toEqual({ ok: true, deliverable: null })
+        expect(deps.prWatcher.unclaim).toHaveBeenCalledWith(id, PR, {
+            actor: "agent:t1-fix-upload-retry",
+        })
+        expect(await section("Progress")).toMatch(
+            /PR removed from the task: .*pull\/812 \(belongs to T-9\)/
+        )
+        deps.prWatcher.unclaim.mockResolvedValueOnce({
+            ok: false,
+            reason: "merged",
+        })
+        expect(
+            await tools.cc_remove_pr({ task_id: id, url: PR, reason: "x" }, {})
+        ).toEqual({ ok: false, reason: "merged" })
+        const bare = createAgentTools(makeDeps({ prWatcher: null }))
+        await expectError(
+            bare.cc_remove_pr({ task_id: id, url: PR }, {}),
+            "unavailable",
+            503
+        )
+    })
+
+    test("cc_send_message delivers to the other agent and records it on both tasks", async () => {
+        deps.workerService.deliver = jest.fn(async () => ({
+            status: "sent",
+            outbox_id: 3,
+        }))
+        const r = await tools.cc_send_message(
+            { task_id: id, message: "The API moved to v2; update the plan." },
+            asChild()
+        )
+        expect(r).toMatchObject({ ok: true, delivery: "sent" })
+        const [tid, prompt, opts] = deps.workerService.deliver.mock.calls[0]
+        expect(tid).toBe(id)
+        expect(opts).toEqual({ reason: "agent_message" })
+        expect(prompt).toMatch(
+            new RegExp(
+                `^Message for T-${id} from the T-${child} agent \\(t1-fix-upload-retry\\), working on "Child"`
+            )
+        )
+        expect(prompt).toMatch(/The API moved to v2; update the plan\./)
+        expect(prompt).toMatch(
+            new RegExp(
+                `reply with cc_send_message\\(task_id=${child}, message\\)`
+            )
+        )
+        const threads = await store.listComments(id)
+        const c = threads.find((t) => t.id === r.comment_id)
+        expect(c).toMatchObject({
+            author: "agent:t1-fix-upload-retry",
+            intent: "note",
+            status: "resolved",
+        })
+        expect(c.body).toMatch(new RegExp(`^Message from the T-${child} agent`))
+        expect((await store.listEvents(id))[0]).toMatchObject({
+            type: "agent_message",
+            data: {
+                from_task: child,
+                comment_id: r.comment_id,
+                delivery: "sent",
+            },
+        })
+        expect((await store.listEvents(child))[0]).toMatchObject({
+            type: "agent_message_sent",
+            data: { to_task: id, delivery: "sent" },
+        })
+    })
+
+    test("cc_send_message: no agent yet, own task, closed task, no worker service, owner", async () => {
+        deps.workerService.agentState = jest.fn(async (tid) =>
+            tid === id ? null : { name: SESSION }
+        )
+        deps.workerService.deliver = jest.fn()
+        const r = await tools.cc_send_message(
+            { task_id: id, message: "heads up" },
+            asChild()
+        )
+        expect(r).toMatchObject({ delivery: "no_agent" })
+        expect(r.note).toMatch(/no agent yet/)
+        expect(deps.workerService.deliver).not.toHaveBeenCalled()
+        const c = (await store.listComments(id)).find(
+            (t) => t.id === r.comment_id
+        )
+        expect(c.status).toBe("open")
+        await expectError(
+            tools.cc_send_message({ task_id: child, message: "x" }, asChild()),
+            "validation",
+            400
+        )
+        await store.updateTask(child, { status: "cancelled" }, { actor: "me" })
+        await expectError(
+            tools.cc_send_message({ task_id: child, message: "x" }, {}),
+            "invalid_state",
+            409
+        )
+        const bare = createAgentTools(makeDeps({ workerService: null }))
+        expect(
+            (await bare.cc_send_message({ task_id: id, message: "x" }, {}))
+                .delivery
+        ).toBe("unavailable")
+        // a failed delivery leaves the note open for the agent to read
+        deps.workerService.agentState = jest.fn(async () => ({ name: SESSION }))
+        deps.workerService.deliver = jest.fn(async () => ({ status: "failed" }))
+        const failed = await tools.cc_send_message(
+            { task_id: id, message: "lost?" },
+            asChild()
+        )
+        expect(failed.delivery).toBe("failed")
+        expect(
+            (await store.listComments(id)).find(
+                (t) => t.id === failed.comment_id
+            ).status
+        ).toBe("open")
+        // the owner (no caller): from the command center, no reply hint
+        deps.workerService.agentState = jest.fn(async () => ({ name: SESSION }))
+        deps.workerService.deliver = jest.fn(async () => ({ status: "queued" }))
+        await tools.cc_send_message(
+            { task_id: id, message: "from Leo's tools" },
+            {}
+        )
+        const prompt = deps.workerService.deliver.mock.calls[0][1]
+        expect(prompt).toMatch(/from the command center/)
+        const owned = (await store.listComments(id)).find((t) =>
+            t.body.includes("from Leo's tools")
+        )
+        expect(owned.author).toBe("me")
+        expect(owned.body).toMatch(/^Message from the command center:/)
+        expect(prompt).not.toMatch(/cc_send_message/)
     })
 })

@@ -254,11 +254,20 @@ installed for both.
 | `cc_create_task(title, details, parent_id?)` | Spin-off work lands in my inbox. `parent_id`: the agent's task (default) or another task of its family. The child gets a `parent` link, the parent a `spin_off` link. |
 | `cc_reparent_task(task_id, parent_id)` | Moves a task under another parent. Both must be in the caller's family (same top of the parent chain); a loop is refused (`cycle`). The old parent loses its `spin_off` link, the new one gets it. The current parent again repairs a missing `spin_off` link. |
 | `cc_attach_file(task_id, path, label?)` | Copies a screenshot, video, report or log into the task ([03 — attachments](03-architecture.md)). Only from the tree folder or a temp folder. |
+| `cc_update_task(task_id, title)` | Renames a task whose goal changed. The goal itself (Summary, Acceptance, Plan) is changed in the artifact with `cc_update_artifact`. Event `renamed`. |
+| `cc_remove_link(task_id, link_id \| url)` | Removes a link (branch and folder links: own task only, as for adding). Refused (`protected_link`, 409) for PRs (`cc_remove_pr`), parent / spin-off links (`cc_reparent_task`), attachments, work folders and a deliverable's branch. |
+| `cc_remove_pr(task_id, url, reason?)` | Takes a PR off a task (`prWatcher.unclaim`): its deliverable goes back to pending on the branch it had before the claim (a follow-up's own deliverable goes), the task branch moves back if the claim moved it, its PR link, claim and watch row go, its open feedback items become `no_action`; with no open PR left, `pr_open` / `pr_feedback` goes back to `active`. A merged PR or a closed task is refused. Event `pr_unclaimed`; `reason` goes to Progress. |
+| `cc_send_message(task_id, message)` | Agent-to-agent message inside a task family: recorded on the receiving task as a note by the sender (and events `agent_message` / `agent_message_sent`) and delivered to its agent through the outbox (a gone agent is relaunched, as for any prompt). A task that never had an agent keeps the note open, so its first agent reads it in `cc_get_task`. Not to the caller's own task, not to a done / cancelled one. |
 
 Every tool takes an explicit `task_id`. The server cross-checks it against
 the calling agent where possible (`CC_TASK_ID` / agent name) to catch
-wrong-task writes. `cc_create_task` and `cc_reparent_task` may touch other
-tasks of the caller's family (parents and spin-offs). Task links are not
+wrong-task writes. An agent may read and change the other tasks of its
+family (same top of the parent chain: parent, siblings, spin-offs) with
+`cc_get_task`, `cc_update_task`, `cc_update_artifact`, `cc_log_decision`,
+`cc_add_link` (not folders or branches), `cc_remove_link`, `cc_remove_pr`,
+`cc_send_message`, `cc_create_task` and `cc_reparent_task`, so the agents
+of an umbrella task and its sub-tasks work as a group. `cc_report`,
+`cc_feedback`, `cc_schedule` and `cc_attach_file` stay on its own task. Task links are not
 shown to viewers. The `cc` CLI wraps the same endpoints for codex agents,
 hooks and my shell.
 

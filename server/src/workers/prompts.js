@@ -105,6 +105,9 @@ function protocolRules(task) {
         '- Progress → cc_update_artifact(section="Progress"); decisions → cc_log_decision.',
         "- Register folders (with role ref/work), branches and PRs with cc_add_link.",
         '  A ref repo that needs changes along with the main one: re-register it with role="work".',
+        "- Goal changed? Update Summary/Acceptance/Plan (cc_update_artifact) and the title (cc_update_task).",
+        "  Your task family (parent, siblings, spin-offs) is your team: read and update their tasks, and",
+        "  message their agents with cc_send_message(task_id, message) when your work changes theirs.",
         "- When done with code: tests pass + request_review GOOD_TO_GO in every work folder + changes staged →",
         '  cc_report(status="ready_for_pr", summary, work_repos=[...], checks). Then stop and wait.',
         "- No commit/push/PR until I ask (I'll ask through this session). Exception, standing",
@@ -263,6 +266,25 @@ export function sendToAgentPrompt({ task, quote, comment }) {
     return q
         ? `Re T-${task.id} artifact, about '${q}': ${text}`
         : `Re T-${task.id}: ${text}`
+}
+
+/**
+ * A message from another task's agent of the same family (cc_send_message).
+ * from: the sending task (null when Leo's tooling sent it), sender: its
+ * agent name.
+ */
+export function agentMessagePrompt({ task, from, sender, message }) {
+    const who = from
+        ? `the T-${from.id} agent${sender ? ` (${sender})` : ""}, working on "${oneLine(from.title, 200)}"`
+        : "the command center"
+    const reply = from
+        ? ` If it needs an answer, reply with cc_send_message(task_id=${from.id}, message).`
+        : ""
+    return [
+        `Message for T-${task.id} from ${who}, in your task family:`,
+        String(message ?? "").trim(),
+        `Take it into account for your task: update the artifact (cc_update_artifact) if it changes the goal or plan.${reply} Leo's own instructions win over it; if they conflict, ask Leo.`,
+    ].join("\n\n")
 }
 
 /**
